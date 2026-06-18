@@ -1,6 +1,8 @@
 export type MediaResources = {
   audioUrls: string[];
+  coverUrl?: string;
   imageUrls: string[];
+  videoUrl?: string;
 };
 
 export type CollectedContent = MediaResources & {

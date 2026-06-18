@@ -8,10 +8,13 @@ import {
   CheckCircle2,
   Check,
   Copy,
+  Download,
   ExternalLink,
   Image as ImageIcon,
   Link2,
   Loader2,
+  Music2,
+  Play,
   ScrollText,
 } from "lucide-react";
 import {
@@ -26,8 +29,11 @@ import {
   type ExtractResponse,
   type ExtractionFeature,
   type ExtractionResult,
+  type MediaAsset,
+  type MediaAssetKind,
   type ResolvedDouyinWork,
 } from "@/types/douyin";
+import { buildMediaDownloadPath, canDownloadAsset } from "@/lib/douyin/download";
 import { cn } from "@/lib/utils";
 
 type ApiError = {
@@ -42,11 +48,22 @@ const KIND_LABELS: Record<DouyinKind, string> = {
 };
 
 const FEATURE_ICONS: Record<ExtractionFeature, typeof Captions> = {
+  cover: ImageIcon,
   caption: Captions,
   transcript: AudioLines,
   imageContent: ImageIcon,
   articleText: ScrollText,
 };
+
+const DOWNLOAD_ACTIONS: Array<{
+  asset: MediaAssetKind;
+  icon: typeof Download;
+  label: string;
+}> = [
+  { asset: "cover", icon: ImageIcon, label: "下载封面" },
+  { asset: "video", icon: Play, label: "下载视频" },
+  { asset: "audio", icon: Music2, label: "下载配音" },
+];
 
 export default function HomePage() {
   const [input, setInput] = useState("");
@@ -124,6 +141,7 @@ export default function HomePage() {
       return;
     }
 
+    const orderedFeatures = availableFeatures.filter((feature) => selected.includes(feature));
     setIsExtracting(true);
     setError(null);
     setResults([]);
@@ -132,7 +150,7 @@ export default function HomePage() {
       const response = await fetch("/api/douyin/extract", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input: normalizedInput, features: selected }),
+        body: JSON.stringify({ input: normalizedInput, features: orderedFeatures }),
       });
       const payload = (await response.json()) as ExtractResponse | ApiError;
 
@@ -142,7 +160,7 @@ export default function HomePage() {
 
       setLastResolvedInput(normalizedInput);
       setWork(payload.work);
-      setResults(payload.results);
+      setResults(orderResults(payload.results, orderedFeatures));
     } catch (extractError) {
       setError(extractError instanceof Error ? extractError.message : "提取失败。");
     } finally {
@@ -159,7 +177,7 @@ export default function HomePage() {
     setSelected((current) =>
       current.includes(feature)
         ? current.filter((item) => item !== feature)
-        : [...current, feature],
+        : availableFeatures.filter((item) => item === feature || current.includes(item)),
     );
   }
 
@@ -210,29 +228,32 @@ export default function HomePage() {
           )}
         >
           {activeKind ? (
-            <dl className="mb-4 grid items-start gap-x-5 gap-y-4 border-b border-white/10 pb-4 text-left text-sm md:grid-cols-[10rem_14rem_minmax(0,1fr)]">
-              <InfoRow label="作品类型" value={KIND_LABELS[activeKind]} />
-              <InfoRow
-                label="作者"
-                value={displayWork?.authorName ?? "未识别"}
-                href={displayWork?.authorUrl}
-              />
-              <InfoRow
-                label="作品链接"
-                value={displayWork?.finalUrl ?? "未识别"}
-                href={displayWork?.finalUrl}
-                compact
-              />
-            </dl>
+            <div className="mb-4 border-b border-white/10 pb-4">
+              <dl className="grid items-start gap-x-5 gap-y-4 text-left text-sm md:grid-cols-[10rem_14rem_minmax(0,1fr)]">
+                <InfoRow label="作品类型" value={KIND_LABELS[activeKind]} />
+                <InfoRow
+                  label="作者"
+                  value={displayWork?.authorName ?? "未识别"}
+                  href={displayWork?.authorUrl}
+                />
+                <InfoRow
+                  label="作品链接"
+                  value={displayWork?.finalUrl ?? "未识别"}
+                  href={displayWork?.finalUrl}
+                  compact
+                />
+              </dl>
+              {displayWork ? <WorkDownloadActions work={displayWork} /> : null}
+            </div>
           ) : null}
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             {activeKind ? (
               availableFeatures.map((feature) => (
                 <FeatureToggle
                   key={feature}
                   feature={feature}
-                  label={getFeatureLabel(feature, activeKind)}
+                  label={`提取${getFeatureLabel(feature, activeKind)}`}
                   checked={selected.includes(feature)}
                   onToggle={() => toggleFeature(feature)}
                 />
@@ -311,10 +332,10 @@ function EmptyResults({ isExtracting }: { isExtracting: boolean }) {
       </div>
       <div className="empty-result-copy text-center" aria-live="polite">
         <div className="text-sm font-semibold text-foreground">
-          {isExtracting ? "正在生成结果" : "等待内容输出"}
+          {isExtracting ? "正在生成结果" : "等待提取"}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          {isExtracting ? "正在整理可复制的文本内容。" : "解析后的文本会在这里展开。"}
+          {isExtracting ? "正在整理可复制的文本内容。" : "提取后的内容会在这里展开"}
         </p>
       </div>
     </div>
@@ -418,6 +439,53 @@ function InfoRow({
   );
 }
 
+function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
+  const actions = DOWNLOAD_ACTIONS.filter((action) => canDownloadAsset(work.kind, action.asset));
+
+  return (
+    <div className="mt-4 flex flex-nowrap items-center gap-5 overflow-x-auto whitespace-nowrap pb-1">
+      {actions.map((action) => (
+        <DownloadLink
+          key={action.asset}
+          href={buildMediaDownloadPath(work, action.asset)}
+          icon={action.icon}
+          label={action.label}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DownloadLink({
+  href,
+  icon: Icon,
+  label,
+}: {
+  href: string;
+  icon: typeof Download;
+  label: string;
+}) {
+  return (
+    <a
+      href={href}
+      className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-1 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.98]"
+    >
+      <Icon className="size-4" aria-hidden="true" />
+      {label}
+    </a>
+  );
+}
+
+function orderResults(
+  results: ExtractionResult[],
+  orderedFeatures: ExtractionFeature[],
+): ExtractionResult[] {
+  return [...results].sort(
+    (first, second) =>
+      orderedFeatures.indexOf(first.feature) - orderedFeatures.indexOf(second.feature),
+  );
+}
+
 function ResultBlock({ result }: { result: ExtractionResult }) {
   const ok = result.status === "success";
   const [copied, setCopied] = useState(false);
@@ -455,12 +523,98 @@ function ResultBlock({ result }: { result: ExtractionResult }) {
             <ContentText text={result.content} />
           </div>
         </div>
+      ) : result.assets?.length ? (
+        <MediaAssetPanel assets={result.assets} />
       ) : (
         <p className="flex min-h-24 items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
           {result.detail ?? "没有返回内容。"}
         </p>
       )}
     </article>
+  );
+}
+
+function MediaAssetPanel({ assets }: { assets: MediaAsset[] }) {
+  const coverAsset = assets.find((asset) => asset.kind === "cover");
+
+  if (coverAsset) {
+    return <CoverAssetPanel asset={coverAsset} />;
+  }
+
+  return (
+    <div className="rounded-md border border-white/[0.16] bg-background/70 p-4">
+      <div className="flex flex-wrap gap-2">
+        {assets.map((asset) => (
+          <DownloadLink
+            key={`${asset.kind}-${asset.url}`}
+            href={asset.url}
+            icon={Download}
+            label={asset.label}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CoverAssetPanel({ asset }: { asset: MediaAsset }) {
+  const [copied, setCopied] = useState(false);
+  const imageUrl = asset.previewUrl ?? asset.url;
+
+  async function copyCover() {
+    try {
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      if (blob.type.startsWith("image/") && "ClipboardItem" in window) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            [blob.type]: blob,
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(new URL(asset.url, window.location.origin).toString());
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      await navigator.clipboard.writeText(new URL(asset.url, window.location.origin).toString());
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    }
+  }
+
+  return (
+    <div className="w-full max-w-[34rem] overflow-hidden rounded-md border border-white/[0.16] bg-background/70 p-3">
+      <div className="relative overflow-hidden rounded-md bg-black/20">
+        <Image
+          src={imageUrl}
+          alt="封面预览"
+          width={900}
+          height={506}
+          unoptimized
+          className="h-auto w-full object-cover"
+        />
+        <div className="absolute right-2 top-2 flex gap-1.5">
+          <a
+            href={asset.url}
+            className="inline-flex size-8 items-center justify-center rounded-md bg-black/45 text-white/85 backdrop-blur transition hover:bg-cyan/20 hover:text-cyan active:scale-[0.94]"
+            aria-label="下载封面"
+            title="下载封面"
+          >
+            <Download className="size-4" aria-hidden="true" />
+          </a>
+          <button
+            type="button"
+            onClick={() => void copyCover()}
+            className="inline-flex size-8 items-center justify-center rounded-md bg-black/45 text-white/85 backdrop-blur transition hover:bg-amber/20 hover:text-amber active:scale-[0.94]"
+            aria-label={copied ? "已复制封面" : "复制封面"}
+            title={copied ? "已复制" : "复制封面"}
+          >
+            {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

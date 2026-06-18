@@ -13,7 +13,11 @@ type DouyinDetailPayload = {
       secUid?: unknown;
     };
     caption?: unknown;
+    desc?: unknown;
     images?: unknown;
+    item_title?: unknown;
+    itemTitle?: unknown;
+    music?: unknown;
     preview_title?: unknown;
     previewTitle?: unknown;
     share_info?: {
@@ -28,9 +32,11 @@ export type DouyinWorkMetadata = {
   authorUrl?: string;
   articleText?: string;
   caption?: string;
+  coverUrl?: string;
   title?: string;
   imageUrls?: string[];
   audioUrls?: string[];
+  videoUrl?: string;
 };
 
 export async function collectWorkMetadata(
@@ -76,9 +82,11 @@ export function parseWorkMetadata(
     authorUrl: buildAuthorUrl(secUid, workId),
     articleText: readArticleText(detail.article_info?.article_content),
     caption: readCaption(detail, kind),
+    coverUrl: readCoverUrl(detail, kind),
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
-    audioUrls: readAudioUrls(detail.video),
+    audioUrls: readAudioUrls(detail.video, detail.music),
     imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
+    videoUrl: kind === "video" ? readVideoUrl(detail.video) : undefined,
   };
 }
 
@@ -123,7 +131,28 @@ function readCaption(
     return cleanText(stripSharePrefix(readString(detail.share_info?.share_desc_info)));
   }
 
-  return cleanText(readString(detail.caption));
+  return readBestCaption([
+    readString(detail.caption),
+    readString(detail.desc),
+    readString(detail.preview_title) ?? readString(detail.previewTitle),
+    readString(detail.item_title) ?? readString(detail.itemTitle),
+  ]);
+}
+
+function readBestCaption(values: Array<string | undefined>): string | undefined {
+  return values
+    .map((value) => cleanText(value))
+    .filter((value): value is string => Boolean(value))
+    .filter((value) => !isOutdatedClientNotice(value))
+    .sort((left, right) => captionScore(right) - captionScore(left))[0];
+}
+
+function captionScore(value: string): number {
+  return value.replace(/#[\p{L}\p{N}_-]+/gu, "").trim().length * 10 + value.length;
+}
+
+function isOutdatedClientNotice(value: string): boolean {
+  return value.includes("版本过低") && value.includes("升级后可展示全部信息");
 }
 
 function parseArticleContent(value: unknown): { markdown?: string; long_article_abstract?: string } | null {
@@ -189,13 +218,83 @@ function readPrimaryImageUrl(record: Record<string, unknown>): string | undefine
   );
 }
 
-function readAudioUrls(value: unknown): string[] {
+function readCoverUrl(
+  detail: NonNullable<DouyinDetailPayload["aweme_detail"]>,
+  kind: DouyinKind | undefined,
+): string | undefined {
+  const video = detail.video && typeof detail.video === "object"
+    ? detail.video as Record<string, unknown>
+    : null;
+
+  return (
+    readCoverFromVideo(video) ??
+    (kind === "note" ? readImageUrls(detail.images)[0] : undefined)
+  );
+}
+
+function readCoverFromVideo(video: Record<string, unknown> | null): string | undefined {
+  if (!video) {
+    return undefined;
+  }
+
+  return (
+    readUrlList(video.cover)[0] ??
+    readUrlList(video.origin_cover ?? video.originCover)[0] ??
+    readUrlList(video.dynamic_cover ?? video.dynamicCover)[0]
+  );
+}
+
+function readAudioUrls(videoValue: unknown, musicValue: unknown): string[] {
+  const video = videoValue && typeof videoValue === "object"
+    ? videoValue as Record<string, unknown>
+    : null;
+  const music = musicValue && typeof musicValue === "object"
+    ? musicValue as Record<string, unknown>
+    : null;
+
+  return uniqueMediaReferences([
+    ...readBitRateAudioUrls(video?.bit_rate_audio ?? video?.bitRateAudio),
+    readUrlList(music?.play_url ?? music?.playUrl)[0],
+  ].filter((url): url is string => Boolean(url))).slice(0, 1);
+}
+
+function readVideoUrl(value: unknown): string | undefined {
   if (!value || typeof value !== "object") {
-    return [];
+    return undefined;
   }
 
   const video = value as Record<string, unknown>;
-  return uniqueMediaReferences(readBitRateAudioUrls(video.bit_rate_audio ?? video.bitRateAudio)).slice(0, 1);
+  return uniqueMediaReferences([
+    readBitRateVideoUrl(video.bit_rate ?? video.bitRate),
+    readUrlList(video.play_addr ?? video.playAddr)[0],
+    readUrlList(video.download_addr ?? video.downloadAddr)[0],
+  ].filter((url): url is string => Boolean(url))).slice(0, 1)[0];
+}
+
+function readBitRateVideoUrl(value: unknown): string | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const selected = value
+    .flatMap((item) => {
+      if (!item || typeof item !== "object") {
+        return [];
+      }
+
+      const record = item as Record<string, unknown>;
+      const urls = readUrlList(record.play_addr ?? record.playAddr);
+      const bitRate = readNumber(record.bit_rate ?? record.bitRate) ?? 0;
+      const playAddr = record.play_addr ?? record.playAddr;
+      const width = readNestedNumber(playAddr, "width") ?? 0;
+      const height = readNestedNumber(playAddr, "height") ?? 0;
+      return urls.length > 0
+        ? [{ bitRate, pixels: width * height, urls }]
+        : [];
+    })
+    .sort((left, right) => right.pixels - left.pixels || right.bitRate - left.bitRate)[0];
+
+  return selected?.urls[0];
 }
 
 function readBitRateAudioUrls(value: unknown): string[] {
@@ -218,7 +317,7 @@ function readBitRateAudioUrls(value: unknown): string[] {
         ? [{ quality, bitRate, urls }]
         : [];
     })
-    .sort((left, right) => right.quality - left.quality || right.bitRate - left.bitRate)[0];
+    .sort((left, right) => right.bitRate - left.bitRate || right.quality - left.quality)[0];
 
   return selected?.urls.slice(0, 1) ?? [];
 }

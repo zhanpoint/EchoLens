@@ -36,3 +36,9 @@ npm run lint
 npm test
 npm run build
 ```
+
+## 部署
+
+项目包含 GitHub Actions 自动部署流程：推送 `master` 分支后，CI 会先执行类型检查、Lint、测试和生产构建，再构建 Docker 镜像推送到 GHCR，最后通过 SSH 在服务器上用 Docker Compose 更新容器。
+
+部署配置和服务器初始化步骤见 [`deploy/README.md`](deploy/README.md)。

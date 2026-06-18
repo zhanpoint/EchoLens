@@ -1,5 +1,7 @@
 export const DOUYIN_KINDS = ["video", "note", "article"] as const;
+export const MEDIA_ASSET_KINDS = ["cover", "video", "audio"] as const;
 export const EXTRACTION_FEATURES = [
+  "cover",
   "caption",
   "transcript",
   "imageContent",
@@ -13,7 +15,15 @@ export type ExtractionStatus =
   | "unavailable"
   | "not_configured"
   | "error";
-export type ExtractionSource = "detail" | "public" | "openrouter";
+export type ExtractionSource = "detail" | "openrouter";
+export type MediaAssetKind = (typeof MEDIA_ASSET_KINDS)[number];
+
+export type MediaAsset = {
+  kind: MediaAssetKind;
+  label: string;
+  previewUrl?: string;
+  url: string;
+};
 
 export type ResolvedDouyinWork = {
   inputUrl: string;
@@ -30,6 +40,7 @@ export type ExtractionResult = {
   status: ExtractionStatus;
   source?: ExtractionSource;
   content?: string;
+  assets?: MediaAsset[];
   detail?: string;
 };
 
@@ -39,12 +50,13 @@ export type ExtractResponse = {
 };
 
 export const FEATURES_BY_KIND: Record<DouyinKind, ExtractionFeature[]> = {
-  video: ["caption", "transcript"],
-  note: ["caption", "imageContent"],
-  article: ["caption", "articleText"],
+  video: ["cover", "caption", "transcript"],
+  note: ["cover", "caption", "imageContent"],
+  article: ["cover", "caption", "articleText"],
 };
 
 export const FEATURE_LABELS: Record<ExtractionFeature, string> = {
+  cover: "封面",
   caption: "文案",
   transcript: "转录文本",
   imageContent: "图片文字",
@@ -56,10 +68,10 @@ export function getFeatureLabel(feature: ExtractionFeature, kind?: DouyinKind): 
     return "文案";
   }
   if (kind === "video" && feature === "transcript") {
-    return "转录文本";
+    return "视频配音转录文本";
   }
   if (kind === "article" && feature === "caption") {
-    return "文章标题";
+    return "标题";
   }
   return FEATURE_LABELS[feature];
 }

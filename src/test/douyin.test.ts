@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAuthorUrl, parseWorkMetadata } from "../lib/douyin/detail";
+import { buildMediaDownloadPath, canDownloadAsset } from "../lib/douyin/download";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
 
@@ -41,13 +42,14 @@ describe("douyin url utilities", () => {
   });
 
   it("keeps feature availability strict per work type", () => {
-    expect(FEATURES_BY_KIND.video).toEqual(["caption", "transcript"]);
-    expect(FEATURES_BY_KIND.note).toEqual(["caption", "imageContent"]);
-    expect(FEATURES_BY_KIND.article).toEqual(["caption", "articleText"]);
-    expect(getFeatureLabel("caption", "article")).toBe("文章标题");
+    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "transcript"]);
+    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "imageContent"]);
+    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText"]);
+    expect(getFeatureLabel("cover", "video")).toBe("封面");
+    expect(getFeatureLabel("caption", "article")).toBe("标题");
     expect(getFeatureLabel("caption", "note")).toBe("文案");
     expect(getFeatureLabel("caption", "video")).toBe("文案");
-    expect(getFeatureLabel("transcript", "video")).toBe("转录文本");
+    expect(getFeatureLabel("transcript", "video")).toBe("视频配音转录文本");
   });
 
   it("builds a douyin author url from sec_uid and work id", () => {
@@ -78,13 +80,51 @@ describe("douyin url utilities", () => {
     });
   });
 
+  it("reads cover urls for all work types", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            video: {
+              cover: {
+                url_list: ["https://example.com/video-cover.jpeg"],
+              },
+            },
+          },
+        },
+        "7649250336875613449",
+        "video",
+      ),
+    ).toMatchObject({
+      coverUrl: "https://example.com/video-cover.jpeg",
+    });
+
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            images: [
+              {
+                url_list: ["https://example.com/note-first-image.webp"],
+              },
+            ],
+          },
+        },
+        "7643144296615218021",
+        "note",
+      ),
+    ).toMatchObject({
+      coverUrl: "https://example.com/note-first-image.webp",
+    });
+  });
+
   it("parses article markdown text from douyin detail payloads", () => {
     expect(
       parseWorkMetadata(
         {
           aweme_detail: {
             caption: "公开描述",
-            preview_title: "文章标题",
+            preview_title: "标题",
             article_info: {
               article_content: JSON.stringify({
                 markdown:
@@ -97,7 +137,7 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       caption: "公开描述",
-      title: "文章标题",
+      title: "标题",
       articleText: "第一段正文\n二级标题\n第二段正文",
       audioUrls: [],
       imageUrls: [],
@@ -117,6 +157,24 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       caption: "完整视频文案\n#AIAgent",
+    });
+  });
+
+  it("uses complete video description when caption only contains hashtags", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            caption: "#奥利塞 #姆巴佩 #法国队 #世界杯",
+            desc: "足坛顶级情商！奥利塞教科书式的赛场分寸感 #奥利塞 #姆巴佩 #法国队 #世界杯",
+            preview_title: "足坛顶级情商！奥利塞教科书式的赛场分寸感 #奥利塞 #姆巴佩 #法国队 #世界杯",
+          },
+        },
+        "7649250336875613449",
+        "video",
+      ),
+    ).toMatchObject({
+      caption: "足坛顶级情商！奥利塞教科书式的赛场分寸感 #奥利塞 #姆巴佩 #法国队 #世界杯",
     });
   });
 
@@ -248,5 +306,122 @@ describe("douyin url utilities", () => {
       audioUrls: ["https://example.com/high-audio.m4a"],
       imageUrls: [],
     });
+  });
+
+  it("reads music play url as the audio asset for note and article works", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            music: {
+              play_url: {
+                url_list: [
+                  "https://sf11-cdn-tos.douyinstatic.com/obj/audio-main",
+                  "https://sf6-cdn-tos.douyinstatic.com/obj/audio-backup",
+                ],
+              },
+            },
+          },
+        },
+        "7643144296615218021",
+        "note",
+      ),
+    ).toMatchObject({
+      audioUrls: ["https://sf11-cdn-tos.douyinstatic.com/obj/audio-main"],
+    });
+  });
+
+  it("prefers the highest bitrate audio asset without trying backup urls", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            video: {
+              bit_rate_audio: [
+                {
+                  audio_quality: 9,
+                  audio_meta: {
+                    bitrate: 48000,
+                    url_list: {
+                      main_url: "https://example.com/lower-bitrate.m4a",
+                    },
+                  },
+                },
+                {
+                  audio_quality: 5,
+                  audio_meta: {
+                    bitrate: 96000,
+                    url_list: {
+                      main_url: "https://example.com/highest-bitrate.m4a",
+                      backup_url: "https://example.com/highest-bitrate-backup.m4a",
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+        "7646726820692547263",
+        "video",
+      ),
+    ).toMatchObject({
+      audioUrls: ["https://example.com/highest-bitrate.m4a"],
+    });
+  });
+
+  it("locks one high-quality primary video url from douyin detail payloads", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            video: {
+              play_addr: {
+                url_list: ["https://example.com/fallback-video.mp4"],
+              },
+              bit_rate: [
+                {
+                  bit_rate: 800,
+                  play_addr: {
+                    height: 720,
+                    width: 1280,
+                    url_list: ["https://example.com/720p-video.mp4"],
+                  },
+                },
+                {
+                  bit_rate: 1600,
+                  play_addr: {
+                    height: 1080,
+                    width: 1920,
+                    url_list: ["https://example.com/1080p-video.mp4"],
+                  },
+                },
+              ],
+            },
+          },
+        },
+        "7649250336875613449",
+        "video",
+      ),
+    ).toMatchObject({
+      videoUrl: "https://example.com/1080p-video.mp4",
+    });
+  });
+
+  it("builds canonical media download paths", () => {
+    const work = {
+      id: "7649250336875613449",
+      kind: "video" as const,
+    };
+
+    expect(buildMediaDownloadPath(work, "audio")).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=audio",
+    );
+    expect(buildMediaDownloadPath(work, "cover", { preview: true })).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=cover&preview=1",
+    );
+    expect(canDownloadAsset("note", "cover")).toBe(true);
+    expect(canDownloadAsset("note", "audio")).toBe(true);
+    expect(canDownloadAsset("article", "audio")).toBe(true);
+    expect(canDownloadAsset("article", "video")).toBe(false);
   });
 });

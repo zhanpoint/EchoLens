@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
+import { buildMediaDownloadPath } from "@/lib/douyin/download";
 import type { CollectedContent } from "@/lib/douyin/media";
 import { DouyinResolveError, resolveDouyinInput } from "@/lib/douyin/url";
 import { identifyImageContent, transcribeMedia } from "@/lib/openrouter/provider";
 import {
+  EXTRACTION_FEATURES,
   FEATURES_BY_KIND,
   getFeatureLabel,
   type DouyinKind,
@@ -18,9 +20,9 @@ export const maxDuration = 120;
 const ExtractSchema = z.object({
   input: z.string().min(1).max(5000),
   features: z
-    .array(z.enum(["caption", "transcript", "imageContent", "articleText"]))
+    .array(z.enum(EXTRACTION_FEATURES))
     .min(1)
-    .max(2),
+    .max(3),
 });
 
 export async function POST(request: Request) {
@@ -43,10 +45,12 @@ export async function POST(request: Request) {
       caption: work.kind === "article" ? metadata?.title : metadata?.caption,
       articleText: metadata?.articleText,
       audioUrls: metadata?.audioUrls ?? [],
+      coverUrl: metadata?.coverUrl,
       imageUrls: work.kind === "note" ? metadata?.imageUrls ?? [] : [],
+      videoUrl: metadata?.videoUrl,
     };
 
-    const results = await buildResults(features, work.kind, content);
+    const results = await buildResults(features, work, content);
 
     return NextResponse.json({
       work: {
@@ -72,12 +76,17 @@ export async function POST(request: Request) {
 
 async function buildResults(
   features: ExtractionFeature[],
-  kind: DouyinKind,
+  work: { id: string; kind: DouyinKind },
   content: CollectedContent,
 ): Promise<ExtractionResult[]> {
   const results: ExtractionResult[] = [];
+  const kind = work.kind;
 
   for (const feature of features) {
+    if (feature === "cover") {
+      results.push(coverResult(work, content.coverUrl));
+    }
+
     if (feature === "caption") {
       results.push(
         textResult(feature, kind, content.caption, `没有采集到${getFeatureLabel(feature, kind)}。`),
@@ -123,6 +132,33 @@ function textResult(
         label: getFeatureLabel(feature, kind),
         status: "unavailable",
         detail: unavailableDetail,
+      };
+}
+
+function coverResult(
+  work: { id: string; kind: DouyinKind },
+  coverUrl: string | undefined,
+): ExtractionResult {
+  return coverUrl
+    ? {
+        feature: "cover",
+        label: getFeatureLabel("cover", work.kind),
+        status: "success",
+        source: "detail",
+        assets: [
+          {
+            kind: "cover",
+            label: "下载封面",
+            previewUrl: buildMediaDownloadPath(work, "cover", { preview: true }),
+            url: buildMediaDownloadPath(work, "cover"),
+          },
+        ],
+      }
+    : {
+        feature: "cover",
+        label: getFeatureLabel("cover", work.kind),
+        status: "unavailable",
+        detail: "没有采集到封面图片。",
       };
 }
 
