@@ -12,7 +12,10 @@ services:
       PORT: 3000
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
-      - "${ECHOLENS_PORT:-3000}:3000"
+      - target: 3000
+        published: "${ECHOLENS_PORT:-3000}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     read_only: true
     tmpfs:
       - /tmp:mode=1777
