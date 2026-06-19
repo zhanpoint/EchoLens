@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildDouyinWorkUrl, canDownloadAsset } from "@/lib/douyin/download";
+import { normalizeAudioToWav } from "@/lib/media/audio";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
@@ -24,7 +25,8 @@ const MEDIA_DOMAINS = [
 const UPSTREAM_ACCEPT: Record<MediaAssetKind, string> = {
   cover: "image/*,*/*;q=0.8",
   video: "video/mp4,*/*;q=0.8",
-  audio: "audio/*,*/*;q=0.8",
+  originalAudio: "video/mp4,*/*;q=0.8",
+  dubbedAudio: "audio/*,*/*;q=0.8",
 };
 
 export async function GET(request: Request) {
@@ -40,7 +42,7 @@ export async function GET(request: Request) {
   }
 
   const { id, kind, asset } = parsed.data;
-  const isPreview = asset === "cover" && url.searchParams.get("preview") === "1";
+  const isPreview = url.searchParams.get("preview") === "1";
   if (!canDownloadAsset(kind, asset)) {
     return NextResponse.json({ error: "当前作品类型不支持该下载资源。" }, { status: 400 });
   }
@@ -54,6 +56,16 @@ export async function GET(request: Request) {
   }
   if (!isAllowedMediaUrl(assetUrl)) {
     return NextResponse.json({ error: "资源地址不在允许的下载域名内。" }, { status: 400 });
+  }
+  if (asset === "originalAudio") {
+    const audio = await normalizeAudioToWav(assetUrl);
+    return new Response(toArrayBuffer(audio), {
+      headers: {
+        "content-type": "audio/wav",
+        "content-disposition": `${isPreview ? "inline" : "attachment"}; filename="${buildFilename(id, asset, "audio/wav")}"`,
+        "cache-control": "no-store",
+      },
+    });
   }
 
   const upstream = await fetch(assetUrl, {
@@ -84,6 +96,10 @@ export async function GET(request: Request) {
   return new Response(upstream.body, { headers });
 }
 
+function toArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return new Uint8Array(buffer).buffer;
+}
+
 function selectAssetUrl(
   asset: MediaAssetKind,
   metadata: DouyinWorkMetadata,
@@ -91,7 +107,8 @@ function selectAssetUrl(
   return {
     cover: metadata.coverUrl,
     video: metadata.videoUrl,
-    audio: metadata.audioUrls?.[0],
+    originalAudio: metadata.videoUrl,
+    dubbedAudio: metadata.audioUrls?.[0],
   }[asset];
 }
 
@@ -128,18 +145,24 @@ function readExtension(asset: MediaAssetKind, contentType: string): string {
   if (contentType.includes("mpeg")) {
     return "mp3";
   }
+  if (contentType.includes("wav")) {
+    return "wav";
+  }
   if (contentType.includes("mp4")) {
-    return asset === "audio" ? "m4a" : "mp4";
+    return asset === "dubbedAudio" ? "m4a" : "mp4";
   }
 
-  return asset === "cover" ? "jpg" : asset === "audio" ? "m4a" : "mp4";
+  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : asset === "dubbedAudio" ? "m4a" : "mp4";
 }
 
 function defaultContentType(asset: MediaAssetKind): string {
   if (asset === "cover") {
     return "image/jpeg";
   }
-  if (asset === "audio") {
+  if (asset === "originalAudio") {
+    return "audio/wav";
+  }
+  if (asset === "dubbedAudio") {
     return "audio/mp4";
   }
   return "video/mp4";

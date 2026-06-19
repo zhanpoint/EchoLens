@@ -23,5 +23,5 @@ export function buildDouyinWorkUrl(kind: DouyinKind, id: string): string {
 }
 
 export function canDownloadAsset(kind: DouyinKind, asset: MediaAssetKind): boolean {
-  return asset !== "video" || kind === "video";
+  return (asset !== "video" && asset !== "originalAudio") || kind === "video";
 }

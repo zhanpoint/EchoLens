@@ -1,9 +1,10 @@
 export const DOUYIN_KINDS = ["video", "note", "article"] as const;
-export const MEDIA_ASSET_KINDS = ["cover", "video", "audio"] as const;
+export const MEDIA_ASSET_KINDS = ["cover", "video", "originalAudio", "dubbedAudio"] as const;
 export const EXTRACTION_FEATURES = [
   "cover",
   "caption",
-  "transcript",
+  "originalTranscript",
+  "dubbedTranscript",
   "imageContent",
   "articleText",
 ] as const;
@@ -50,15 +51,16 @@ export type ExtractResponse = {
 };
 
 export const FEATURES_BY_KIND: Record<DouyinKind, ExtractionFeature[]> = {
-  video: ["cover", "caption", "transcript"],
-  note: ["cover", "caption", "imageContent"],
-  article: ["cover", "caption", "articleText"],
+  video: ["cover", "caption", "originalTranscript", "dubbedTranscript"],
+  note: ["cover", "caption", "dubbedTranscript", "imageContent"],
+  article: ["cover", "caption", "articleText", "dubbedTranscript"],
 };
 
 export const FEATURE_LABELS: Record<ExtractionFeature, string> = {
   cover: "封面",
   caption: "文案",
-  transcript: "转录文本",
+  originalTranscript: "原声文本",
+  dubbedTranscript: "配音文本",
   imageContent: "图片文字",
   articleText: "文章内容",
 };
@@ -67,8 +69,11 @@ export function getFeatureLabel(feature: ExtractionFeature, kind?: DouyinKind): 
   if (kind === "video" && feature === "caption") {
     return "文案";
   }
-  if (kind === "video" && feature === "transcript") {
-    return "视频配音转录文本";
+  if (kind === "video" && feature === "originalTranscript") {
+    return "视频原声文本";
+  }
+  if (feature === "dubbedTranscript") {
+    return "配音文本";
   }
   if (kind === "article" && feature === "caption") {
     return "标题";

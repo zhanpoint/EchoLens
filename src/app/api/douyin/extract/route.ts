@@ -4,7 +4,7 @@ import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildMediaDownloadPath } from "@/lib/douyin/download";
 import type { CollectedContent } from "@/lib/douyin/media";
 import { DouyinResolveError, resolveDouyinInput } from "@/lib/douyin/url";
-import { identifyImageContent, transcribeMedia } from "@/lib/openrouter/provider";
+import { identifyImageContent, transcribeMediaSource } from "@/lib/openrouter/provider";
 import {
   EXTRACTION_FEATURES,
   FEATURES_BY_KIND,
@@ -22,7 +22,7 @@ const ExtractSchema = z.object({
   features: z
     .array(z.enum(EXTRACTION_FEATURES))
     .min(1)
-    .max(3),
+    .max(EXTRACTION_FEATURES.length),
 });
 
 export async function POST(request: Request) {
@@ -104,8 +104,13 @@ async function buildResults(
       results.push(providerResult(feature, kind, modelResult));
     }
 
-    if (feature === "transcript") {
-      const modelResult = await transcribeMedia(content);
+    if (feature === "originalTranscript") {
+      const modelResult = await transcribeMediaSource(content.videoUrl);
+      results.push(providerResult(feature, kind, modelResult));
+    }
+
+    if (feature === "dubbedTranscript") {
+      const modelResult = await transcribeMediaSource(content.audioUrls[0]);
       results.push(providerResult(feature, kind, modelResult));
     }
   }

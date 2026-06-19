@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
 import { buildAuthorUrl, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset } from "../lib/douyin/download";
+import { normalizeAudioToWav, resolveBundledFfmpegPath } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
-import { FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
+import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -42,14 +47,16 @@ describe("douyin url utilities", () => {
   });
 
   it("keeps feature availability strict per work type", () => {
-    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "transcript"]);
-    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "imageContent"]);
-    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText"]);
+    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "originalTranscript", "dubbedTranscript"]);
+    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "dubbedTranscript", "imageContent"]);
+    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText", "dubbedTranscript"]);
     expect(getFeatureLabel("cover", "video")).toBe("封面");
     expect(getFeatureLabel("caption", "article")).toBe("标题");
     expect(getFeatureLabel("caption", "note")).toBe("文案");
     expect(getFeatureLabel("caption", "video")).toBe("文案");
-    expect(getFeatureLabel("transcript", "video")).toBe("视频配音转录文本");
+    expect(getFeatureLabel("originalTranscript", "video")).toBe("视频原声文本");
+    expect(getFeatureLabel("dubbedTranscript", "video")).toBe("配音文本");
+    expect(FEATURES_BY_KIND.video.length).toBeLessThanOrEqual(EXTRACTION_FEATURES.length);
   });
 
   it("builds a douyin author url from sec_uid and work id", () => {
@@ -413,15 +420,126 @@ describe("douyin url utilities", () => {
       kind: "video" as const,
     };
 
-    expect(buildMediaDownloadPath(work, "audio")).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=audio",
+    expect(buildMediaDownloadPath(work, "originalAudio")).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio",
+    );
+    expect(buildMediaDownloadPath(work, "dubbedAudio")).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=dubbedAudio",
     );
     expect(buildMediaDownloadPath(work, "cover", { preview: true })).toBe(
       "/api/douyin/download?id=7649250336875613449&kind=video&asset=cover&preview=1",
     );
+    expect(buildMediaDownloadPath(work, "video", { preview: true })).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=video&preview=1",
+    );
+    expect(buildMediaDownloadPath(work, "originalAudio", { preview: true })).toBe(
+      "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio&preview=1",
+    );
     expect(canDownloadAsset("note", "cover")).toBe(true);
-    expect(canDownloadAsset("note", "audio")).toBe(true);
-    expect(canDownloadAsset("article", "audio")).toBe(true);
+    expect(canDownloadAsset("note", "dubbedAudio")).toBe(true);
+    expect(canDownloadAsset("article", "dubbedAudio")).toBe(true);
+    expect(canDownloadAsset("note", "originalAudio")).toBe(false);
     expect(canDownloadAsset("article", "video")).toBe(false);
   });
 });
+
+describe("audio transcription preparation", () => {
+  it("uses the bundled ffmpeg package", () => {
+    expect(resolveBundledFfmpegPath()).toContain(path.join("node_modules", "@ffmpeg-installer"));
+  });
+
+  it("downloads remote media before handing local files to ffmpeg", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
+    const wavPath = path.join(tempDir, "tone.wav");
+    const ffmpegPath = path.join(
+      process.cwd(),
+      "node_modules",
+      "@ffmpeg-installer",
+      `${process.platform}-${process.arch}`,
+      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+    );
+
+    try {
+      await runFfmpeg(ffmpegPath, [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=0.1",
+        wavPath,
+      ]);
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(await fs.readFile(wavPath), {
+          headers: {
+            "content-length": String((await fs.stat(wavPath)).size),
+          },
+        }),
+      );
+
+      const output = await normalizeAudioToWav("https://example.com/video.mp4");
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "https://example.com/video.mp4",
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            referer: "https://www.douyin.com/",
+          }),
+        }),
+      );
+      expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
+      expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes non-MP4 audio containers through ffmpeg probing", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
+    const wavPath = path.join(tempDir, "tone.wav");
+    const ffmpegPath = path.join(
+      process.cwd(),
+      "node_modules",
+      "@ffmpeg-installer",
+      `${process.platform}-${process.arch}`,
+      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+    );
+
+    try {
+      await runFfmpeg(ffmpegPath, [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=0.1",
+        wavPath,
+      ]);
+
+      const output = await normalizeAudioToWav(await fs.readFile(wavPath));
+
+      expect(output.byteLength).toBeGreaterThan(0);
+      expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
+      expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+async function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
+  const stderr: string[] = [];
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.join("").slice(-600)));
+    });
+  });
+}

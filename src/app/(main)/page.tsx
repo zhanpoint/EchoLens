@@ -9,6 +9,7 @@ import {
   Check,
   Copy,
   Download,
+  Eye,
   ExternalLink,
   Image as ImageIcon,
   Link2,
@@ -16,6 +17,7 @@ import {
   Music2,
   Play,
   ScrollText,
+  X,
 } from "lucide-react";
 import {
   type FormEvent,
@@ -50,7 +52,8 @@ const KIND_LABELS: Record<DouyinKind, string> = {
 const FEATURE_ICONS: Record<ExtractionFeature, typeof Captions> = {
   cover: ImageIcon,
   caption: Captions,
-  transcript: AudioLines,
+  originalTranscript: AudioLines,
+  dubbedTranscript: Music2,
   imageContent: ImageIcon,
   articleText: ScrollText,
 };
@@ -59,10 +62,12 @@ const DOWNLOAD_ACTIONS: Array<{
   asset: MediaAssetKind;
   icon: typeof Download;
   label: string;
+  previewLabel: string;
 }> = [
-  { asset: "cover", icon: ImageIcon, label: "下载封面" },
-  { asset: "video", icon: Play, label: "下载视频" },
-  { asset: "audio", icon: Music2, label: "下载配音" },
+  { asset: "cover", icon: ImageIcon, label: "下载封面", previewLabel: "预览封面" },
+  { asset: "video", icon: Play, label: "下载视频", previewLabel: "观看视频" },
+  { asset: "originalAudio", icon: AudioLines, label: "下载原声", previewLabel: "试听原声" },
+  { asset: "dubbedAudio", icon: Music2, label: "下载配音", previewLabel: "试听配音" },
 ];
 
 export default function HomePage() {
@@ -247,7 +252,12 @@ export default function HomePage() {
             </div>
           ) : null}
 
-          <div className="grid gap-3 md:grid-cols-3">
+          <div
+            className={cn(
+              "grid gap-3",
+              activeKind ? "md:grid-cols-4" : "md:grid-cols-3",
+            )}
+          >
             {activeKind ? (
               availableFeatures.map((feature) => (
                 <FeatureToggle
@@ -259,7 +269,7 @@ export default function HomePage() {
                 />
               ))
             ) : (
-              <div className="relative z-10 flex min-h-36 flex-col items-center justify-center gap-2 p-6 text-center md:col-span-2">
+              <div className="relative z-10 flex min-h-36 flex-col items-center justify-center gap-2 p-6 text-center md:col-span-3">
                 <div className="text-base font-semibold text-foreground">
                   {isResolving ? "正在识别作品" : "等待作品链接"}
                 </div>
@@ -441,38 +451,132 @@ function InfoRow({
 
 function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
   const actions = DOWNLOAD_ACTIONS.filter((action) => canDownloadAsset(work.kind, action.asset));
+  const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
 
   return (
-    <div className="mt-4 flex flex-nowrap items-center gap-5 overflow-x-auto whitespace-nowrap pb-1">
-      {actions.map((action) => (
-        <DownloadLink
-          key={action.asset}
-          href={buildMediaDownloadPath(work, action.asset)}
-          icon={action.icon}
-          label={action.label}
+    <>
+      <div className="mt-4 grid gap-2 pb-1 md:flex md:flex-wrap md:items-center md:gap-3">
+        {actions.map((action) => {
+          const href = buildMediaDownloadPath(work, action.asset);
+          const assetLabel = action.label.replace("下载", "");
+
+          return (
+            <div
+              key={action.asset}
+              className="flex h-12 w-full items-center gap-2 rounded-md border border-cyan/20 bg-cyan/[0.035] px-2.5 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] md:w-auto md:flex-none"
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-cyan/20 bg-black/20 text-cyan">
+                  <action.icon className="size-4" aria-hidden="true" />
+                </span>
+                <span className="truncate text-sm font-semibold text-foreground">{assetLabel}</span>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setPreview(action)}
+                  className="inline-flex size-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:border-cyan/30 hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.96]"
+                  aria-label={action.previewLabel}
+                  title={action.previewLabel}
+                >
+                  <Eye className="size-4" aria-hidden="true" />
+                </button>
+                <a
+                  href={href}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan px-3 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.96]"
+                  title={action.label}
+                >
+                  <Download className="size-4" aria-hidden="true" />
+                  下载
+                </a>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {preview ? (
+        <AssetPreviewDialog
+          action={preview}
+          previewUrl={buildMediaDownloadPath(work, preview.asset, { preview: true })}
+          downloadUrl={buildMediaDownloadPath(work, preview.asset)}
+          onClose={() => setPreview(null)}
         />
-      ))}
+      ) : null}
+    </>
+  );
+}
+
+function AssetPreviewDialog({
+  action,
+  previewUrl,
+  downloadUrl,
+  onClose,
+}: {
+  action: (typeof DOWNLOAD_ACTIONS)[number];
+  previewUrl: string;
+  downloadUrl: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+      <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40">
+        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2 font-semibold">
+            <action.icon className="size-4 shrink-0 text-cyan" aria-hidden="true" />
+            <span className="truncate">{action.previewLabel}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <a
+              href={downloadUrl}
+              className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
+              aria-label={action.label}
+              title={action.label}
+            >
+              <Download className="size-4" aria-hidden="true" />
+            </a>
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+              aria-label="关闭预览"
+              title="关闭"
+            >
+              <X className="size-4" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        <div className="bg-black/25 p-4">
+          <AssetPreviewContent asset={action.asset} url={previewUrl} />
+        </div>
+      </div>
     </div>
   );
 }
 
-function DownloadLink({
-  href,
-  icon: Icon,
-  label,
-}: {
-  href: string;
-  icon: typeof Download;
-  label: string;
-}) {
+function AssetPreviewContent({ asset, url }: { asset: MediaAssetKind; url: string }) {
+  if (asset === "cover") {
+    return (
+      <div className="mx-auto max-w-2xl overflow-hidden rounded-md bg-black/40">
+        <Image
+          src={url}
+          alt="封面预览"
+          width={1200}
+          height={675}
+          unoptimized
+          className="h-auto max-h-[70vh] w-full object-contain"
+        />
+      </div>
+    );
+  }
+
+  if (asset === "video") {
+    return <video src={url} controls className="max-h-[72vh] w-full rounded-md bg-black" />;
+  }
+
   return (
-    <a
-      href={href}
-      className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-1 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.98]"
-    >
-      <Icon className="size-4" aria-hidden="true" />
-      {label}
-    </a>
+    <div className="rounded-md border border-white/10 bg-black/30 p-4">
+      <audio src={url} controls className="w-full" />
+    </div>
   );
 }
 
@@ -545,12 +649,14 @@ function MediaAssetPanel({ assets }: { assets: MediaAsset[] }) {
     <div className="rounded-md border border-white/[0.16] bg-background/70 p-4">
       <div className="flex flex-wrap gap-2">
         {assets.map((asset) => (
-          <DownloadLink
+          <a
             key={`${asset.kind}-${asset.url}`}
             href={asset.url}
-            icon={Download}
-            label={asset.label}
-          />
+            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-1 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.98]"
+          >
+            <Download className="size-4" aria-hidden="true" />
+            {asset.label}
+          </a>
         ))}
       </div>
     </div>
