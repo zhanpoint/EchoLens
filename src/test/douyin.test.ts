@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { buildAuthorUrl, parseWorkMetadata } from "../lib/douyin/detail";
-import { buildMediaDownloadPath, canDownloadAsset } from "../lib/douyin/download";
+import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
 import { normalizeAudioToWav, resolveBundledFfmpegPath } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
@@ -440,6 +440,9 @@ describe("douyin url utilities", () => {
     expect(canDownloadAsset("article", "dubbedAudio")).toBe(true);
     expect(canDownloadAsset("note", "originalAudio")).toBe(false);
     expect(canDownloadAsset("article", "video")).toBe(false);
+    expect(isSupportedMediaUrl("https://lf3-cdn-tos.douyinstatic.com/obj/example.mp4")).toBe(true);
+    expect(isSupportedMediaUrl("https://example-unknown-cdn.com/media.m4a")).toBe(true);
+    expect(isSupportedMediaUrl("http://example.com/unsafe.mp4")).toBe(false);
   });
 });
 

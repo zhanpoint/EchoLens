@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
-import { buildDouyinWorkUrl, canDownloadAsset } from "@/lib/douyin/download";
+import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
 import { normalizeAudioToWav } from "@/lib/media/audio";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
@@ -14,13 +14,6 @@ const DownloadQuerySchema = z.object({
   kind: z.enum(DOUYIN_KINDS),
   asset: z.enum(MEDIA_ASSET_KINDS),
 });
-
-const MEDIA_DOMAINS = [
-  "douyinpic.com",
-  "douyinvod.com",
-  "douyinstatic.com",
-  "byteimg.com",
-] as const;
 
 const UPSTREAM_ACCEPT: Record<MediaAssetKind, string> = {
   cover: "image/*,*/*;q=0.8",
@@ -54,8 +47,8 @@ export async function GET(request: Request) {
   if (!assetUrl) {
     return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
   }
-  if (!isAllowedMediaUrl(assetUrl)) {
-    return NextResponse.json({ error: "资源地址不在允许的下载域名内。" }, { status: 400 });
+  if (!isSupportedMediaUrl(assetUrl)) {
+    return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
   }
   if (asset === "originalAudio") {
     const audio = await normalizeAudioToWav(assetUrl);
@@ -110,18 +103,6 @@ function selectAssetUrl(
     originalAudio: metadata.videoUrl,
     dubbedAudio: metadata.audioUrls?.[0],
   }[asset];
-}
-
-function isAllowedMediaUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      MEDIA_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`))
-    );
-  } catch {
-    return false;
-  }
 }
 
 function buildFilename(

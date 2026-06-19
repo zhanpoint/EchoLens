@@ -25,3 +25,11 @@ export function buildDouyinWorkUrl(kind: DouyinKind, id: string): string {
 export function canDownloadAsset(kind: DouyinKind, asset: MediaAssetKind): boolean {
   return (asset !== "video" && asset !== "originalAudio") || kind === "video";
 }
+
+export function isSupportedMediaUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
