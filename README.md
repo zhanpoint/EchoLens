@@ -21,9 +21,15 @@ OPENROUTER_ASR_MODEL="qwen/qwen3-asr-flash-2026-02-10"
 OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 OPENROUTER_MAX_AUDIO_BYTES="8388608"
 EXTRACTION_TIMEOUT_MS="60000"
+DOUYIN_METADATA_TIMEOUT_MS="12000"
+DOUYIN_COOKIE=""
+DOUYIN_USER_AGENT=""
+DOUYIN_ACCEPT_LANGUAGE="zh-CN,zh;q=0.9,en;q=0.8"
 ```
 
 转录固定使用 `@ffmpeg-installer/ffmpeg` 随包提供的 ffmpeg，避免误用 Playwright 等裁剪版 ffmpeg。
+
+`DOUYIN_COOKIE` 用于生产环境访问抖音 Web 详情接口时携带人工维护的登录态 Cookie。抖音详情接口不是公开稳定 API，不同机房出口可能被风控降级；线上如果出现作者、封面、文案和音频资源同时为空，优先在服务器 `.env` 配置最新 Cookie 后重启容器。
 
 ## 开发命令
 

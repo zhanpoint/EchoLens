@@ -27,6 +27,19 @@ type DouyinDetailPayload = {
   };
 };
 
+type DetailRequest = {
+  label: string;
+  url: string;
+  headers: Record<string, string>;
+};
+
+type DetailAttempt = {
+  label: string;
+  reason: string;
+  status?: number;
+  body?: string;
+};
+
 export type DouyinWorkMetadata = {
   authorName?: string;
   authorUrl?: string;
@@ -42,22 +55,28 @@ export type DouyinWorkMetadata = {
 export async function collectWorkMetadata(
   work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">,
 ): Promise<DouyinWorkMetadata> {
-  const response = await fetch(buildDetailApiUrl(work.id), {
-    headers: {
-      accept: "application/json, text/plain, */*",
-      referer: work.finalUrl,
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    },
-  });
+  const attempts: DetailAttempt[] = [];
 
-  if (!response.ok) {
-    return {};
+  for (const request of buildDetailRequests(work)) {
+    const payload = await fetchDetailPayload(request, attempts);
+    const detail = readAwemeDetail(payload);
+    if (!detail) {
+      continue;
+    }
+
+    const metadata = parseWorkMetadata({ aweme_detail: detail }, work.id, work.kind);
+    if (hasMetadata(metadata)) {
+      return metadata;
+    }
+
+    attempts.push({
+      label: request.label,
+      reason: "aweme_detail parsed without usable metadata",
+    });
   }
 
-  const payload = (await response.json().catch(() => null)) as unknown;
-  return parseWorkMetadata(payload, work.id, work.kind);
+  warnMetadataFailure(work, attempts);
+  return {};
 }
 
 export function parseWorkMetadata(
@@ -69,7 +88,7 @@ export function parseWorkMetadata(
     return {};
   }
 
-  const detail = (payload as DouyinDetailPayload).aweme_detail;
+  const detail = readAwemeDetail(payload);
   if (!detail) {
     return {};
   }
@@ -101,13 +120,151 @@ export function buildAuthorUrl(secUid: string | undefined, workId: string): stri
   return url.toString();
 }
 
-function buildDetailApiUrl(workId: string): string {
+function buildDetailRequests(work: Pick<ResolvedDouyinWork, "finalUrl" | "id">): DetailRequest[] {
+  const headers = buildRequestHeaders(work.finalUrl);
+
+  return [
+    {
+      label: "web-detail-aid-6383",
+      url: buildDetailApiUrl(work.id, "6383"),
+      headers,
+    },
+    {
+      label: "web-detail-aid-1128",
+      url: buildDetailApiUrl(work.id, "1128"),
+      headers,
+    },
+  ];
+}
+
+function buildDetailApiUrl(workId: string, aid: string): string {
   const url = new URL("https://www.douyin.com/aweme/v1/web/aweme/detail/");
   url.searchParams.set("aweme_id", workId);
-  url.searchParams.set("aid", "6383");
+  url.searchParams.set("aid", aid);
   url.searchParams.set("version_name", "23.5.0");
   url.searchParams.set("device_platform", "webapp");
   return url.toString();
+}
+
+function buildRequestHeaders(referer: string): Record<string, string> {
+  const cookie = process.env.DOUYIN_COOKIE?.trim();
+  return {
+    accept: "application/json, text/plain, */*",
+    "accept-language": process.env.DOUYIN_ACCEPT_LANGUAGE?.trim() || "zh-CN,zh;q=0.9,en;q=0.8",
+    "cache-control": "no-cache",
+    pragma: "no-cache",
+    referer,
+    "user-agent": process.env.DOUYIN_USER_AGENT?.trim() || defaultUserAgent(),
+    ...(cookie ? { cookie } : {}),
+  };
+}
+
+async function fetchDetailPayload(request: DetailRequest, attempts: DetailAttempt[]): Promise<unknown> {
+  try {
+    const response = await fetch(request.url, {
+      cache: "no-store",
+      headers: request.headers,
+      signal: AbortSignal.timeout(readPositiveNumber(process.env.DOUYIN_METADATA_TIMEOUT_MS, 12_000)),
+    });
+    const text = await response.text();
+
+    if (!response.ok) {
+      attempts.push({
+        label: request.label,
+        reason: "upstream http error",
+        status: response.status,
+        body: truncateBody(text),
+      });
+      return null;
+    }
+
+    const payload = parseJson(text);
+    if (!payload) {
+      attempts.push({
+        label: request.label,
+        reason: "invalid json",
+        status: response.status,
+        body: truncateBody(text),
+      });
+      return null;
+    }
+
+    if (!readAwemeDetail(payload)) {
+      attempts.push({
+        label: request.label,
+        reason: "missing aweme_detail",
+        status: response.status,
+        body: truncateBody(text),
+      });
+      return null;
+    }
+
+    return payload;
+  } catch (error) {
+    attempts.push({
+      label: request.label,
+      reason: error instanceof Error ? error.message : "request failed",
+    });
+    return null;
+  }
+}
+
+function readAwemeDetail(payload: unknown): DouyinDetailPayload["aweme_detail"] | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+
+  const detail = (payload as DouyinDetailPayload).aweme_detail;
+  return detail && typeof detail === "object" ? detail : undefined;
+}
+
+function hasMetadata(metadata: DouyinWorkMetadata): boolean {
+  return Boolean(
+    metadata.authorName ||
+    metadata.articleText ||
+    metadata.caption ||
+    metadata.coverUrl ||
+    metadata.title ||
+    metadata.videoUrl ||
+    metadata.audioUrls?.length ||
+    metadata.imageUrls?.length,
+  );
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function truncateBody(value: string): string | undefined {
+  const text = value.trim();
+  return text ? text.slice(0, 400) : undefined;
+}
+
+function warnMetadataFailure(
+  work: Pick<ResolvedDouyinWork, "id" | "kind">,
+  attempts: DetailAttempt[],
+): void {
+  console.warn("[douyin] metadata collection failed", {
+    id: work.id,
+    kind: work.kind,
+    attempts,
+  });
+}
+
+function defaultUserAgent(): string {
+  return (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  );
+}
+
+function readPositiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readString(value: unknown): string | undefined {

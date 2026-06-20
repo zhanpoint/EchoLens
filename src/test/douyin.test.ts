@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { buildAuthorUrl, parseWorkMetadata } from "../lib/douyin/detail";
+import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
 import { normalizeAudioToWav, resolveBundledFfmpegPath } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
@@ -11,6 +11,8 @@ import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types
 
 afterEach(() => {
   vi.restoreAllMocks();
+  delete process.env.DOUYIN_COOKIE;
+  delete process.env.DOUYIN_METADATA_TIMEOUT_MS;
 });
 
 describe("douyin url utilities", () => {
@@ -85,6 +87,71 @@ describe("douyin url utilities", () => {
       audioUrls: [],
       imageUrls: [],
     });
+  });
+
+  it("falls back to the alternate detail request when the primary response has no aweme detail", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status_code: 0 })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            aweme_detail: {
+              author: {
+                nickname: "生产作者",
+                sec_uid: "MS4wLjABAAAA-prod",
+              },
+              caption: "生产文案",
+            },
+          }),
+        ),
+      );
+
+    await expect(
+      collectWorkMetadata({
+        finalUrl: "https://www.douyin.com/video/7652577724216692002",
+        id: "7652577724216692002",
+        kind: "video",
+      }),
+    ).resolves.toMatchObject({
+      authorName: "生产作者",
+      caption: "生产文案",
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toContain("aid=6383");
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
+  });
+
+  it("sends production douyin cookie and disables fetch caching for metadata requests", async () => {
+    process.env.DOUYIN_COOKIE = "sessionid=prod-session";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          aweme_detail: {
+            author: {
+              nickname: "Cookie 作者",
+            },
+          },
+        }),
+      ),
+    );
+
+    await collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7652577724216692002",
+      id: "7652577724216692002",
+      kind: "video",
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        cache: "no-store",
+        headers: expect.objectContaining({
+          cookie: "sessionid=prod-session",
+          referer: "https://www.douyin.com/video/7652577724216692002",
+        }),
+      }),
+    );
   });
 
   it("reads cover urls for all work types", () => {

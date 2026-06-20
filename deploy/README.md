@@ -39,6 +39,44 @@ APP_PORT=3000
 
 Create `/opt/echolens/.env` on the server and keep production variables there.
 
+Required shape:
+
+```bash
+OPENROUTER_API_KEY="..."
+OPENROUTER_MODEL="xiaomi/mimo-v2.5"
+OPENROUTER_ASR_MODEL="qwen/qwen3-asr-flash-2026-02-10"
+OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+OPENROUTER_MAX_AUDIO_BYTES="8388608"
+EXTRACTION_TIMEOUT_MS="60000"
+DOUYIN_METADATA_TIMEOUT_MS="12000"
+DOUYIN_COOKIE="passport_csrf_token=...; sessionid=...; ..."
+DOUYIN_USER_AGENT=""
+DOUYIN_ACCEPT_LANGUAGE="zh-CN,zh;q=0.9,en;q=0.8"
+```
+
+`DOUYIN_COOKIE` should be copied from a normal browser session that can open the same Douyin work detail page. Do not commit it to git. The app sends it only from the server-side Route Handlers to Douyin upstream requests.
+
+After changing `/opt/echolens/.env`, restart the container:
+
+```bash
+cd /opt/echolens
+docker compose --env-file .deploy.env -f compose.yml up -d
+```
+
+Smoke test the production metadata path:
+
+```bash
+curl -sS https://echolens.dreamlog.xyz/api/douyin/resolve \
+  -H 'content-type: application/json' \
+  --data '{"input":"https://www.douyin.com/video/7652577724216692002"}'
+```
+
+The response should include `authorName` when Douyin metadata collection is healthy. If it does not, inspect:
+
+```bash
+docker logs --tail=100 echolens
+```
+
 ## Nginx
 
 Install Nginx:
