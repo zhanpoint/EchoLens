@@ -15,13 +15,17 @@ import {
   Link2,
   Loader2,
   Music2,
+  Pause,
   Play,
   ScrollText,
+  Volume2,
   X,
 } from "lucide-react";
 import {
   type FormEvent,
+  useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import {
@@ -42,6 +46,23 @@ type ApiError = {
   error: string;
   code?: string;
 };
+
+type ApiPayload = ApiError | ExtractResponse | { work?: ResolvedDouyinWork };
+
+async function readApiPayload(response: Response, fallback: string): Promise<ApiPayload> {
+  const text = await response.text();
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!contentType.includes("json")) {
+    throw new Error(`${fallback}接口返回了非 JSON 响应：HTTP ${response.status}。请检查线上 /api 反向代理或服务端运行日志。`);
+  }
+
+  try {
+    return JSON.parse(text) as ApiPayload;
+  } catch {
+    throw new Error(`${fallback}接口返回的 JSON 格式无效：HTTP ${response.status}。`);
+  }
+}
 
 const KIND_LABELS: Record<DouyinKind, string> = {
   video: "视频",
@@ -87,20 +108,7 @@ export default function HomePage() {
   const canExtract = Boolean(work && !isInputDirty && selected.length > 0 && !isExtracting);
   const displayWork = activeKind ? work : null;
 
-  useEffect(() => {
-    const hasUrl = /https?:\/\//i.test(normalizedInput);
-    if (!hasUrl || normalizedInput === lastResolvedInput) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      void resolveInput(normalizedInput, { silent: true });
-    }, 700);
-
-    return () => window.clearTimeout(timer);
-  }, [lastResolvedInput, normalizedInput]);
-
-  async function resolveInput(value: string, options?: { silent?: boolean }) {
+  const resolveInput = useCallback(async (value: string, options?: { silent?: boolean }) => {
     const valueToResolve = value.trim();
     if (!valueToResolve) {
       setError("请输入抖音分享链接。");
@@ -118,7 +126,7 @@ export default function HomePage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ input: valueToResolve }),
       });
-      const payload = (await response.json()) as { work?: ResolvedDouyinWork } | ApiError;
+      const payload = await readApiPayload(response, "识别链接失败。");
 
       if (!response.ok || !("work" in payload) || !payload.work) {
         throw new Error("error" in payload ? payload.error : "识别链接失败。");
@@ -139,7 +147,20 @@ export default function HomePage() {
     } finally {
       setIsResolving(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    const hasUrl = /https?:\/\//i.test(normalizedInput);
+    if (!hasUrl || normalizedInput === lastResolvedInput) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void resolveInput(normalizedInput, { silent: true });
+    }, 700);
+
+    return () => window.clearTimeout(timer);
+  }, [lastResolvedInput, normalizedInput, resolveInput]);
 
   async function extract() {
     if (!canExtract) {
@@ -157,7 +178,7 @@ export default function HomePage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ input: normalizedInput, features: orderedFeatures }),
       });
-      const payload = (await response.json()) as ExtractResponse | ApiError;
+      const payload = await readApiPayload(response, "提取失败。");
 
       if (!response.ok || !("results" in payload)) {
         throw new Error("error" in payload ? payload.error : "提取失败。");
@@ -199,7 +220,7 @@ export default function HomePage() {
           />
           <div className="space-y-1">
             <h1 className="text-2xl font-semibold text-foreground">EchoLens</h1>
-            <p className="text-sm text-muted-foreground">透视视频内容的声音与文字</p>
+            <p className="text-sm text-muted-foreground">透视抖音作品的声音与文字</p>
           </div>
         </div>
 
@@ -555,29 +576,171 @@ function AssetPreviewDialog({
 
 function AssetPreviewContent({ asset, url }: { asset: MediaAssetKind; url: string }) {
   if (asset === "cover") {
-    return (
-      <div className="mx-auto max-w-2xl overflow-hidden rounded-md bg-black/40">
-        <Image
-          src={url}
-          alt="封面预览"
-          width={1200}
-          height={675}
-          unoptimized
-          className="h-auto max-h-[70vh] w-full object-contain"
-        />
-      </div>
-    );
+    return <CoverPreview key={url} url={url} />;
   }
 
   if (asset === "video") {
-    return <video src={url} controls className="max-h-[72vh] w-full rounded-md bg-black" />;
+    return <VideoPreview key={url} url={url} />;
+  }
+
+  return <AudioPreview key={url} url={url} />;
+}
+
+function CoverPreview({ url }: { url: string }) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <div className="relative mx-auto max-w-2xl overflow-hidden rounded-md bg-black/40">
+      {!loaded ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 backdrop-blur-[2px]">
+          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin text-cyan" />
+            资源加载中
+          </div>
+        </div>
+      ) : null}
+      <Image
+        src={url}
+        alt="封面预览"
+        width={1200}
+        height={675}
+        unoptimized
+        onLoad={() => setLoaded(true)}
+        className={cn("h-auto max-h-[70vh] w-full object-contain transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
+      />
+    </div>
+  );
+}
+
+function VideoPreview({ url }: { url: string }) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <div className="relative overflow-hidden rounded-md bg-black/40">
+      {!loaded ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 backdrop-blur-[2px]">
+          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin text-cyan" />
+            视频加载中
+          </div>
+        </div>
+      ) : null}
+      <video
+        src={url}
+        controls
+        preload="metadata"
+        playsInline
+        onLoadedMetadata={() => setLoaded(true)}
+        onCanPlay={() => setLoaded(true)}
+        className={cn("max-h-[72vh] w-full rounded-md bg-black transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
+      />
+    </div>
+  );
+}
+
+function AudioPreview({ url }: { url: string }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+
+  function syncMetadata() {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+    setLoaded(true);
+    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+  }
+
+  function syncTime() {
+    setCurrentTime(audioRef.current?.currentTime ?? 0);
+  }
+
+  async function togglePlayback() {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    if (audio.paused) {
+      await audio.play();
+    } else {
+      audio.pause();
+    }
+  }
+
+  function seek(value: string) {
+    const audio = audioRef.current;
+    if (!audio || !duration) {
+      return;
+    }
+    const nextTime = Number(value);
+    audio.currentTime = nextTime;
+    setCurrentTime(nextTime);
   }
 
   return (
-    <div className="rounded-md border border-white/10 bg-black/30 p-4">
-      <audio src={url} controls className="w-full" />
+    <div className="relative rounded-md border border-cyan/15 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-4 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)]">
+      {!loaded ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-black/45 backdrop-blur-[2px]">
+          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin text-cyan" />
+            音频加载中
+          </div>
+        </div>
+      ) : null}
+      <audio
+        ref={audioRef}
+        src={url}
+        preload="metadata"
+        onLoadedMetadata={syncMetadata}
+        onCanPlay={syncMetadata}
+        onTimeUpdate={syncTime}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+      />
+      <div className={cn("flex min-h-14 items-center gap-3 transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}>
+        <button
+          type="button"
+          onClick={() => void togglePlayback()}
+          disabled={!loaded}
+          className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-cyan/25 bg-cyan/10 text-cyan transition hover:bg-cyan/15 hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label={playing ? "暂停音频" : "播放音频"}
+          title={playing ? "暂停" : "播放"}
+        >
+          {playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
+        </button>
+        <span className="w-11 shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
+        <input
+          type="range"
+          min="0"
+          max={duration || 0}
+          step="0.01"
+          value={duration ? Math.min(currentTime, duration) : 0}
+          onChange={(event) => seek(event.currentTarget.value)}
+          disabled={!loaded || !duration}
+          className="audio-progress h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label="音频播放进度"
+        />
+        <span className="w-11 shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
+        <Volume2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      </div>
     </div>
   );
+}
+
+function formatMediaTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "0:00";
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 function orderResults(

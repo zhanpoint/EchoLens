@@ -1,6 +1,6 @@
 import type { DouyinKind, ResolvedDouyinWork } from "@/types/douyin";
 
-const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》]+/i;
+const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 8;
 

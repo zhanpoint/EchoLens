@@ -24,6 +24,7 @@ const UPSTREAM_ACCEPT: Record<MediaAssetKind, string> = {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const requestRange = request.headers.get("range");
   const parsed = DownloadQuerySchema.safeParse({
     id: url.searchParams.get("id"),
     kind: url.searchParams.get("kind"),
@@ -52,12 +53,11 @@ export async function GET(request: Request) {
   }
   if (asset === "originalAudio") {
     const audio = await normalizeAudioToWav(assetUrl);
-    return new Response(toArrayBuffer(audio), {
-      headers: {
-        "content-type": "audio/wav",
-        "content-disposition": `${isPreview ? "inline" : "attachment"}; filename="${buildFilename(id, asset, "audio/wav")}"`,
-        "cache-control": "no-store",
-      },
+    return mediaBufferResponse(audio, {
+      contentType: "audio/wav",
+      filename: buildFilename(id, asset, "audio/wav"),
+      inline: isPreview,
+      range: requestRange,
     });
   }
 
@@ -68,6 +68,7 @@ export async function GET(request: Request) {
       "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      ...(requestRange ? { range: requestRange } : {}),
     },
   });
 
@@ -85,12 +86,63 @@ export async function GET(request: Request) {
   if (contentLength) {
     headers.set("content-length", contentLength);
   }
+  const contentRange = upstream.headers.get("content-range");
+  if (contentRange) {
+    headers.set("content-range", contentRange);
+  }
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  if (acceptRanges) {
+    headers.set("accept-ranges", acceptRanges);
+  } else if (asset !== "cover") {
+    headers.set("accept-ranges", "bytes");
+  }
 
-  return new Response(upstream.body, { headers });
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers,
+  });
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
   return new Uint8Array(buffer).buffer;
+}
+
+function mediaBufferResponse(
+  buffer: Buffer,
+  options: { contentType: string; filename: string; inline: boolean; range: string | null },
+): Response {
+  const headers = new Headers({
+    "accept-ranges": "bytes",
+    "cache-control": "no-store",
+    "content-type": options.contentType,
+    "content-disposition": `${options.inline ? "inline" : "attachment"}; filename="${options.filename}"`,
+  });
+  const range = parseSingleRange(options.range, buffer.byteLength);
+
+  if (!range) {
+    headers.set("content-length", String(buffer.byteLength));
+    return new Response(toArrayBuffer(buffer), { headers });
+  }
+
+  const chunk = buffer.subarray(range.start, range.end + 1);
+  headers.set("content-length", String(chunk.byteLength));
+  headers.set("content-range", `bytes ${range.start}-${range.end}/${buffer.byteLength}`);
+  return new Response(toArrayBuffer(chunk), { status: 206, headers });
+}
+
+function parseSingleRange(value: string | null, size: number): { start: number; end: number } | null {
+  const match = value?.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) {
+    return null;
+  }
+
+  const start = match[1] ? Number(match[1]) : 0;
+  const end = match[2] ? Number(match[2]) : size - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) {
+    return null;
+  }
+
+  return { start, end: Math.min(end, size - 1) };
 }
 
 function selectAssetUrl(
