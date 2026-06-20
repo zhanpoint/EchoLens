@@ -1088,6 +1088,7 @@ function TextResultPanel({ label, text }: { label: string; text: string }) {
 
 function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
   const [copiedAll, setCopiedAll] = useState(false);
+  const [copiedSummary, setCopiedSummary] = useState(false);
   const [summaryMode, setSummaryMode] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
@@ -1102,6 +1103,16 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
     await navigator.clipboard.writeText(result.content ?? "");
     setCopiedAll(true);
     window.setTimeout(() => setCopiedAll(false), 1600);
+  }
+
+  async function copySummary() {
+    if (!summary.trim()) {
+      return;
+    }
+
+    await navigator.clipboard.writeText(summary);
+    setCopiedSummary(true);
+    window.setTimeout(() => setCopiedSummary(false), 1600);
   }
 
   async function summarize(prompt: SummaryPrompt) {
@@ -1189,16 +1200,29 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
               <Sparkles className="size-3.5" aria-hidden="true" />
               AI总结
             </span>
-            {hasSummaryOutput && !isSummarizing ? (
-              <button
-                type="button"
-                onClick={resetSummary}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] active:scale-[0.96]"
-              >
-                <RefreshCw className="size-3.5" aria-hidden="true" />
-                重新总结
-              </button>
-            ) : null}
+            <div className="flex items-center gap-1.5">
+              {hasSummaryOutput && !isSummarizing && !summaryError ? (
+                <button
+                  type="button"
+                  onClick={() => void copySummary()}
+                  className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+                  aria-label={copiedSummary ? "已复制AI总结" : "复制AI总结"}
+                  title={copiedSummary ? "已复制" : "复制总结"}
+                >
+                  {copiedSummary ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
+                </button>
+              ) : null}
+              {hasSummaryOutput && !isSummarizing ? (
+                <button
+                  type="button"
+                  onClick={resetSummary}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] active:scale-[0.96]"
+                >
+                  <RefreshCw className="size-3.5" aria-hidden="true" />
+                  重新总结
+                </button>
+              ) : null}
+            </div>
           </div>
           <div className="content-scroll max-h-[36rem] flex-1 overflow-auto p-3">
             {hasSummaryOutput ? (

@@ -10,7 +10,8 @@ const DOUYIN_REFERER = "https://www.douyin.com/";
 const DOUYIN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
+const MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3;
 const DEFAULT_MP3_CHUNK_SECONDS = 300;
 
 export type AudioChunk = {
@@ -121,7 +122,33 @@ async function writeSourceToFile(source: Buffer | string, outputPath: string): P
   await downloadRemoteMediaToFile(source, outputPath);
 }
 
-async function downloadRemoteMediaToFile(url: string, outputPath: string): Promise<void> {
+export async function downloadRemoteMediaToFile(url: string, outputPath: string): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+    const offset = await readFileSize(outputPath);
+
+    try {
+      const totalSize = await downloadMediaRange(url, outputPath, offset);
+      const downloadedSize = await readFileSize(outputPath);
+      if (totalSize === null || downloadedSize >= totalSize) {
+        return;
+      }
+
+      lastError = new Error(`下载不完整：${downloadedSize}/${totalSize}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
+      await delay(500 * attempt);
+    }
+  }
+
+  throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
+}
+
+async function downloadMediaRange(url: string, outputPath: string, offset: number): Promise<number | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
 
@@ -132,22 +159,51 @@ async function downloadRemoteMediaToFile(url: string, outputPath: string): Promi
         accept: "video/mp4,audio/*,*/*;q=0.8",
         referer: DOUYIN_REFERER,
         "user-agent": DOUYIN_USER_AGENT,
+        ...(offset > 0 ? { range: `bytes=${offset}-` } : {}),
       },
     });
 
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
+    if (offset > 0 && response.status !== 206) {
+      await fs.rm(outputPath, { force: true });
+      throw new Error("服务器不支持断点续传。");
+    }
 
     await pipeline(
       Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
-      createWriteStream(outputPath),
+      createWriteStream(outputPath, { flags: offset > 0 ? "a" : "w" }),
     );
-  } catch (error) {
-    throw new Error(`媒体资源下载失败：${error instanceof Error ? error.message : "未知错误"}`);
+
+    return readTotalSize(response, offset);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function readTotalSize(response: Response, offset: number): number | null {
+  const contentRange = response.headers.get("content-range");
+  const totalFromRange = contentRange?.match(/\/(\d+)$/)?.[1];
+  if (totalFromRange) {
+    const total = Number(totalFromRange);
+    return Number.isFinite(total) && total > 0 ? total : null;
+  }
+
+  const contentLength = Number(response.headers.get("content-length"));
+  return Number.isFinite(contentLength) && contentLength > 0 ? offset + contentLength : null;
+}
+
+async function readFileSize(filePath: string): Promise<number> {
+  try {
+    return (await fs.stat(filePath)).size;
+  } catch {
+    return 0;
+  }
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {

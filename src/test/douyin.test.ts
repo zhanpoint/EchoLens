@@ -7,7 +7,12 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
-import { normalizeAudioToWav, resolveBundledFfmpegPath, resolveFfmpegPath } from "../lib/media/audio";
+import {
+  downloadRemoteMediaToFile,
+  normalizeAudioToWav,
+  resolveBundledFfmpegPath,
+  resolveFfmpegPath,
+} from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
 
@@ -531,16 +536,9 @@ describe("audio transcription preparation", () => {
   it("downloads remote media before passing a local file to ffmpeg", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const wavPath = path.join(tempDir, "tone.wav");
-    const ffmpegPath = path.join(
-      process.cwd(),
-      "node_modules",
-      "@ffmpeg-installer",
-      `${process.platform}-${process.arch}`,
-      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
-    );
 
     try {
-      await runFfmpeg(ffmpegPath, [
+      await runFfmpeg(resolveBundledFfmpegPath(), [
         "-y",
         "-f",
         "lavfi",
@@ -584,19 +582,69 @@ describe("audio transcription preparation", () => {
     }
   });
 
+  it("resumes partially downloaded remote media files", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
+    const wavPath = path.join(tempDir, "tone.wav");
+    const partialPath = path.join(tempDir, "partial.wav");
+
+    try {
+      await runFfmpeg(resolveBundledFfmpegPath(), [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=0.1",
+        wavPath,
+      ]);
+      const source = await fs.readFile(wavPath);
+      const firstChunkSize = Math.floor(source.byteLength / 2);
+      let resumedRange = "";
+      await fs.writeFile(partialPath, source.subarray(0, firstChunkSize));
+      const server = createServer((request, response) => {
+        resumedRange = request.headers.range ?? "";
+        if (!resumedRange) {
+          response.writeHead(416);
+          response.end();
+          return;
+        }
+
+        const start = Number(resumedRange.match(/^bytes=(\d+)-$/)?.[1] ?? 0);
+        response.writeHead(206, {
+          "content-length": String(source.byteLength - start),
+          "content-range": `bytes ${start}-${source.byteLength - 1}/${source.byteLength}`,
+          "content-type": "audio/wav",
+        });
+        response.end(source.subarray(start));
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+
+      try {
+        const { port } = server.address() as AddressInfo;
+        await downloadRemoteMediaToFile(`http://127.0.0.1:${port}/video.mp4`, partialPath);
+        const output = await fs.readFile(partialPath);
+
+        expect(resumedRange).toBe(`bytes=${firstChunkSize}-`);
+        expect(output.equals(source)).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes non-MP4 audio containers through ffmpeg probing", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const wavPath = path.join(tempDir, "tone.wav");
-    const ffmpegPath = path.join(
-      process.cwd(),
-      "node_modules",
-      "@ffmpeg-installer",
-      `${process.platform}-${process.arch}`,
-      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
-    );
 
     try {
-      await runFfmpeg(ffmpegPath, [
+      await runFfmpeg(resolveBundledFfmpegPath(), [
         "-y",
         "-f",
         "lavfi",
