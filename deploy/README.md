@@ -49,12 +49,9 @@ OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 OPENROUTER_MAX_AUDIO_BYTES="8388608"
 EXTRACTION_TIMEOUT_MS="60000"
 DOUYIN_METADATA_TIMEOUT_MS="12000"
-DOUYIN_COOKIE="passport_csrf_token=...; sessionid=...; ..."
-DOUYIN_USER_AGENT=""
-DOUYIN_ACCEPT_LANGUAGE="zh-CN,zh;q=0.9,en;q=0.8"
 ```
 
-`DOUYIN_COOKIE` should be copied from a normal browser session that can open the same Douyin work detail page. Do not commit it to git. The app sends it only from the server-side Route Handlers to Douyin upstream requests.
+Douyin metadata requests intentionally use anonymous fixed browser-like headers. Do not configure browser session cookies for the server; cookies captured from one local browser session can be downgraded when replayed from a different production egress.
 
 After changing `/opt/echolens/.env`, restart the container:
 

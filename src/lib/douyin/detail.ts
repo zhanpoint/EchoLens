@@ -40,6 +40,10 @@ type DetailAttempt = {
   body?: string;
 };
 
+const DETAIL_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 export type DouyinWorkMetadata = {
   authorName?: string;
   authorUrl?: string;
@@ -147,15 +151,10 @@ function buildDetailApiUrl(workId: string, aid: string): string {
 }
 
 function buildRequestHeaders(referer: string): Record<string, string> {
-  const cookie = process.env.DOUYIN_COOKIE?.trim();
   return {
     accept: "application/json, text/plain, */*",
-    "accept-language": process.env.DOUYIN_ACCEPT_LANGUAGE?.trim() || "zh-CN,zh;q=0.9,en;q=0.8",
-    "cache-control": "no-cache",
-    pragma: "no-cache",
     referer,
-    "user-agent": process.env.DOUYIN_USER_AGENT?.trim() || defaultUserAgent(),
-    ...(cookie ? { cookie } : {}),
+    "user-agent": DETAIL_USER_AGENT,
   };
 }
 
@@ -253,13 +252,6 @@ function warnMetadataFailure(
     kind: work.kind,
     attempts,
   });
-}
-
-function defaultUserAgent(): string {
-  return (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-  );
 }
 
 function readPositiveNumber(value: string | undefined, fallback: number): number {

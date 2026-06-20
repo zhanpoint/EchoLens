@@ -12,6 +12,7 @@ import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.DOUYIN_COOKIE;
+  delete process.env.DOUYIN_USER_AGENT;
   delete process.env.DOUYIN_METADATA_TIMEOUT_MS;
 });
 
@@ -122,8 +123,9 @@ describe("douyin url utilities", () => {
     expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
   });
 
-  it("sends production douyin cookie and disables fetch caching for metadata requests", async () => {
+  it("keeps metadata requests anonymous even when browser cookie env is present", async () => {
     process.env.DOUYIN_COOKIE = "sessionid=prod-session";
+    process.env.DOUYIN_USER_AGENT = "Browser UA from a local session";
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -147,11 +149,13 @@ describe("douyin url utilities", () => {
       expect.objectContaining({
         cache: "no-store",
         headers: expect.objectContaining({
-          cookie: "sessionid=prod-session",
           referer: "https://www.douyin.com/video/7652577724216692002",
+          "user-agent": expect.stringContaining("Chrome/122"),
         }),
       }),
     );
+    const headers = vi.mocked(globalThis.fetch).mock.calls[0][1]?.headers as Record<string, string>;
+    expect(headers).not.toHaveProperty("cookie");
   });
 
   it("reads cover urls for all work types", () => {
