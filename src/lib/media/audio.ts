@@ -1,13 +1,16 @@
 import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const DOUYIN_REFERER = "https://www.douyin.com/";
 const DOUYIN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-const FFMPEG_RW_TIMEOUT_US = "30000000";
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
 const DEFAULT_MP3_CHUNK_SECONDS = 300;
 
 export type AudioChunk = {
@@ -34,17 +37,12 @@ export async function normalizeAudioToWav(source: Buffer | string): Promise<Buff
   const outputPath = path.join(tempDir, "audio.wav");
 
   try {
-    const inputArgs = Buffer.isBuffer(source)
-      ? ["-i", inputPath]
-      : buildRemoteInputArgs(source);
-
-    if (Buffer.isBuffer(source)) {
-      await fs.writeFile(inputPath, source);
-    }
+    await writeSourceToFile(source, inputPath);
 
     await runFfmpeg(ffmpegPath, [
       "-y",
-      ...inputArgs,
+      "-i",
+      inputPath,
       "-vn",
       "-acodec",
       "pcm_s16le",
@@ -70,17 +68,12 @@ export async function transcodeAudioToMp3Chunks(
   const outputPattern = path.join(tempDir, "chunk-%03d.mp3");
 
   try {
-    const inputArgs = Buffer.isBuffer(source)
-      ? ["-i", inputPath]
-      : buildRemoteInputArgs(source);
-
-    if (Buffer.isBuffer(source)) {
-      await fs.writeFile(inputPath, source);
-    }
+    await writeSourceToFile(source, inputPath);
 
     await runFfmpeg(ffmpegPath, [
       "-y",
-      ...inputArgs,
+      "-i",
+      inputPath,
       "-vn",
       "-acodec",
       "libmp3lame",
@@ -119,23 +112,42 @@ export async function transcodeAudioToMp3Chunks(
   }
 }
 
-function buildRemoteInputArgs(url: string): string[] {
-  return [
-    "-rw_timeout",
-    FFMPEG_RW_TIMEOUT_US,
-    "-reconnect",
-    "1",
-    "-reconnect_streamed",
-    "1",
-    "-reconnect_delay_max",
-    "2",
-    "-user_agent",
-    DOUYIN_USER_AGENT,
-    "-referer",
-    DOUYIN_REFERER,
-    "-i",
-    url,
-  ];
+async function writeSourceToFile(source: Buffer | string, outputPath: string): Promise<void> {
+  if (Buffer.isBuffer(source)) {
+    await fs.writeFile(outputPath, source);
+    return;
+  }
+
+  await downloadRemoteMediaToFile(source, outputPath);
+}
+
+async function downloadRemoteMediaToFile(url: string, outputPath: string): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: "video/mp4,audio/*,*/*;q=0.8",
+        referer: DOUYIN_REFERER,
+        "user-agent": DOUYIN_USER_AGENT,
+      },
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    await pipeline(
+      Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
+      createWriteStream(outputPath),
+    );
+  } catch (error) {
+    throw new Error(`媒体资源下载失败：${error instanceof Error ? error.message : "未知错误"}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
@@ -157,6 +169,11 @@ function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
   });
 }
 
-function resolveFfmpegPath(): string {
+export function resolveFfmpegPath(): string {
+  const configuredPath = process.env.FFMPEG_PATH?.trim();
+  if (configuredPath) {
+    return configuredPath;
+  }
+
   return resolveBundledFfmpegPath();
 }

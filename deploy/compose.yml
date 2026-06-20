@@ -10,6 +10,7 @@ services:
       NODE_ENV: production
       HOSTNAME: 0.0.0.0
       PORT: 3000
+      FFMPEG_PATH: ${FFMPEG_PATH:-/usr/bin/ffmpeg}
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
       - target: 3000

@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
-import { normalizeAudioToWav, resolveBundledFfmpegPath } from "../lib/media/audio";
+import { normalizeAudioToWav, resolveBundledFfmpegPath, resolveFfmpegPath } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
 
@@ -16,6 +16,7 @@ afterEach(() => {
   delete process.env.DOUYIN_COOKIE;
   delete process.env.DOUYIN_USER_AGENT;
   delete process.env.DOUYIN_METADATA_TIMEOUT_MS;
+  delete process.env.FFMPEG_PATH;
 });
 
 describe("douyin url utilities", () => {
@@ -521,7 +522,13 @@ describe("audio transcription preparation", () => {
     expect(resolveBundledFfmpegPath()).toContain(path.join("node_modules", "@ffmpeg-installer"));
   });
 
-  it("streams remote media through ffmpeg without downloading it through fetch", async () => {
+  it("prefers an explicitly configured ffmpeg binary", () => {
+    process.env.FFMPEG_PATH = "/usr/local/bin/ffmpeg";
+
+    expect(resolveFfmpegPath()).toBe("/usr/local/bin/ffmpeg");
+  });
+
+  it("downloads remote media before passing a local file to ffmpeg", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const wavPath = path.join(tempDir, "tone.wav");
     const ffmpegPath = path.join(
@@ -542,7 +549,6 @@ describe("audio transcription preparation", () => {
         wavPath,
       ]);
       const source = await fs.readFile(wavPath);
-      const fetchSpy = vi.spyOn(globalThis, "fetch");
       let referer = "";
       let userAgent = "";
       const server = createServer((request, response) => {
@@ -564,7 +570,6 @@ describe("audio transcription preparation", () => {
         const { port } = server.address() as AddressInfo;
         const output = await normalizeAudioToWav(`http://127.0.0.1:${port}/video.mp4`);
 
-        expect(fetchSpy).not.toHaveBeenCalled();
         expect(referer).toBe("https://www.douyin.com/");
         expect(userAgent).toContain("Mozilla/5.0");
         expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
