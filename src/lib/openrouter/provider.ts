@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
-import { normalizeAudioToWav } from "@/lib/media/audio";
+import { transcodeAudioToMp3Chunks } from "@/lib/media/audio";
+import type { TranscriptSegment } from "@/types/douyin";
 
 type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } }
   | { type: "input_audio"; input_audio: { data: string; format: string } };
 type AudioContentPart = Extract<ChatContentPart, { type: "input_audio" }>;
+type AudioInputSegment = AudioContentPart & {
+  endSeconds: number;
+  startSeconds: number;
+};
 
 export type ProviderResult =
-  | { ok: true; content: string }
+  | { ok: true; content: string; transcriptSegments?: TranscriptSegment[] }
   | { ok: false; code: "not_configured" | "unavailable" | "error"; detail: string };
 
 type OpenRouterError = {
@@ -21,9 +26,46 @@ const TRANSCRIPT_CACHE_TTL_MS = 10 * 60_000;
 const TRANSCRIPT_CACHE_MAX_ENTRIES = 64;
 const OPENROUTER_MAX_RETRIES = 2;
 const OPENROUTER_RETRYABLE_STATUSES = new Set([429, 503]);
+const DEFAULT_ASR_CHUNK_SECONDS = 300;
+const DEFAULT_SUMMARY_MODEL = "deepseek/deepseek-v4-flash";
 
 const transcriptCache = new Map<string, { expiresAt: number; result: Extract<ProviderResult, { ok: true }> }>();
 const transcriptInflight = new Map<string, Promise<ProviderResult>>();
+
+export async function summarizeTranscript(
+  transcript: string,
+  prompt: string,
+): Promise<ProviderResult> {
+  const text = transcript.trim();
+  const instruction = prompt.trim();
+  if (!text) {
+    return { ok: false, code: "unavailable", detail: "没有可总结的转写文本。" };
+  }
+  if (!instruction) {
+    return { ok: false, code: "unavailable", detail: "请选择或填写总结提示词。" };
+  }
+
+  return callOpenRouter(
+    [
+      {
+        type: "text",
+        text: [
+          instruction,
+          "",
+          "只基于下面的转写文本总结，不要补充文本中没有的信息。",
+          "输出中文，结构清晰，保留关键实体、数字、结论和行动建议。",
+          "",
+          "转写文本：",
+          text,
+        ].join("\n"),
+      },
+    ],
+    {
+      model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
+      timeoutMs: readPositiveNumber(process.env.SUMMARY_TIMEOUT_MS, readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000)),
+    },
+  );
+}
 
 export async function identifyImageContent(imageUrls: string[]): Promise<ProviderResult> {
   if (imageUrls.length === 0) {
@@ -57,9 +99,12 @@ export async function identifyImageContent(imageUrls: string[]): Promise<Provide
 
 }
 
-export async function transcribeMediaSource(sourceUrl: string | undefined): Promise<ProviderResult> {
+export async function transcribeMediaSource(
+  sourceUrl: string | undefined,
+  missingDetail = "没有采集到当前作品对应的音频资源。",
+): Promise<ProviderResult> {
   if (!sourceUrl) {
-    return { ok: false, code: "unavailable", detail: "没有采集到当前作品对应的主音频资源。" };
+    return { ok: false, code: "unavailable", detail: missingDetail };
   }
 
   const cacheKey = buildTranscriptCacheKey(sourceUrl);
@@ -75,8 +120,8 @@ export async function transcribeMediaSource(sourceUrl: string | undefined): Prom
 
   const task = (async (): Promise<ProviderResult> => {
     try {
-      const audioInput = await fetchAudioAsModelInput(sourceUrl);
-      const result = await transcribeWithOpenRouter(audioInput.input_audio);
+      const audioInputs = await fetchAudioAsModelInputs(sourceUrl);
+      const result = await transcribeAudioChunksWithOpenRouter(audioInputs);
       if (result.ok) {
         cacheTranscript(cacheKey, result);
       }
@@ -94,6 +139,53 @@ export async function transcribeMediaSource(sourceUrl: string | undefined): Prom
 
   transcriptInflight.set(cacheKey, task);
   return task;
+}
+
+async function transcribeAudioChunksWithOpenRouter(
+  inputAudios: AudioInputSegment[],
+): Promise<ProviderResult> {
+  const transcriptSegments: TranscriptSegment[] = [];
+
+  for (let index = 0; index < inputAudios.length; index += 1) {
+    const input = inputAudios[index];
+    const result = await transcribeWithOpenRouter(input.input_audio);
+    if (result.ok) {
+      transcriptSegments.push({
+        endSeconds: input.endSeconds,
+        startSeconds: input.startSeconds,
+        text: result.content,
+      });
+      continue;
+    }
+    if (result.code === "unavailable") {
+      continue;
+    }
+
+    return inputAudios.length > 1
+      ? { ...result, detail: `第${index + 1}段音频转写失败：${result.detail}` }
+      : result;
+  }
+
+  const content = joinTranscriptChunks(transcriptSegments.map((segment) => segment.text));
+  return content
+    ? { ok: true, content, transcriptSegments }
+    : { ok: false, code: "unavailable", detail: "模型没有识别到可用转录文本。" };
+}
+
+function joinTranscriptChunks(chunks: string[]): string {
+  return chunks
+    .map((chunk) => chunk.trim().replace(/\s+/g, " "))
+    .filter(Boolean)
+    .reduce((content, chunk) => {
+      if (!content) {
+        return chunk;
+      }
+      return `${content}${needsWordBoundary(content, chunk) ? " " : ""}${chunk}`;
+    }, "");
+}
+
+function needsWordBoundary(left: string, right: string): boolean {
+  return /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right);
 }
 
 async function transcribeWithOpenRouter(inputAudio: { data: string; format: string }): Promise<ProviderResult> {
@@ -150,18 +242,21 @@ async function transcribeWithOpenRouter(inputAudio: { data: string; format: stri
   };
 }
 
-async function callOpenRouter(content: ChatContentPart[]): Promise<ProviderResult> {
+async function callOpenRouter(
+  content: ChatContentPart[],
+  options?: { model?: string; timeoutMs?: number },
+): Promise<ProviderResult> {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) {
     return { ok: false, code: "not_configured", detail: "OPENROUTER_API_KEY 未配置。" };
   }
 
   const baseUrl = (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/$/, "");
-  const model = process.env.OPENROUTER_MODEL || "xiaomi/mimo-v2.5";
+  const model = options?.model || process.env.OPENROUTER_MODEL || "xiaomi/mimo-v2.5";
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000),
+    options?.timeoutMs ?? readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000),
   );
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -218,22 +313,22 @@ async function callOpenRouter(content: ChatContentPart[]): Promise<ProviderResul
   return { ok: true, content: contentText.trim() };
 }
 
-async function fetchAudioAsModelInput(sourceUrl: string): Promise<AudioContentPart> {
-  const output = sourceUrl.startsWith("data:")
-    ? await normalizeAudioToWav(parseDataUrl(sourceUrl))
-    : await normalizeAudioToWav(sourceUrl);
-  const maxAudioBytes = readPositiveNumber(process.env.OPENROUTER_MAX_AUDIO_BYTES, 8 * 1024 * 1024);
-  if (output.byteLength > maxAudioBytes) {
-    throw new Error(`抽取后的音频过大：${formatBytes(output.byteLength)}，当前上限 ${formatBytes(maxAudioBytes)}。`);
-  }
+async function fetchAudioAsModelInputs(sourceUrl: string): Promise<AudioInputSegment[]> {
+  const source = sourceUrl.startsWith("data:") ? parseDataUrl(sourceUrl) : sourceUrl;
+  const chunks = await transcodeAudioToMp3Chunks(
+    source,
+    readPositiveNumber(process.env.OPENROUTER_ASR_CHUNK_SECONDS, DEFAULT_ASR_CHUNK_SECONDS),
+  );
 
-  return {
+  return chunks.map((chunk) => ({
+    endSeconds: chunk.endSeconds,
+    startSeconds: chunk.startSeconds,
     type: "input_audio",
     input_audio: {
-      data: output.toString("base64"),
-      format: "wav",
+      data: chunk.buffer.toString("base64"),
+      format: chunk.format,
     },
-  };
+  }));
 }
 
 async function postOpenRouterAudioTranscription(
@@ -395,12 +490,4 @@ function formatOpenRouterError(
   }
 
   return `${message ?? "OpenRouter 返回错误。"}${metadata}`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) {
-    return `${Math.ceil(bytes / 1024)} KB`;
-  }
-
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

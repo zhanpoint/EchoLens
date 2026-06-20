@@ -7,6 +7,15 @@ const DOUYIN_REFERER = "https://www.douyin.com/";
 const DOUYIN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const FFMPEG_RW_TIMEOUT_US = "30000000";
+const DEFAULT_MP3_CHUNK_SECONDS = 300;
+
+export type AudioChunk = {
+  buffer: Buffer;
+  endSeconds: number;
+  format: "mp3";
+  startSeconds: number;
+};
 
 export function resolveBundledFfmpegPath(): string {
   return path.join(
@@ -25,12 +34,17 @@ export async function normalizeAudioToWav(source: Buffer | string): Promise<Buff
   const outputPath = path.join(tempDir, "audio.wav");
 
   try {
-    await fs.writeFile(inputPath, Buffer.isBuffer(source) ? source : await downloadMedia(source));
+    const inputArgs = Buffer.isBuffer(source)
+      ? ["-i", inputPath]
+      : buildRemoteInputArgs(source);
+
+    if (Buffer.isBuffer(source)) {
+      await fs.writeFile(inputPath, source);
+    }
 
     await runFfmpeg(ffmpegPath, [
       "-y",
-      "-i",
-      inputPath,
+      ...inputArgs,
       "-vn",
       "-acodec",
       "pcm_s16le",
@@ -46,31 +60,82 @@ export async function normalizeAudioToWav(source: Buffer | string): Promise<Buff
   }
 }
 
-async function downloadMedia(url: string): Promise<Buffer> {
-  const response = await fetch(url, {
-    headers: {
-      accept: "audio/*,video/*,*/*;q=0.8",
-      referer: DOUYIN_REFERER,
-      "user-agent": DOUYIN_USER_AGENT,
-    },
-  });
+export async function transcodeAudioToMp3Chunks(
+  source: Buffer | string,
+  chunkSeconds = DEFAULT_MP3_CHUNK_SECONDS,
+): Promise<AudioChunk[]> {
+  const ffmpegPath = resolveFfmpegPath();
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
+  const inputPath = path.join(tempDir, "source-audio");
+  const outputPattern = path.join(tempDir, "chunk-%03d.mp3");
 
-  if (!response.ok) {
-    throw new Error(`媒体资源下载失败：HTTP ${response.status}。抖音临时地址可能已过期。`);
+  try {
+    const inputArgs = Buffer.isBuffer(source)
+      ? ["-i", inputPath]
+      : buildRemoteInputArgs(source);
+
+    if (Buffer.isBuffer(source)) {
+      await fs.writeFile(inputPath, source);
+    }
+
+    await runFfmpeg(ffmpegPath, [
+      "-y",
+      ...inputArgs,
+      "-vn",
+      "-acodec",
+      "libmp3lame",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-b:a",
+      "48k",
+      "-f",
+      "segment",
+      "-segment_time",
+      String(chunkSeconds),
+      "-reset_timestamps",
+      "1",
+      outputPattern,
+    ]);
+
+    const files = (await fs.readdir(tempDir))
+      .filter((file) => /^chunk-\d+\.mp3$/.test(file))
+      .sort();
+    if (files.length === 0) {
+      throw new Error("ffmpeg 没有抽取到可转写的音频片段。");
+    }
+
+    return Promise.all(
+      files.map(async (file, index) => ({
+        buffer: await fs.readFile(path.join(tempDir, file)),
+        endSeconds: (index + 1) * chunkSeconds,
+        format: "mp3" as const,
+        startSeconds: index * chunkSeconds,
+      })),
+    );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
+}
 
-  const maxBytes = readPositiveNumber(process.env.ECHOLENS_MAX_SOURCE_MEDIA_BYTES, 50 * 1024 * 1024);
-  const contentLength = Number(response.headers.get("content-length") ?? 0);
-  if (contentLength > maxBytes) {
-    throw new Error(`媒体资源过大：${formatBytes(contentLength)}，当前上限 ${formatBytes(maxBytes)}。`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength > maxBytes) {
-    throw new Error(`媒体资源过大：${formatBytes(buffer.byteLength)}，当前上限 ${formatBytes(maxBytes)}。`);
-  }
-
-  return buffer;
+function buildRemoteInputArgs(url: string): string[] {
+  return [
+    "-rw_timeout",
+    FFMPEG_RW_TIMEOUT_US,
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "2",
+    "-user_agent",
+    DOUYIN_USER_AGENT,
+    "-referer",
+    DOUYIN_REFERER,
+    "-i",
+    url,
+  ];
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
@@ -94,17 +159,4 @@ function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
 
 function resolveFfmpegPath(): string {
   return resolveBundledFfmpegPath();
-}
-
-function readPositiveNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) {
-    return `${Math.ceil(bytes / 1024)} KB`;
-  }
-
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

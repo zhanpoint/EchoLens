@@ -17,14 +17,19 @@ import {
   Music2,
   Pause,
   Play,
+  Plus,
+  RefreshCw,
   ScrollText,
+  Sparkles,
   Volume2,
   X,
 } from "lucide-react";
 import {
   type FormEvent,
+  type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -38,6 +43,7 @@ import {
   type MediaAsset,
   type MediaAssetKind,
   type ResolvedDouyinWork,
+  type TranscriptSegment,
 } from "@/types/douyin";
 import { buildMediaDownloadPath, canDownloadAsset } from "@/lib/douyin/download";
 import { cn } from "@/lib/utils";
@@ -48,6 +54,21 @@ type ApiError = {
 };
 
 type ApiPayload = ApiError | ExtractResponse | { work?: ResolvedDouyinWork };
+type SummaryPayload = ApiError | { summary?: string };
+type CachedMediaAsset = {
+  downloadName: string;
+  error?: string;
+  isLoading: boolean;
+  url?: string;
+  workKey: string;
+};
+
+type SummaryPrompt = {
+  description: string;
+  id: string;
+  prompt: string;
+  title: string;
+};
 
 async function readApiPayload(response: Response, fallback: string): Promise<ApiPayload> {
   const text = await response.text();
@@ -61,6 +82,20 @@ async function readApiPayload(response: Response, fallback: string): Promise<Api
     return JSON.parse(text) as ApiPayload;
   } catch {
     throw new Error(`${fallback}接口返回的 JSON 格式无效：HTTP ${response.status}。`);
+  }
+}
+
+async function readSummaryPayload(response: Response): Promise<SummaryPayload> {
+  const text = await response.text();
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) {
+    throw new Error(`总结接口返回了非 JSON 响应：HTTP ${response.status}。`);
+  }
+
+  try {
+    return JSON.parse(text) as SummaryPayload;
+  } catch {
+    throw new Error(`总结接口返回的 JSON 格式无效：HTTP ${response.status}。`);
   }
 }
 
@@ -91,6 +126,23 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "dubbedAudio", icon: Music2, label: "下载配音", previewLabel: "试听配音" },
 ];
 
+const SUMMARY_PROMPTS: SummaryPrompt[] = [
+  {
+    id: "brief",
+    title: "总结",
+    description: "生成总结、重点和关键洞察。",
+    prompt:
+      "请将转写文本总结为清晰的内容摘要，包含：1. 核心主题；2. 主要观点；3. 关键细节；4. 可直接复用的结论。保持简洁但不要遗漏重要信息。",
+  },
+  {
+    id: "insight",
+    title: "核心要点总结",
+    description: "总结核心要点、关键结论和重要细节。",
+    prompt:
+      "请提炼转写文本中的核心要点，按层级输出：核心结论、关键论据、重要数字或实体、值得关注的洞察。不要加入原文没有的信息。",
+  },
+];
+
 export default function HomePage() {
   const [input, setInput] = useState("");
   const [work, setWork] = useState<ResolvedDouyinWork | null>(null);
@@ -100,6 +152,7 @@ export default function HomePage() {
   const [isResolving, setIsResolving] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [lastResolvedInput, setLastResolvedInput] = useState("");
+  const cachedAssets = useWorkAssetCache(work);
 
   const normalizedInput = input.trim();
   const isInputDirty = Boolean(work && normalizedInput !== lastResolvedInput);
@@ -269,7 +322,7 @@ export default function HomePage() {
                   compact
                 />
               </dl>
-              {displayWork ? <WorkDownloadActions work={displayWork} /> : null}
+              {displayWork ? <WorkDownloadActions cachedAssets={cachedAssets} work={displayWork} /> : null}
             </div>
           ) : null}
 
@@ -447,32 +500,147 @@ function InfoRow({
   href?: string;
 }) {
   const isLinked = Boolean(href && value !== "未识别");
+  const [copied, setCopied] = useState(false);
+
+  async function copyValue() {
+    await navigator.clipboard.writeText(href ?? value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
 
   return (
     <div className="min-w-0 text-left">
       <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className={cn("min-h-7 text-left font-semibold text-foreground", compact && "text-xs")}>
-        {isLinked ? (
-          <a
-            href={href}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex max-w-full items-center justify-start gap-1.5 text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
+      <dd className={cn("flex min-h-7 items-center gap-1.5 text-left font-semibold text-foreground", compact && "text-xs")}>
+        <span className="min-w-0">
+          {isLinked ? (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex max-w-full items-center justify-start gap-1.5 text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
+            >
+              <span className={cn("min-w-0", compact ? "break-all" : "truncate")}>{value}</span>
+              <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />
+            </a>
+          ) : (
+            value
+          )}
+        </span>
+        {value !== "未识别" ? (
+          <button
+            type="button"
+            onClick={() => void copyValue()}
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+            aria-label={copied ? `已复制${label}` : `复制${label}`}
+            title={copied ? "已复制" : "复制"}
           >
-            <span className={cn("min-w-0", compact ? "break-all" : "truncate")}>{value}</span>
-            <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />
-          </a>
-        ) : (
-          value
-        )}
+            {copied ? <Check className="size-3.5 text-cyan" /> : <Copy className="size-3.5" />}
+          </button>
+        ) : null}
       </dd>
     </div>
   );
 }
 
-function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
-  const actions = DOWNLOAD_ACTIONS.filter((action) => canDownloadAsset(work.kind, action.asset));
+function useWorkAssetCache(work: ResolvedDouyinWork | null): Partial<Record<MediaAssetKind, CachedMediaAsset>> {
+  const [cachedAssets, setCachedAssets] = useState<Partial<Record<MediaAssetKind, CachedMediaAsset>>>({});
+  const objectUrlsRef = useRef<string[]>([]);
+  const workId = work?.id ?? "";
+  const workKind = work?.kind;
+  const workKey = workKind && workId ? `${workKind}:${workId}` : "";
+  const cacheWork = useMemo(() => workKind && workId ? { id: workId, kind: workKind } : null, [workId, workKind]);
+  const actions = useMemo(
+    () => cacheWork ? DOWNLOAD_ACTIONS.filter((action) => canDownloadAsset(cacheWork.kind, action.asset)) : [],
+    [cacheWork],
+  );
+
+  useEffect(() => {
+    if (!cacheWork) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const objectUrls: string[] = [];
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    objectUrlsRef.current = objectUrls;
+
+    queueMicrotask(() => {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      setCachedAssets((current) => {
+        const next = { ...current };
+        for (const action of actions) {
+          next[action.asset] = {
+            downloadName: buildCachedAssetFilename(cacheWork, action.asset),
+            isLoading: true,
+            workKey,
+          };
+        }
+        return next;
+      });
+    });
+
+    for (const action of actions) {
+      void cacheAsset(cacheWork, workKey, action.asset, controller.signal)
+        .then((cached) => {
+          if (!cached.url) {
+            return;
+          }
+          if (controller.signal.aborted) {
+            URL.revokeObjectURL(cached.url);
+            return;
+          }
+          objectUrls.push(cached.url);
+          setCachedAssets((current) => ({
+            ...current,
+            [action.asset]: cached,
+          }));
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          setCachedAssets((current) => ({
+            ...current,
+            [action.asset]: {
+              downloadName: buildCachedAssetFilename(cacheWork, action.asset),
+              error: error instanceof Error ? error.message : "资源缓存失败。",
+              isLoading: false,
+              workKey,
+            },
+          }));
+        });
+    }
+
+    return () => {
+      controller.abort();
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      objectUrlsRef.current = [];
+    };
+  }, [actions, cacheWork, workKey]);
+
+  return cachedAssets;
+}
+
+function WorkDownloadActions({
+  cachedAssets,
+  work,
+}: {
+  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>;
+  work: ResolvedDouyinWork;
+}) {
+  const workKey = `${work.kind}:${work.id}`;
+  const actions = useMemo(
+    () => DOWNLOAD_ACTIONS.filter((action) => canDownloadAsset(work.kind, action.asset)),
+    [work.kind],
+  );
   const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
+
+  const previewCache = preview ? cachedAssets[preview.asset] : undefined;
+  const previewCached = previewCache?.workKey === workKey ? previewCache : undefined;
 
   return (
     <>
@@ -480,6 +648,12 @@ function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
         {actions.map((action) => {
           const href = buildMediaDownloadPath(work, action.asset);
           const assetLabel = action.label.replace("下载", "");
+          const maybeCached = cachedAssets[action.asset];
+          const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
+          const assetUrl = cached?.url ?? href;
+          const isCaching = !cached || cached.isLoading;
+          const hasCacheError = Boolean(cached?.error && !cached.url);
+          const cacheTitle = cached?.error ?? (isCaching ? "正在缓存到本地" : action.previewLabel);
 
           return (
             <div
@@ -496,20 +670,43 @@ function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
                 <button
                   type="button"
                   onClick={() => setPreview(action)}
-                  className="inline-flex size-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:border-cyan/30 hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.96]"
+                  disabled={isCaching || hasCacheError}
+                  className={cn(
+                    "inline-flex size-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:border-cyan/30 hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.96] disabled:opacity-50",
+                    isCaching ? "disabled:cursor-wait" : "disabled:cursor-not-allowed",
+                  )}
                   aria-label={action.previewLabel}
-                  title={action.previewLabel}
+                  title={cacheTitle}
                 >
-                  <Eye className="size-4" aria-hidden="true" />
+                  {isCaching ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : hasCacheError ? (
+                    <AlertCircle className="size-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="size-4" aria-hidden="true" />
+                  )}
                 </button>
-                <a
-                  href={href}
-                  className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan px-3 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.96]"
-                  title={action.label}
-                >
-                  <Download className="size-4" aria-hidden="true" />
-                  下载
-                </a>
+                {hasCacheError ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-white/10 px-3 text-sm font-semibold text-muted-foreground opacity-60"
+                    title={cached?.error}
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                    下载
+                  </button>
+                ) : (
+                  <a
+                    href={assetUrl}
+                    download={cached?.url ? cached.downloadName : undefined}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan px-3 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.96]"
+                    title={isCaching ? "正在缓存到本地，当前会使用服务端下载" : action.label}
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                    下载
+                  </a>
+                )}
               </div>
             </div>
           );
@@ -518,8 +715,9 @@ function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
       {preview ? (
         <AssetPreviewDialog
           action={preview}
-          previewUrl={buildMediaDownloadPath(work, preview.asset, { preview: true })}
-          downloadUrl={buildMediaDownloadPath(work, preview.asset)}
+          previewUrl={previewCached?.url ?? buildMediaDownloadPath(work, preview.asset, { preview: true })}
+          downloadName={previewCached?.downloadName}
+          downloadUrl={previewCached?.url ?? buildMediaDownloadPath(work, preview.asset)}
           onClose={() => setPreview(null)}
         />
       ) : null}
@@ -527,13 +725,85 @@ function WorkDownloadActions({ work }: { work: ResolvedDouyinWork }) {
   );
 }
 
+async function cacheAsset(
+  work: Pick<ResolvedDouyinWork, "id" | "kind">,
+  workKey: string,
+  asset: MediaAssetKind,
+  signal: AbortSignal,
+): Promise<CachedMediaAsset> {
+  const response = await fetch(buildMediaDownloadPath(work, asset), {
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await readCacheAssetError(response));
+  }
+
+  const blob = await response.blob();
+  return {
+    downloadName: buildCachedAssetFilename(work, asset, blob.type),
+    isLoading: false,
+    url: URL.createObjectURL(blob),
+    workKey,
+  };
+}
+
+async function readCacheAssetError(response: Response): Promise<string> {
+  const fallback = `资源缓存失败：HTTP ${response.status}。`;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) {
+    return fallback;
+  }
+
+  try {
+    const payload = await response.json() as Partial<ApiError>;
+    return payload.error ? `资源缓存失败：${payload.error}` : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildCachedAssetFilename(
+  work: { id: string },
+  asset: MediaAssetKind,
+  contentType = "",
+): string {
+  return `echolens-${work.id}-${asset}.${readCachedAssetExtension(asset, contentType)}`;
+}
+
+function readCachedAssetExtension(asset: MediaAssetKind, contentType: string): string {
+  if (contentType.includes("webp")) {
+    return "webp";
+  }
+  if (contentType.includes("png")) {
+    return "png";
+  }
+  if (contentType.includes("jpeg") || contentType.includes("jpg")) {
+    return "jpg";
+  }
+  if (contentType.includes("wav")) {
+    return "wav";
+  }
+  if (contentType.includes("mpeg")) {
+    return "mp3";
+  }
+  if (contentType.includes("mp4")) {
+    return asset === "dubbedAudio" ? "m4a" : "mp4";
+  }
+
+  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : asset === "dubbedAudio" ? "m4a" : "mp4";
+}
+
 function AssetPreviewDialog({
   action,
+  downloadName,
   previewUrl,
   downloadUrl,
   onClose,
 }: {
   action: (typeof DOWNLOAD_ACTIONS)[number];
+  downloadName?: string;
   previewUrl: string;
   downloadUrl: string;
   onClose: () => void;
@@ -549,6 +819,7 @@ function AssetPreviewDialog({
           <div className="flex items-center gap-1">
             <a
               href={downloadUrl}
+              download={downloadName}
               className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
               aria-label={action.label}
               title={action.label}
@@ -640,6 +911,7 @@ function VideoPreview({ url }: { url: string }) {
 
 function AudioPreview({ url }: { url: string }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -650,6 +922,7 @@ function AudioPreview({ url }: { url: string }) {
     if (!audio) {
       return;
     }
+    setError(null);
     setLoaded(true);
     setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
   }
@@ -683,11 +956,11 @@ function AudioPreview({ url }: { url: string }) {
 
   return (
     <div className="relative rounded-md border border-cyan/15 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-4 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)]">
-      {!loaded ? (
+      {error || !loaded ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-black/45 backdrop-blur-[2px]">
           <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin text-cyan" />
-            音频加载中
+            {error ? <AlertCircle className="size-4 text-amber" /> : <Loader2 className="size-4 animate-spin text-cyan" />}
+            {error ?? "音频加载中"}
           </div>
         </div>
       ) : null}
@@ -701,12 +974,17 @@ function AudioPreview({ url }: { url: string }) {
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
+        onError={() => {
+          setPlaying(false);
+          setLoaded(false);
+          setError("音频资源加载失败。");
+        }}
       />
-      <div className={cn("flex min-h-14 items-center gap-3 transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}>
+      <div className={cn("flex min-h-14 items-center gap-3 transition-opacity duration-200", loaded && !error ? "opacity-100" : "opacity-0")}>
         <button
           type="button"
           onClick={() => void togglePlayback()}
-          disabled={!loaded}
+          disabled={!loaded || Boolean(error)}
           className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-cyan/25 bg-cyan/10 text-cyan transition hover:bg-cyan/15 hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
           aria-label={playing ? "暂停音频" : "播放音频"}
           title={playing ? "暂停" : "播放"}
@@ -755,17 +1033,6 @@ function orderResults(
 
 function ResultBlock({ result }: { result: ExtractionResult }) {
   const ok = result.status === "success";
-  const [copied, setCopied] = useState(false);
-
-  async function copyContent() {
-    if (!result.content) {
-      return;
-    }
-
-    await navigator.clipboard.writeText(result.content);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
 
   return (
     <article>
@@ -776,20 +1043,11 @@ function ResultBlock({ result }: { result: ExtractionResult }) {
         </div>
       </div>
       {result.content ? (
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => void copyContent()}
-            className="absolute right-2 top-2 z-10 inline-flex size-8 items-center justify-center rounded-md bg-background/80 text-muted-foreground backdrop-blur transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
-            aria-label={copied ? "已复制" : `复制${result.label}`}
-            title={copied ? "已复制" : "复制"}
-          >
-            {copied ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
-          </button>
-          <div className="content-canvas content-scroll max-h-[36rem] overflow-auto rounded-md border border-white/[0.16] bg-background/70 py-4 pl-4 pr-12 text-sm leading-7 text-foreground/90">
-            <ContentText text={result.content} />
-          </div>
-        </div>
+        isTranscriptFeature(result.feature) ? (
+          <TranscriptResultPanel result={result} />
+        ) : (
+          <TextResultPanel label={result.label} text={result.content} />
+        )
       ) : result.assets?.length ? (
         <MediaAssetPanel assets={result.assets} />
       ) : (
@@ -799,6 +1057,432 @@ function ResultBlock({ result }: { result: ExtractionResult }) {
       )}
     </article>
   );
+}
+
+function TextResultPanel({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyContent() {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => void copyContent()}
+        className="absolute right-2 top-2 z-10 inline-flex size-8 items-center justify-center rounded-md bg-background/80 text-muted-foreground backdrop-blur transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+        aria-label={copied ? "已复制" : `复制${label}`}
+        title={copied ? "已复制" : "复制"}
+      >
+        {copied ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
+      </button>
+      <div className="content-canvas content-scroll max-h-[36rem] overflow-auto rounded-md border border-white/[0.16] bg-background/70 py-4 pl-4 pr-12 text-sm leading-7 text-foreground/90">
+        <ContentText text={text} />
+      </div>
+    </div>
+  );
+}
+
+function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
+  const [copiedAll, setCopiedAll] = useState(false);
+  const [summaryMode, setSummaryMode] = useState(false);
+  const [summary, setSummary] = useState("");
+  const [summaryError, setSummaryError] = useState("");
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [customPrompts, setCustomPrompts] = useState<SummaryPrompt[]>([]);
+  const [promptDialogOpen, setPromptDialogOpen] = useState(false);
+  const segments = normalizeTranscriptSegments(result.content ?? "", result.transcriptSegments);
+  const prompts = [...SUMMARY_PROMPTS, ...customPrompts];
+  const hasSummaryOutput = isSummarizing || Boolean(summary || summaryError);
+
+  async function copyAll() {
+    await navigator.clipboard.writeText(result.content ?? "");
+    setCopiedAll(true);
+    window.setTimeout(() => setCopiedAll(false), 1600);
+  }
+
+  async function summarize(prompt: SummaryPrompt) {
+    setSummaryMode(true);
+    setSummary("");
+    setSummaryError("");
+    setIsSummarizing(true);
+
+    try {
+      const response = await fetch("/api/douyin/summarize", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: prompt.prompt, text: result.content }),
+      });
+      const payload = await readSummaryPayload(response);
+      if (!response.ok || !("summary" in payload) || !payload.summary) {
+        throw new Error("error" in payload ? payload.error : "总结失败。");
+      }
+      setSummary(payload.summary);
+    } catch (error) {
+      setSummaryError(error instanceof Error ? error.message : "总结失败。");
+    } finally {
+      setIsSummarizing(false);
+    }
+  }
+
+  function saveCustomPrompt(title: string, prompt: string) {
+    const customPrompt: SummaryPrompt = {
+      description: prompt,
+      id: `custom-${Date.now()}`,
+      prompt,
+      title,
+    };
+    setCustomPrompts((current) => [...current, customPrompt]);
+    setPromptDialogOpen(false);
+    void summarize(customPrompt);
+  }
+
+  function resetSummary() {
+    setSummary("");
+    setSummaryError("");
+    setIsSummarizing(false);
+  }
+
+  return (
+    <div className={cn("grid gap-3", summaryMode ? "lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.85fr)]" : "grid-cols-1")}>
+      <section className="flex min-w-0 flex-col overflow-hidden rounded-md border border-white/[0.16] bg-background/70">
+        <div className="flex min-h-[4.25rem] flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
+          <span className="text-xs font-medium text-muted-foreground">原文</span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setSummaryMode((value) => !value)}
+              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 bg-cyan/[0.08] px-2.5 text-xs font-semibold text-cyan transition hover:border-cyan/45 hover:bg-cyan/[0.12] active:scale-[0.96]"
+              title={summaryMode ? "收起总结" : "AI总结"}
+            >
+              <Sparkles className="size-3.5" aria-hidden="true" />
+              AI总结
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyAll()}
+              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+              aria-label={copiedAll ? `已复制${result.label}` : `复制${result.label}`}
+              title={copiedAll ? "已复制" : "复制全文"}
+            >
+              {copiedAll ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
+            </button>
+          </div>
+        </div>
+        <div className="content-scroll max-h-[36rem] flex-1 space-y-3 overflow-auto p-3 text-sm leading-7 text-foreground/90">
+          {segments.map((segment, index) => (
+            <TranscriptSegmentCard
+              key={`${segment.startSeconds}-${index}`}
+              segment={segment}
+            />
+          ))}
+        </div>
+      </section>
+
+      {summaryMode ? (
+        <section className="flex min-w-0 flex-col overflow-hidden rounded-md border border-cyan/20 bg-[linear-gradient(180deg,rgb(6_182_212_/_0.06),rgb(255_255_255_/_0.018))]">
+          <div className="flex min-h-[4.25rem] items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-cyan">
+              <Sparkles className="size-3.5" aria-hidden="true" />
+              AI总结
+            </span>
+            {hasSummaryOutput && !isSummarizing ? (
+              <button
+                type="button"
+                onClick={resetSummary}
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] active:scale-[0.96]"
+              >
+                <RefreshCw className="size-3.5" aria-hidden="true" />
+                重新总结
+              </button>
+            ) : null}
+          </div>
+          <div className="content-scroll max-h-[36rem] flex-1 overflow-auto p-3">
+            {hasSummaryOutput ? (
+              isSummarizing ? (
+                <div className="flex h-full min-h-52 items-center justify-center gap-2 text-sm leading-7 text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin text-cyan" />
+                  正在总结
+                </div>
+              ) : (
+                <div className="min-h-52 rounded-md border border-white/[0.14] bg-black/20 p-4 text-sm leading-7 text-foreground/90">
+                  {summaryError ? (
+                    <div className="flex h-40 items-center justify-center gap-2 text-amber">
+                      <AlertCircle className="size-4" />
+                      {summaryError}
+                    </div>
+                  ) : (
+                    <MarkdownPreview text={summary} />
+                  )}
+                </div>
+              )
+            ) : (
+              <div className="space-y-2.5">
+                <div className="grid gap-2">
+                  {prompts.map((prompt) => (
+                    <button
+                      key={prompt.id}
+                      type="button"
+                      onClick={() => void summarize(prompt)}
+                      className="rounded-md border border-white/10 bg-black/15 px-3 py-2 text-left transition hover:border-cyan/35 hover:bg-cyan/[0.055] active:scale-[0.99]"
+                    >
+                      <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
+                      <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {prompt.description}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPromptDialogOpen(true)}
+                  className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-md border border-dashed border-cyan/30 bg-cyan/[0.045] px-3 text-sm font-semibold text-cyan transition hover:border-cyan/55 hover:bg-cyan/[0.08] active:scale-[0.98]"
+                >
+                  <Plus className="size-4" aria-hidden="true" />
+                  添加自定义提示词
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {promptDialogOpen ? (
+        <CustomPromptDialog
+          onClose={() => setPromptDialogOpen(false)}
+          onSave={saveCustomPrompt}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function MarkdownPreview({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const nodes: ReactNode[] = [];
+  let listItems: string[] = [];
+  let listKey = 0;
+
+  function flushList() {
+    if (!listItems.length) {
+      return;
+    }
+
+    nodes.push(
+      <ul key={`list-${listKey}`} className="my-3 list-disc space-y-1 pl-5 text-foreground/90">
+        {listItems.map((item, index) => (
+          <li key={`${listKey}-${index}`}>
+            <MarkdownInline text={item} />
+          </li>
+        ))}
+      </ul>,
+    );
+    listKey += 1;
+    listItems = [];
+  }
+
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/u);
+    const listItem = trimmed.match(/^[-*]\s+(.+)$/u);
+    const orderedListItem = trimmed.match(/^\d+[.)]\s+(.+)$/u);
+
+    if (!trimmed) {
+      flushList();
+      nodes.push(<div key={`blank-${index}`} className="h-2" />);
+      return;
+    }
+
+    if (listItem || orderedListItem) {
+      listItems.push((listItem?.[1] ?? orderedListItem?.[1] ?? "").trim());
+      return;
+    }
+
+    flushList();
+
+    if (heading) {
+      const level = heading[1].length;
+      nodes.push(
+        <div
+          key={`${index}-${trimmed}`}
+          className={cn(
+            "mt-4 first:mt-0 font-semibold text-foreground",
+            level === 1 && "text-base",
+            level === 2 && "text-sm",
+            level === 3 && "text-sm text-cyan",
+          )}
+        >
+          <MarkdownInline text={heading[2]} />
+        </div>,
+      );
+      return;
+    }
+
+    nodes.push(
+      <p key={`${index}-${trimmed.slice(0, 12)}`} className="my-2 whitespace-pre-wrap break-words text-foreground/90">
+        <MarkdownInline text={trimmed} />
+      </p>,
+    );
+  });
+
+  flushList();
+
+  return <div className="break-words">{nodes}</div>;
+}
+
+function MarkdownInline({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/gu);
+
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={`${index}-${part.slice(0, 8)}`} className="font-semibold text-foreground">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code
+          key={`${index}-${part.slice(0, 8)}`}
+          className="rounded-sm border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-cyan"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+
+    return <span key={`${index}-${part.slice(0, 8)}`}>{part}</span>;
+  });
+}
+
+function TranscriptSegmentCard({ segment }: { segment: TranscriptSegment }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copySegment() {
+    await navigator.clipboard.writeText(segment.text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="group relative rounded-md border border-transparent p-3 transition hover:border-cyan/20 hover:bg-cyan/[0.045]">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="font-mono text-sm font-semibold text-cyan">
+          {formatSegmentTime(segment.startSeconds)}
+        </span>
+        <button
+          type="button"
+          onClick={() => void copySegment()}
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground opacity-0 transition hover:bg-amber/[0.12] hover:text-amber group-hover:opacity-100 focus:opacity-100 active:scale-[0.94]"
+          aria-label={copied ? "已复制该时间段" : "复制该时间段"}
+          title={copied ? "已复制" : "复制该时间段"}
+        >
+          {copied ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
+        </button>
+      </div>
+      <div className="whitespace-pre-wrap break-words text-foreground/90">
+        <TaggedText text={segment.text} />
+      </div>
+    </div>
+  );
+}
+
+function CustomPromptDialog({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (title: string, prompt: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const canSave = title.trim().length > 0 && prompt.trim().length > 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-lg border border-white/20 bg-background p-4 shadow-2xl shadow-black/40">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h4 className="text-base font-semibold">添加自定义提示词</h4>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+            aria-label="关闭"
+            title="关闭"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+        <label className="block">
+          <span className="mb-2 block text-sm font-medium text-foreground">标题</span>
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            className="h-10 w-full rounded-md border border-white/15 bg-black/20 px-3 text-sm outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
+            placeholder="请输入标题。"
+          />
+        </label>
+        <label className="mt-3 block">
+          <span className="mb-2 block text-sm font-medium text-foreground">描述</span>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            className="h-36 w-full resize-none rounded-md border border-white/15 bg-black/20 p-3 text-sm leading-6 outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
+            placeholder="请输入描述。"
+          />
+        </label>
+        <div className="mt-4 flex justify-end gap-2.5">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-foreground transition hover:bg-white/10 active:scale-[0.98]"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => onSave(title.trim(), prompt.trim())}
+            disabled={!canSave}
+            className="inline-flex h-9 items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function isTranscriptFeature(feature: ExtractionFeature): boolean {
+  return feature === "originalTranscript" || feature === "dubbedTranscript";
+}
+
+function normalizeTranscriptSegments(
+  content: string,
+  segments: TranscriptSegment[] | undefined,
+): TranscriptSegment[] {
+  const usableSegments = segments?.filter((segment) => segment.text.trim());
+  if (usableSegments?.length) {
+    return usableSegments;
+  }
+
+  return [{ endSeconds: 0, startSeconds: 0, text: content }];
+}
+
+function formatSegmentTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "00:00";
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes.toString().padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 function MediaAssetPanel({ assets }: { assets: MediaAsset[] }) {

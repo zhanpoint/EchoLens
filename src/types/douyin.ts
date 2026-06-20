@@ -26,6 +26,12 @@ export type MediaAsset = {
   url: string;
 };
 
+export type TranscriptSegment = {
+  endSeconds: number;
+  startSeconds: number;
+  text: string;
+};
+
 export type ResolvedDouyinWork = {
   inputUrl: string;
   finalUrl: string;
@@ -43,6 +49,7 @@ export type ExtractionResult = {
   content?: string;
   assets?: MediaAsset[];
   detail?: string;
+  transcriptSegments?: TranscriptSegment[];
 };
 
 export type ExtractResponse = {

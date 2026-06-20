@@ -52,13 +52,17 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
   }
   if (asset === "originalAudio") {
-    const audio = await normalizeAudioToWav(assetUrl);
-    return mediaBufferResponse(audio, {
-      contentType: "audio/wav",
-      filename: buildFilename(id, asset, "audio/wav"),
-      inline: isPreview,
-      range: requestRange,
-    });
+    try {
+      const audio = await normalizeAudioToWav(assetUrl);
+      return mediaBufferResponse(audio, {
+        contentType: "audio/wav",
+        filename: buildFilename(id, asset, "audio/wav"),
+        inline: isPreview,
+        range: requestRange,
+      });
+    } catch (error) {
+      return NextResponse.json({ error: formatAudioError(error) }, { status: 502 });
+    }
   }
 
   const upstream = await fetch(assetUrl, {
@@ -199,4 +203,12 @@ function defaultContentType(asset: MediaAssetKind): string {
     return "audio/mp4";
   }
   return "video/mp4";
+}
+
+function formatAudioError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  return "视频原声音轨抽取失败。";
 }

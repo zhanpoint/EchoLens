@@ -107,7 +107,7 @@ export function parseWorkMetadata(
     caption: readCaption(detail, kind),
     coverUrl: readCoverUrl(detail, kind),
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
-    audioUrls: readAudioUrls(detail.video, detail.music),
+    audioUrls: readAudioUrls(detail.music, kind),
     imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
     videoUrl: kind === "video" ? readVideoUrl(detail.video) : undefined,
   };
@@ -263,6 +263,10 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
+function readBoolean(value: unknown): boolean {
+  return value === true;
+}
+
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -393,18 +397,26 @@ function readCoverFromVideo(video: Record<string, unknown> | null): string | und
   );
 }
 
-function readAudioUrls(videoValue: unknown, musicValue: unknown): string[] {
-  const video = videoValue && typeof videoValue === "object"
-    ? videoValue as Record<string, unknown>
-    : null;
+function readAudioUrls(musicValue: unknown, kind: DouyinKind | undefined): string[] {
   const music = musicValue && typeof musicValue === "object"
     ? musicValue as Record<string, unknown>
     : null;
+  if (!music || (kind === "video" && isOriginalSoundMusic(music))) {
+    return [];
+  }
 
-  return uniqueMediaReferences([
-    ...readBitRateAudioUrls(video?.bit_rate_audio ?? video?.bitRateAudio),
-    readUrlList(music?.play_url ?? music?.playUrl)[0],
-  ].filter((url): url is string => Boolean(url))).slice(0, 1);
+  return uniqueMediaReferences(
+    [readUrlList(music?.play_url ?? music?.playUrl)[0]]
+      .filter((url): url is string => Boolean(url)),
+  ).slice(0, 1);
+}
+
+function isOriginalSoundMusic(music: Record<string, unknown>): boolean {
+  if (readBoolean(music.is_original_sound ?? music.isOriginalSound)) {
+    return true;
+  }
+
+  return Boolean(readString(music.title)?.includes("创作的原声"));
 }
 
 function readVideoUrl(value: unknown): string | undefined {
@@ -444,46 +456,6 @@ function readBitRateVideoUrl(value: unknown): string | undefined {
     .sort((left, right) => right.pixels - left.pixels || right.bitRate - left.bitRate)[0];
 
   return selected?.urls[0];
-}
-
-function readBitRateAudioUrls(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const selected = value
-    .flatMap((item) => {
-      if (!item || typeof item !== "object") {
-        return [];
-      }
-
-      const record = item as Record<string, unknown>;
-      const audioMeta = record.audio_meta ?? record.audioMeta;
-      const urls = readAudioUrlList(audioMeta);
-      const quality = readNumber(record.audio_quality ?? record.audioQuality) ?? 0;
-      const bitRate = readNestedNumber(audioMeta, "bitrate") ?? 0;
-      return urls.length > 0
-        ? [{ quality, bitRate, urls }]
-        : [];
-    })
-    .sort((left, right) => right.bitRate - left.bitRate || right.quality - left.quality)[0];
-
-  return selected?.urls.slice(0, 1) ?? [];
-}
-
-function readAudioUrlList(value: unknown): string[] {
-  if (!value || typeof value !== "object") {
-    return [];
-  }
-
-  const urlList = (value as Record<string, unknown>).url_list ?? (value as Record<string, unknown>).urlList;
-  if (!urlList || typeof urlList !== "object") {
-    return [];
-  }
-
-  const record = urlList as Record<string, unknown>;
-  return [record.main_url, record.mainUrl, record.backup_url, record.backupUrl]
-    .filter((url): url is string => typeof url === "string" && url.trim().startsWith("http"));
 }
 
 function readNestedNumber(value: unknown, key: string): number | undefined {

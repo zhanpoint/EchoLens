@@ -105,12 +105,18 @@ async function buildResults(
     }
 
     if (feature === "originalTranscript") {
-      const modelResult = await transcribeMediaSource(content.videoUrl);
+      const modelResult = await transcribeMediaSource(
+        content.videoUrl,
+        "没有采集到当前作品对应的视频资源。",
+      );
       results.push(providerResult(feature, kind, modelResult));
     }
 
     if (feature === "dubbedTranscript") {
-      const modelResult = await transcribeMediaSource(content.audioUrls[0]);
+      const modelResult = await transcribeMediaSource(
+        content.audioUrls[0],
+        "没有采集到当前作品对应的配音资源。",
+      );
       results.push(providerResult(feature, kind, modelResult));
     }
   }
@@ -176,10 +182,11 @@ function providerResult(
     ? {
         feature,
         label: getFeatureLabel(feature, kind),
-        status: "success",
-        source: "openrouter",
-        content: result.content,
-      }
+      status: "success",
+      source: "openrouter",
+      content: result.content,
+      transcriptSegments: result.transcriptSegments,
+    }
     : {
         feature,
         label: getFeatureLabel(feature, kind),

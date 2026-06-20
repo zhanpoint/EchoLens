@@ -3,6 +3,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
 import { normalizeAudioToWav, resolveBundledFfmpegPath } from "../lib/media/audio";
@@ -348,7 +350,7 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("locks one high-quality primary audio url from douyin detail payloads", () => {
+  it("uses music play url as the dubbed audio asset for video works", () => {
     expect(
       parseWorkMetadata(
         {
@@ -376,13 +378,48 @@ describe("douyin url utilities", () => {
                 },
               ],
             },
+            music: {
+              is_original_sound: false,
+              play_url: {
+                url_list: ["https://example.com/music-audio.m4a"],
+              },
+            },
           },
         },
         "7646726820692547263",
+        "video",
       ),
     ).toMatchObject({
-      audioUrls: ["https://example.com/high-audio.m4a"],
+      audioUrls: ["https://example.com/music-audio.m4a"],
       imageUrls: [],
+    });
+  });
+
+  it("does not reuse a video's original sound music as dubbed audio", () => {
+    expect(
+      parseWorkMetadata(
+        {
+          aweme_detail: {
+            music: {
+              title: "@元见UGEN创作的原声",
+              is_original_sound: true,
+              play_url: {
+                url_list: ["https://example.com/original-sound.mp3"],
+              },
+            },
+            video: {
+              play_addr: {
+                url_list: ["https://example.com/video-with-embedded-audio.mp4"],
+              },
+            },
+          },
+        },
+        "7651499056660745491",
+        "video",
+      ),
+    ).toMatchObject({
+      audioUrls: [],
+      videoUrl: "https://example.com/video-with-embedded-audio.mp4",
     });
   });
 
@@ -406,44 +443,6 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       audioUrls: ["https://sf11-cdn-tos.douyinstatic.com/obj/audio-main"],
-    });
-  });
-
-  it("prefers the highest bitrate audio asset without trying backup urls", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            video: {
-              bit_rate_audio: [
-                {
-                  audio_quality: 9,
-                  audio_meta: {
-                    bitrate: 48000,
-                    url_list: {
-                      main_url: "https://example.com/lower-bitrate.m4a",
-                    },
-                  },
-                },
-                {
-                  audio_quality: 5,
-                  audio_meta: {
-                    bitrate: 96000,
-                    url_list: {
-                      main_url: "https://example.com/highest-bitrate.m4a",
-                      backup_url: "https://example.com/highest-bitrate-backup.m4a",
-                    },
-                  },
-                },
-              ],
-            },
-          },
-        },
-        "7646726820692547263",
-        "video",
-      ),
-    ).toMatchObject({
-      audioUrls: ["https://example.com/highest-bitrate.m4a"],
     });
   });
 
@@ -522,7 +521,7 @@ describe("audio transcription preparation", () => {
     expect(resolveBundledFfmpegPath()).toContain(path.join("node_modules", "@ffmpeg-installer"));
   });
 
-  it("downloads remote media before handing local files to ffmpeg", async () => {
+  it("streams remote media through ffmpeg without downloading it through fetch", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const wavPath = path.join(tempDir, "tone.wav");
     const ffmpegPath = path.join(
@@ -542,26 +541,39 @@ describe("audio transcription preparation", () => {
         "sine=frequency=440:duration=0.1",
         wavPath,
       ]);
-      vi.spyOn(globalThis, "fetch").mockResolvedValue(
-        new Response(await fs.readFile(wavPath), {
-          headers: {
-            "content-length": String((await fs.stat(wavPath)).size),
-          },
-        }),
-      );
+      const source = await fs.readFile(wavPath);
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      let referer = "";
+      let userAgent = "";
+      const server = createServer((request, response) => {
+        referer = request.headers.referer ?? "";
+        userAgent = request.headers["user-agent"] ?? "";
+        response.writeHead(200, {
+          "content-length": String(source.byteLength),
+          "content-type": "audio/wav",
+        });
+        response.end(source);
+      });
 
-      const output = await normalizeAudioToWav("https://example.com/video.mp4");
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
 
-      expect(globalThis.fetch).toHaveBeenCalledWith(
-        "https://example.com/video.mp4",
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            referer: "https://www.douyin.com/",
-          }),
-        }),
-      );
-      expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
-      expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
+      try {
+        const { port } = server.address() as AddressInfo;
+        const output = await normalizeAudioToWav(`http://127.0.0.1:${port}/video.mp4`);
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(referer).toBe("https://www.douyin.com/");
+        expect(userAgent).toContain("Mozilla/5.0");
+        expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
+        expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
