@@ -126,6 +126,12 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "dubbedAudio", icon: Music2, label: "下载配音", previewLabel: "试听配音" },
 ];
 
+const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKind>> = {
+  cover: "cover",
+  originalTranscript: "originalAudio",
+  dubbedTranscript: "dubbedAudio",
+};
+
 const SUMMARY_PROMPTS: SummaryPrompt[] = [
   {
     id: "brief",
@@ -157,9 +163,26 @@ export default function HomePage() {
   const normalizedInput = input.trim();
   const isInputDirty = Boolean(work && normalizedInput !== lastResolvedInput);
   const activeKind = work && !isInputDirty ? work.kind : null;
-  const availableFeatures = activeKind ? FEATURES_BY_KIND[activeKind] : [];
-  const canExtract = Boolean(work && !isInputDirty && selected.length > 0 && !isExtracting);
   const displayWork = activeKind ? work : null;
+  const availableFeatures = useMemo(
+    () => displayWork ? getAvailableFeatures(displayWork, cachedAssets) : [],
+    [cachedAssets, displayWork],
+  );
+  const selectedFeatures = useMemo(
+    () => availableFeatures.filter((feature) => selected.includes(feature)),
+    [availableFeatures, selected],
+  );
+  const cacheBlockMessage = useMemo(
+    () => displayWork ? getExtractionCacheBlockMessage(selectedFeatures, cachedAssets, displayWork) : null,
+    [cachedAssets, displayWork, selectedFeatures],
+  );
+  const visibleResults = useMemo(
+    () => results.filter((result) => availableFeatures.includes(result.feature)),
+    [availableFeatures, results],
+  );
+  const canExtract = Boolean(
+    work && !isInputDirty && selectedFeatures.length > 0 && !isExtracting && !cacheBlockMessage,
+  );
 
   const resolveInput = useCallback(async (value: string, options?: { silent?: boolean }) => {
     const valueToResolve = value.trim();
@@ -216,11 +239,15 @@ export default function HomePage() {
   }, [lastResolvedInput, normalizedInput, resolveInput]);
 
   async function extract() {
-    if (!canExtract) {
+    if (!canExtract || !work || isInputDirty) {
       return;
     }
 
-    const orderedFeatures = availableFeatures.filter((feature) => selected.includes(feature));
+    if (cacheBlockMessage) {
+      setError(cacheBlockMessage);
+      return;
+    }
+
     setIsExtracting(true);
     setError(null);
     setResults([]);
@@ -229,7 +256,7 @@ export default function HomePage() {
       const response = await fetch("/api/douyin/extract", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input: normalizedInput, features: orderedFeatures }),
+        body: JSON.stringify({ input: normalizedInput, features: selectedFeatures }),
       });
       const payload = await readApiPayload(response, "提取失败。");
 
@@ -239,7 +266,7 @@ export default function HomePage() {
 
       setLastResolvedInput(normalizedInput);
       setWork(payload.work);
-      setResults(orderResults(payload.results, orderedFeatures));
+      setResults(orderResults(payload.results, selectedFeatures));
     } catch (extractError) {
       setError(extractError instanceof Error ? extractError.message : "提取失败。");
     } finally {
@@ -361,6 +388,13 @@ export default function HomePage() {
             </div>
           ) : null}
 
+          {!error && cacheBlockMessage ? (
+            <div className="mt-5 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-cyan">
+              <Loader2 className="size-4 shrink-0 animate-spin" />
+              <span>{cacheBlockMessage}</span>
+            </div>
+          ) : null}
+
           {activeKind ? (
             <div className="mt-5 flex justify-center border-t border-white/10 pt-5">
               <button
@@ -386,12 +420,12 @@ export default function HomePage() {
         <section
           className={cn(
             "rounded-lg border border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
-            results.length > 0 ? "p-5" : "overflow-hidden p-0",
+            visibleResults.length > 0 ? "p-5" : "overflow-hidden p-0",
           )}
         >
-          {results.length > 0 ? (
+          {visibleResults.length > 0 ? (
             <div className="grid gap-5">
-              {results.map((result) => (
+              {visibleResults.map((result) => (
                 <ResultBlock key={result.feature} result={result} />
               ))}
             </div>
@@ -423,6 +457,61 @@ function EmptyResults({ isExtracting }: { isExtracting: boolean }) {
         </p>
       </div>
     </div>
+  );
+}
+
+function getAvailableFeatures(
+  work: ResolvedDouyinWork,
+  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>,
+): ExtractionFeature[] {
+  return FEATURES_BY_KIND[work.kind].filter((feature) => {
+    const asset = REQUIRED_ASSET_BY_FEATURE[feature];
+    if (!asset || !canDownloadAsset(work.kind, asset)) {
+      return true;
+    }
+
+    return !isDownloadResourceUnavailable(getCachedAsset(cachedAssets, work, asset));
+  });
+}
+
+function getExtractionCacheBlockMessage(
+  features: ExtractionFeature[],
+  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>,
+  work: ResolvedDouyinWork,
+): string | null {
+  for (const feature of features) {
+    const asset = REQUIRED_ASSET_BY_FEATURE[feature];
+    if (!asset || !canDownloadAsset(work.kind, asset)) {
+      continue;
+    }
+
+    const cached = getCachedAsset(cachedAssets, work, asset);
+    if (!cached || cached.isLoading) {
+      return `正在缓存${getFeatureLabel(feature, work.kind)}所需资源，请等待缓存完成后再提取。`;
+    }
+    if (!cached.url) {
+      return cached.error ?? `${getFeatureLabel(feature, work.kind)}所需资源缓存失败，请取消该项或稍后重试。`;
+    }
+  }
+
+  return null;
+}
+
+function getCachedAsset(
+  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>,
+  work: ResolvedDouyinWork,
+  asset: MediaAssetKind,
+): CachedMediaAsset | undefined {
+  const cached = cachedAssets[asset];
+  return cached?.workKey === `${work.kind}:${work.id}` ? cached : undefined;
+}
+
+function isDownloadResourceUnavailable(cached: CachedMediaAsset | undefined): boolean {
+  return Boolean(
+    cached &&
+      !cached.isLoading &&
+      !cached.url &&
+      cached.error?.includes("没有采集到可下载资源"),
   );
 }
 
