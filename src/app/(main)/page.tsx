@@ -89,13 +89,13 @@ async function readSummaryPayload(response: Response): Promise<SummaryPayload> {
   const text = await response.text();
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("json")) {
-    throw new Error(`总结接口返回了非 JSON 响应：HTTP ${response.status}。`);
+    throw new Error(`AI处理接口返回了非 JSON 响应：HTTP ${response.status}。`);
   }
 
   try {
     return JSON.parse(text) as SummaryPayload;
   } catch {
-    throw new Error(`总结接口返回的 JSON 格式无效：HTTP ${response.status}。`);
+    throw new Error(`AI处理接口返回的 JSON 格式无效：HTTP ${response.status}。`);
   }
 }
 
@@ -134,18 +134,74 @@ const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKin
 
 const SUMMARY_PROMPTS: SummaryPrompt[] = [
   {
-    id: "brief",
-    title: "总结",
-    description: "生成总结、重点和关键洞察。",
+    id: "key-points",
+    title: "核心要点",
+    description: "适合所有人，快速抓重点、结论和风险机会。",
     prompt:
-      "请将转写文本总结为清晰的内容摘要，包含：1. 核心主题；2. 主要观点；3. 关键细节；4. 可直接复用的结论。保持简洁但不要遗漏重要信息。",
+      "你是一个专业的信息提炼专家。请用最简洁、结构化的方式提取以下内容的核心要点、关键结论、重要细节、风险和机会。用中文输出，分点列出，每点不超过30字。优先保留可行动的信息，不要加入原文没有的信息。",
   },
   {
-    id: "insight",
-    title: "核心要点总结",
-    description: "总结核心要点、关键结论和重要细节。",
+    id: "actions",
+    title: "行动建议",
+    description: "适合上班族和普通用户，把信息变成下一步行动。",
     prompt:
-      "请提炼转写文本中的核心要点，按层级输出：核心结论、关键论据、重要数字或实体、值得关注的洞察。不要加入原文没有的信息。",
+      "请阅读以下内容，提取3到5个最重要的信息点，并为每个点给出1到2句实用行动建议。输出格式为：信息点、为什么重要、建议怎么做。语言通俗直接，适合普通人马上执行。",
+  },
+  {
+    id: "quick-read",
+    title: "一分钟看懂",
+    description: "适合赶时间的人，用最短时间理解原文。",
+    prompt:
+      "请把以下内容改写成一分钟能看完的版本，控制在150到200字。必须包含核心信息、用户最关心的结果、需要注意的风险。语言极简通俗，分段清楚，不要堆砌术语。",
+  },
+  {
+    id: "labor-law",
+    title: "劳动权益",
+    description: "适合职场、合同、试用期、薪资和裁员场景。",
+    prompt:
+      "你是一名劳动法和职场权益顾问。请分析以下内容中公司的做法是否合理，劳动者有哪些权利，可能存在哪些坑、风险和证据点，最后给出清晰的应对步骤。用直接、务实的中文输出。不要编造法律条款，无法确定时请标注需要进一步核实。",
+  },
+  {
+    id: "business-project",
+    title: "商业机会",
+    description: "适合创业者和副业人群，判断能不能做、怎么做。",
+    prompt:
+      "你是一个商业顾问。请提取以下内容中的商业模式、目标用户、核心机会、成本门槛、风险点和可复制的执行步骤。最后给出普通人是否适合操作的判断，并说明理由。输出要务实，避免空泛鸡汤。",
+  },
+  {
+    id: "learning-notes",
+    title: "学习笔记",
+    description: "适合学生和学习者，沉淀知识点、技巧和记忆点。",
+    prompt:
+      "你是一个高效学习教练。请从以下内容中提取最有价值的知识点、实用技巧、常见误区和记忆要点。以学完能立刻用为目标组织输出，并给出一个简短的复习清单。",
+  },
+  {
+    id: "decision",
+    title: "决策辅助",
+    description: "适合选择困难、买不买、做不做、选哪个。",
+    prompt:
+      "你是一个理性决策助手。请分析以下内容中的利弊、优缺点、隐藏风险、必要前提和不确定信息。最后给出清晰推荐：建议做、谨慎做或不建议做，并说明理由和适用人群。",
+  },
+  {
+    id: "short-video-script",
+    title: "短视频脚本",
+    description: "适合自媒体创作者，把内容改成可发布脚本。",
+    prompt:
+      "请把以下内容转化为适合抖音或短视频的高吸引力脚本。输出包括：钩子开头、核心卖点、正文结构、情绪推进、结尾呼吁行动。语气生动接地气，适合口播，不要偏离原文事实。",
+  },
+  {
+    id: "titles-quotes",
+    title: "标题金句",
+    description: "适合运营和创作者，快速产出标题、金句和卖点。",
+    prompt:
+      "请从以下内容中提取5条短而有力的金句、3个有传播感的标题、3个适合评论区或封面使用的短句。标题要有明确情绪或数字，但不能标题党，必须符合原文信息。",
+  },
+  {
+    id: "deep-dive",
+    title: "深度拆解",
+    description: "适合研究、复盘和复杂内容，发现逻辑与意图。",
+    prompt:
+      "请对以下内容做深度拆解，包含：核心论点、隐含假设、逻辑漏洞、未说明的关键信息、作者可能的真实意图、我应该如何应对。请同时从普通用户、专业人士、老板或决策者三个视角给出不同关注点。",
   },
 ];
 
@@ -1218,11 +1274,11 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
       });
       const payload = await readSummaryPayload(response);
       if (!response.ok || !("summary" in payload) || !payload.summary) {
-        throw new Error("error" in payload ? payload.error : "总结失败。");
+        throw new Error("error" in payload ? payload.error : "AI处理失败。");
       }
       setSummary(payload.summary);
     } catch (error) {
-      setSummaryError(error instanceof Error ? error.message : "总结失败。");
+      setSummaryError(error instanceof Error ? error.message : "AI处理失败。");
     } finally {
       setIsSummarizing(false);
     }
@@ -1256,10 +1312,10 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
               type="button"
               onClick={() => setSummaryMode((value) => !value)}
               className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 bg-cyan/[0.08] px-2.5 text-xs font-semibold text-cyan transition hover:border-cyan/45 hover:bg-cyan/[0.12] active:scale-[0.96]"
-              title={summaryMode ? "收起总结" : "AI总结"}
+              title={summaryMode ? "收起AI面板" : "AI处理"}
             >
               <Sparkles className="size-3.5" aria-hidden="true" />
-              AI总结
+              AI处理
             </button>
             <button
               type="button"
@@ -1287,7 +1343,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
           <div className="flex min-h-[4.25rem] items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-cyan">
               <Sparkles className="size-3.5" aria-hidden="true" />
-              AI总结
+              AI处理
             </span>
             <div className="flex items-center gap-1.5">
               {hasSummaryOutput && !isSummarizing && !summaryError ? (
@@ -1295,8 +1351,8 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
                   type="button"
                   onClick={() => void copySummary()}
                   className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
-                  aria-label={copiedSummary ? "已复制AI总结" : "复制AI总结"}
-                  title={copiedSummary ? "已复制" : "复制总结"}
+                  aria-label={copiedSummary ? "已复制AI结果" : "复制AI结果"}
+                  title={copiedSummary ? "已复制" : "复制结果"}
                 >
                   {copiedSummary ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
                 </button>
@@ -1308,7 +1364,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
                   className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] active:scale-[0.96]"
                 >
                   <RefreshCw className="size-3.5" aria-hidden="true" />
-                  重新总结
+                  重新生成
                 </button>
               ) : null}
             </div>
@@ -1318,7 +1374,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
               isSummarizing ? (
                 <div className="flex h-full min-h-52 items-center justify-center gap-2 text-sm leading-7 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin text-cyan" />
-                  正在总结
+                  正在生成
                 </div>
               ) : (
                 <div className="min-h-52 rounded-md border border-white/[0.14] bg-black/20 p-4 text-sm leading-7 text-foreground/90">
@@ -1334,13 +1390,13 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
               )
             ) : (
               <div className="space-y-2.5">
-                <div className="grid gap-2">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
                   {prompts.map((prompt) => (
                     <button
                       key={prompt.id}
                       type="button"
                       onClick={() => void summarize(prompt)}
-                      className="rounded-md border border-white/10 bg-black/15 px-3 py-2 text-left transition hover:border-cyan/35 hover:bg-cyan/[0.055] active:scale-[0.99]"
+                      className="min-h-[4.25rem] rounded-md border border-white/10 bg-black/15 px-3 py-2 text-left transition hover:border-cyan/35 hover:bg-cyan/[0.055] active:scale-[0.99]"
                     >
                       <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
                       <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">

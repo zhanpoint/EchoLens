@@ -45,9 +45,9 @@ export async function POST(request: Request) {
       caption: work.kind === "article" ? metadata?.title : metadata?.caption,
       articleText: metadata?.articleText,
       audioUrls: metadata?.audioUrls ?? [],
-      coverUrl: metadata?.coverUrl,
+      coverUrls: metadata?.coverUrls,
       imageUrls: work.kind === "note" ? metadata?.imageUrls ?? [] : [],
-      videoUrl: metadata?.videoUrl,
+      videoUrls: metadata?.videoUrls,
     };
 
     const results = await buildResults(features, work, content);
@@ -84,7 +84,7 @@ async function buildResults(
 
   for (const feature of features) {
     if (feature === "cover") {
-      results.push(coverResult(work, content.coverUrl));
+      results.push(coverResult(work, content.coverUrls));
     }
 
     if (feature === "caption") {
@@ -106,7 +106,7 @@ async function buildResults(
 
     if (feature === "originalTranscript") {
       const modelResult = await transcribeMediaSource(
-        content.videoUrl,
+        content.videoUrls,
         "没有采集到当前作品对应的视频资源。",
       );
       results.push(providerResult(feature, kind, modelResult));
@@ -114,7 +114,7 @@ async function buildResults(
 
     if (feature === "dubbedTranscript") {
       const modelResult = await transcribeMediaSource(
-        content.audioUrls[0],
+        content.audioUrls,
         "没有采集到当前作品对应的配音资源。",
       );
       results.push(providerResult(feature, kind, modelResult));
@@ -148,9 +148,9 @@ function textResult(
 
 function coverResult(
   work: { id: string; kind: DouyinKind },
-  coverUrl: string | undefined,
+  coverUrls: string[] | undefined,
 ): ExtractionResult {
-  return coverUrl
+  return coverUrls?.length
     ? {
         feature: "cover",
         label: getFeatureLabel("cover", work.kind),

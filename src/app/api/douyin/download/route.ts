@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
-import { normalizeAudioToWav } from "@/lib/media/audio";
+import { downloadRemoteMediaToBuffer, normalizeAudioToWav } from "@/lib/media/audio";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
@@ -14,13 +14,6 @@ const DownloadQuerySchema = z.object({
   kind: z.enum(DOUYIN_KINDS),
   asset: z.enum(MEDIA_ASSET_KINDS),
 });
-
-const UPSTREAM_ACCEPT: Record<MediaAssetKind, string> = {
-  cover: "image/*,*/*;q=0.8",
-  video: "video/mp4,*/*;q=0.8",
-  originalAudio: "video/mp4,*/*;q=0.8",
-  dubbedAudio: "audio/*,*/*;q=0.8",
-};
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -43,17 +36,17 @@ export async function GET(request: Request) {
 
   const finalUrl = buildDouyinWorkUrl(kind, id);
   const metadata = await collectWorkMetadata({ id, kind, finalUrl });
-  const assetUrl = selectAssetUrl(asset, metadata);
+  const assetUrls = selectAssetUrls(asset, metadata);
 
-  if (!assetUrl) {
+  if (assetUrls.length === 0) {
     return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
   }
-  if (!isSupportedMediaUrl(assetUrl)) {
+  if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
     return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
   }
   if (asset === "originalAudio") {
     try {
-      const audio = await normalizeAudioToWav(assetUrl);
+      const audio = await normalizeAudioToWav(assetUrls);
       return mediaBufferResponse(audio, {
         contentType: "audio/wav",
         filename: buildFilename(id, asset, "audio/wav"),
@@ -61,50 +54,22 @@ export async function GET(request: Request) {
         range: requestRange,
       });
     } catch (error) {
-      return NextResponse.json({ error: formatAudioError(error) }, { status: 502 });
+      return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
     }
   }
 
-  const upstream = await fetch(assetUrl, {
-    headers: {
-      accept: UPSTREAM_ACCEPT[asset],
-      referer: "https://www.douyin.com/",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      ...(requestRange ? { range: requestRange } : {}),
-    },
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    return NextResponse.json({ error: `下载资源读取失败：HTTP ${upstream.status}。` }, { status: 502 });
+  try {
+    const media = await downloadRemoteMediaToBuffer(assetUrls);
+    const contentType = media.contentType ?? defaultContentType(asset);
+    return mediaBufferResponse(media.buffer, {
+      contentType,
+      filename: buildFilename(id, asset, contentType),
+      inline: isPreview,
+      range: requestRange,
+    });
+  } catch (error) {
+    return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
   }
-
-  const contentType = upstream.headers.get("content-type") ?? defaultContentType(asset);
-  const headers = new Headers({
-    "content-type": contentType,
-    "content-disposition": `${isPreview ? "inline" : "attachment"}; filename="${buildFilename(id, asset, contentType)}"`,
-    "cache-control": "no-store",
-  });
-  const contentLength = upstream.headers.get("content-length");
-  if (contentLength) {
-    headers.set("content-length", contentLength);
-  }
-  const contentRange = upstream.headers.get("content-range");
-  if (contentRange) {
-    headers.set("content-range", contentRange);
-  }
-  const acceptRanges = upstream.headers.get("accept-ranges");
-  if (acceptRanges) {
-    headers.set("accept-ranges", acceptRanges);
-  } else if (asset !== "cover") {
-    headers.set("accept-ranges", "bytes");
-  }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers,
-  });
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
@@ -149,15 +114,15 @@ function parseSingleRange(value: string | null, size: number): { start: number; 
   return { start, end: Math.min(end, size - 1) };
 }
 
-function selectAssetUrl(
+function selectAssetUrls(
   asset: MediaAssetKind,
   metadata: DouyinWorkMetadata,
-): string | undefined {
+): string[] {
   return {
-    cover: metadata.coverUrl,
-    video: metadata.videoUrl,
-    originalAudio: metadata.videoUrl,
-    dubbedAudio: metadata.audioUrls?.[0],
+    cover: metadata.coverUrls ?? [],
+    video: metadata.videoUrls ?? [],
+    originalAudio: metadata.videoUrls ?? [],
+    dubbedAudio: metadata.audioUrls ?? [],
   }[asset];
 }
 
@@ -205,10 +170,10 @@ function defaultContentType(asset: MediaAssetKind): string {
   return "video/mp4";
 }
 
-function formatAudioError(error: unknown): string {
+function formatDownloadError(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim();
   }
 
-  return "视频原声音轨抽取失败。";
+  return "媒体资源下载失败。";
 }

@@ -49,23 +49,22 @@ export type DouyinWorkMetadata = {
   authorUrl?: string;
   articleText?: string;
   caption?: string;
-  coverUrl?: string;
+  coverUrls?: string[];
   title?: string;
   imageUrls?: string[];
   audioUrls?: string[];
-  videoUrl?: string;
+  videoUrls?: string[];
 };
 
 export async function collectWorkMetadata(
   work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">,
 ): Promise<DouyinWorkMetadata> {
   const attempts: DetailAttempt[] = [];
-
-  for (const request of buildDetailRequests(work)) {
+  const metadataList = await Promise.all(buildDetailRequests(work).map(async (request) => {
     const payload = await fetchDetailPayload(request, attempts);
     const detail = readAwemeDetail(payload);
     if (!detail) {
-      continue;
+      return {};
     }
 
     const metadata = parseWorkMetadata({ aweme_detail: detail }, work.id, work.kind);
@@ -77,6 +76,13 @@ export async function collectWorkMetadata(
       label: request.label,
       reason: "aweme_detail parsed without usable metadata",
     });
+    return {};
+  }));
+
+  const collected = metadataList.reduce(mergeMetadata, {});
+
+  if (hasMetadata(collected)) {
+    return collected;
   }
 
   warnMetadataFailure(work, attempts);
@@ -99,17 +105,19 @@ export function parseWorkMetadata(
 
   const author = detail.author;
   const secUid = readString(author?.sec_uid) ?? readString(author?.secUid);
+  const coverUrls = readCoverUrls(detail, kind);
+  const videoUrls = kind === "video" ? readVideoUrls(detail.video) : [];
 
   return {
     authorName: cleanText(readString(author?.nickname)),
     authorUrl: buildAuthorUrl(secUid, workId),
     articleText: readArticleText(detail.article_info?.article_content),
     caption: readCaption(detail, kind),
-    coverUrl: readCoverUrl(detail, kind),
+    coverUrls,
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
     audioUrls: readAudioUrls(detail.music, kind),
     imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
-    videoUrl: kind === "video" ? readVideoUrl(detail.video) : undefined,
+    videoUrls,
   };
 }
 
@@ -222,12 +230,34 @@ function hasMetadata(metadata: DouyinWorkMetadata): boolean {
     metadata.authorName ||
     metadata.articleText ||
     metadata.caption ||
-    metadata.coverUrl ||
     metadata.title ||
-    metadata.videoUrl ||
+    metadata.coverUrls?.length ||
+    metadata.videoUrls?.length ||
     metadata.audioUrls?.length ||
     metadata.imageUrls?.length,
   );
+}
+
+function mergeMetadata(
+  current: DouyinWorkMetadata,
+  next: DouyinWorkMetadata,
+): DouyinWorkMetadata {
+  const coverUrls = uniqueMediaReferences([...(current.coverUrls ?? []), ...(next.coverUrls ?? [])]);
+  const audioUrls = uniqueMediaReferences([...(current.audioUrls ?? []), ...(next.audioUrls ?? [])]);
+  const imageUrls = uniqueMediaReferences([...(current.imageUrls ?? []), ...(next.imageUrls ?? [])]);
+  const videoUrls = uniqueMediaReferences([...(current.videoUrls ?? []), ...(next.videoUrls ?? [])]);
+
+  return {
+    authorName: current.authorName ?? next.authorName,
+    authorUrl: current.authorUrl ?? next.authorUrl,
+    articleText: current.articleText ?? next.articleText,
+    caption: current.caption ?? next.caption,
+    coverUrls,
+    title: current.title ?? next.title,
+    audioUrls,
+    imageUrls,
+    videoUrls,
+  };
 }
 
 function parseJson(value: string): unknown {
@@ -371,30 +401,32 @@ function readPrimaryImageUrl(record: Record<string, unknown>): string | undefine
   );
 }
 
-function readCoverUrl(
+function readCoverUrls(
   detail: NonNullable<DouyinDetailPayload["aweme_detail"]>,
   kind: DouyinKind | undefined,
-): string | undefined {
+): string[] {
   const video = detail.video && typeof detail.video === "object"
     ? detail.video as Record<string, unknown>
     : null;
 
-  return (
-    readCoverFromVideo(video) ??
-    (kind === "note" ? readImageUrls(detail.images)[0] : undefined)
+  return uniqueMediaReferences(
+    [
+      ...readCoverUrlsFromVideo(video),
+      ...(kind === "note" ? readImageUrls(detail.images) : []),
+    ],
   );
 }
 
-function readCoverFromVideo(video: Record<string, unknown> | null): string | undefined {
+function readCoverUrlsFromVideo(video: Record<string, unknown> | null): string[] {
   if (!video) {
-    return undefined;
+    return [];
   }
 
-  return (
-    readUrlList(video.cover)[0] ??
-    readUrlList(video.origin_cover ?? video.originCover)[0] ??
-    readUrlList(video.dynamic_cover ?? video.dynamicCover)[0]
-  );
+  return uniqueMediaReferences([
+    ...readUrlList(video.cover),
+    ...readUrlList(video.origin_cover ?? video.originCover),
+    ...readUrlList(video.dynamic_cover ?? video.dynamicCover),
+  ]);
 }
 
 function readAudioUrls(musicValue: unknown, kind: DouyinKind | undefined): string[] {
@@ -406,9 +438,8 @@ function readAudioUrls(musicValue: unknown, kind: DouyinKind | undefined): strin
   }
 
   return uniqueMediaReferences(
-    [readUrlList(music?.play_url ?? music?.playUrl)[0]]
-      .filter((url): url is string => Boolean(url)),
-  ).slice(0, 1);
+    readUrlList(music?.play_url ?? music?.playUrl),
+  );
 }
 
 function isOriginalSoundMusic(music: Record<string, unknown>): boolean {
@@ -419,25 +450,25 @@ function isOriginalSoundMusic(music: Record<string, unknown>): boolean {
   return Boolean(readString(music.title)?.includes("创作的原声"));
 }
 
-function readVideoUrl(value: unknown): string | undefined {
+function readVideoUrls(value: unknown): string[] {
   if (!value || typeof value !== "object") {
-    return undefined;
+    return [];
   }
 
   const video = value as Record<string, unknown>;
   return uniqueMediaReferences([
-    readBitRateVideoUrl(video.bit_rate ?? video.bitRate),
-    readUrlList(video.play_addr ?? video.playAddr)[0],
-    readUrlList(video.download_addr ?? video.downloadAddr)[0],
-  ].filter((url): url is string => Boolean(url))).slice(0, 1)[0];
+    ...readBitRateVideoUrls(video.bit_rate ?? video.bitRate),
+    ...readUrlList(video.play_addr ?? video.playAddr),
+    ...readUrlList(video.download_addr ?? video.downloadAddr),
+  ]);
 }
 
-function readBitRateVideoUrl(value: unknown): string | undefined {
+function readBitRateVideoUrls(value: unknown): string[] {
   if (!Array.isArray(value)) {
-    return undefined;
+    return [];
   }
 
-  const selected = value
+  return value
     .flatMap((item) => {
       if (!item || typeof item !== "object") {
         return [];
@@ -453,9 +484,8 @@ function readBitRateVideoUrl(value: unknown): string | undefined {
         ? [{ bitRate, pixels: width * height, urls }]
         : [];
     })
-    .sort((left, right) => right.pixels - left.pixels || right.bitRate - left.bitRate)[0];
-
-  return selected?.urls[0];
+    .sort((left, right) => right.pixels - left.pixels || right.bitRate - left.bitRate)
+    .flatMap((item) => item.urls);
 }
 
 function readNestedNumber(value: unknown, key: string): number | undefined {
@@ -475,10 +505,18 @@ function readUrlList(value: unknown): string[] {
     return [];
   }
 
-  const list = (value as Record<string, unknown>).url_list ?? (value as Record<string, unknown>).urlList;
-  if (!Array.isArray(list)) {
-    return [];
+  const record = value as Record<string, unknown>;
+  const list = record.url_list ?? record.urlList;
+  if (Array.isArray(list)) {
+    return list.filter((url): url is string => typeof url === "string" && url.trim().startsWith("http"));
   }
 
-  return list.filter((url): url is string => typeof url === "string" && url.trim().startsWith("http"));
+  if (list && typeof list === "object") {
+    return Object.values(list)
+      .flatMap((item) => Array.isArray(item) ? item : [item])
+      .filter((url): url is string => typeof url === "string" && url.trim().startsWith("http"));
+  }
+
+  return Object.values(record)
+    .filter((url): url is string => typeof url === "string" && url.trim().startsWith("http"));
 }

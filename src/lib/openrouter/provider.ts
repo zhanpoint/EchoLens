@@ -100,10 +100,10 @@ export async function identifyImageContent(imageUrls: string[]): Promise<Provide
 }
 
 export async function transcribeMediaSource(
-  sourceUrl: string | undefined,
+  sourceUrl: string | readonly string[] | undefined,
   missingDetail = "没有采集到当前作品对应的音频资源。",
 ): Promise<ProviderResult> {
-  if (!sourceUrl) {
+  if (!hasMediaSource(sourceUrl)) {
     return { ok: false, code: "unavailable", detail: missingDetail };
   }
 
@@ -313,8 +313,10 @@ async function callOpenRouter(
   return { ok: true, content: contentText.trim() };
 }
 
-async function fetchAudioAsModelInputs(sourceUrl: string): Promise<AudioInputSegment[]> {
-  const source = sourceUrl.startsWith("data:") ? parseDataUrl(sourceUrl) : sourceUrl;
+async function fetchAudioAsModelInputs(sourceUrl: string | readonly string[]): Promise<AudioInputSegment[]> {
+  const source = typeof sourceUrl === "string" && sourceUrl.startsWith("data:")
+    ? parseDataUrl(sourceUrl)
+    : sourceUrl;
   const chunks = await transcodeAudioToMp3Chunks(
     source,
     readPositiveNumber(process.env.OPENROUTER_ASR_CHUNK_SECONDS, DEFAULT_ASR_CHUNK_SECONDS),
@@ -390,8 +392,12 @@ function getAsrModel(): string {
   return process.env.OPENROUTER_ASR_MODEL || "qwen/qwen3-asr-flash-2026-02-10";
 }
 
-function buildTranscriptCacheKey(sourceUrl: string): string {
-  return `${getAsrModel()}:${createHash("sha256").update(sourceUrl).digest("hex")}`;
+function buildTranscriptCacheKey(sourceUrl: string | readonly string[]): string {
+  return `${getAsrModel()}:${createHash("sha256").update(JSON.stringify(sourceUrl)).digest("hex")}`;
+}
+
+function hasMediaSource(sourceUrl: string | readonly string[] | undefined): sourceUrl is string | readonly string[] {
+  return typeof sourceUrl === "string" ? Boolean(sourceUrl.trim()) : Boolean(sourceUrl?.length);
 }
 
 function getCachedTranscript(key: string): Extract<ProviderResult, { ok: true }> | null {

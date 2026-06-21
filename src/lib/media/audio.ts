@@ -14,6 +14,12 @@ const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
 const MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3;
 const DEFAULT_MP3_CHUNK_SECONDS = 300;
 
+export type RemoteMediaSource = string | readonly string[];
+export type DownloadedRemoteMedia = {
+  buffer: Buffer;
+  contentType?: string;
+};
+
 export type AudioChunk = {
   buffer: Buffer;
   endSeconds: number;
@@ -31,7 +37,7 @@ export function resolveBundledFfmpegPath(): string {
   );
 }
 
-export async function normalizeAudioToWav(source: Buffer | string): Promise<Buffer> {
+export async function normalizeAudioToWav(source: Buffer | RemoteMediaSource): Promise<Buffer> {
   const ffmpegPath = resolveFfmpegPath();
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
   const inputPath = path.join(tempDir, "source-audio");
@@ -60,7 +66,7 @@ export async function normalizeAudioToWav(source: Buffer | string): Promise<Buff
 }
 
 export async function transcodeAudioToMp3Chunks(
-  source: Buffer | string,
+  source: Buffer | RemoteMediaSource,
   chunkSeconds = DEFAULT_MP3_CHUNK_SECONDS,
 ): Promise<AudioChunk[]> {
   const ffmpegPath = resolveFfmpegPath();
@@ -113,7 +119,7 @@ export async function transcodeAudioToMp3Chunks(
   }
 }
 
-async function writeSourceToFile(source: Buffer | string, outputPath: string): Promise<void> {
+async function writeSourceToFile(source: Buffer | RemoteMediaSource, outputPath: string): Promise<void> {
   if (Buffer.isBuffer(source)) {
     await fs.writeFile(outputPath, source);
     return;
@@ -122,33 +128,66 @@ async function writeSourceToFile(source: Buffer | string, outputPath: string): P
   await downloadRemoteMediaToFile(source, outputPath);
 }
 
-export async function downloadRemoteMediaToFile(url: string, outputPath: string): Promise<void> {
+export async function downloadRemoteMediaToFile(
+  source: RemoteMediaSource,
+  outputPath: string,
+): Promise<string | undefined> {
   let lastError: unknown;
+  const urls = normalizeRemoteMediaSource(source);
 
-  for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
-    const offset = await readFileSize(outputPath);
+  for (let urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
+    const url = urls[urlIndex];
+    if (urlIndex > 0) {
+      await fs.rm(outputPath, { force: true });
+    }
 
-    try {
-      const totalSize = await downloadMediaRange(url, outputPath, offset);
-      const downloadedSize = await readFileSize(outputPath);
-      if (totalSize === null || downloadedSize >= totalSize) {
-        return;
+    for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+      const offset = await readFileSize(outputPath);
+
+      try {
+        const result = await downloadMediaRange(url, outputPath, offset);
+        const downloadedSize = await readFileSize(outputPath);
+        if (result.totalSize === null || downloadedSize >= result.totalSize) {
+          return result.contentType;
+        }
+
+        lastError = new Error(`下载不完整：${downloadedSize}/${result.totalSize}`);
+      } catch (error) {
+        lastError = error;
       }
 
-      lastError = new Error(`下载不完整：${downloadedSize}/${totalSize}`);
-    } catch (error) {
-      lastError = error;
+      if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
+        await delay(500 * attempt);
+      }
     }
 
-    if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
-      await delay(500 * attempt);
-    }
   }
 
   throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
 }
 
-async function downloadMediaRange(url: string, outputPath: string, offset: number): Promise<number | null> {
+export async function downloadRemoteMediaToBuffer(
+  source: RemoteMediaSource,
+): Promise<DownloadedRemoteMedia> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
+  const outputPath = path.join(tempDir, "downloaded-media");
+
+  try {
+    const contentType = await downloadRemoteMediaToFile(source, outputPath);
+    return {
+      buffer: await fs.readFile(outputPath),
+      contentType,
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function downloadMediaRange(
+  url: string,
+  outputPath: string,
+  offset: number,
+): Promise<{ contentType?: string; totalSize: number | null }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
 
@@ -176,7 +215,10 @@ async function downloadMediaRange(url: string, outputPath: string, offset: numbe
       createWriteStream(outputPath, { flags: offset > 0 ? "a" : "w" }),
     );
 
-    return readTotalSize(response, offset);
+    return {
+      contentType: response.headers.get("content-type") ?? undefined,
+      totalSize: readTotalSize(response, offset),
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -204,6 +246,17 @@ async function readFileSize(filePath: string): Promise<number> {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {
+  const urls = Array.isArray(source) ? source : [source];
+  return Array.from(
+    new Set(
+      urls
+        .map((url) => url.trim())
+        .filter((url) => url.startsWith("https://") || url.startsWith("http://")),
+    ),
+  );
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {

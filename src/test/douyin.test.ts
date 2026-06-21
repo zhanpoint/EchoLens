@@ -131,6 +131,52 @@ describe("douyin url utilities", () => {
     expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
   });
 
+  it("merges partial detail payloads instead of returning metadata without media", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            aweme_detail: {
+              author: { nickname: "间歇作者" },
+              desc: "只有文案的响应",
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            aweme_detail: {
+              video: {
+                play_addr: {
+                  url_list: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
+                },
+              },
+              music: {
+                is_original_sound: false,
+                play_url: {
+                  url_list: ["https://example.com/audio-primary.m4a"],
+                },
+              },
+            },
+          }),
+        ),
+      );
+
+    await expect(
+      collectWorkMetadata({
+        finalUrl: "https://www.douyin.com/video/7634410673426280674",
+        id: "7634410673426280674",
+        kind: "video",
+      }),
+    ).resolves.toMatchObject({
+      authorName: "间歇作者",
+      caption: "只有文案的响应",
+      audioUrls: ["https://example.com/audio-primary.m4a"],
+      videoUrls: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
+    });
+  });
+
   it("keeps metadata requests anonymous even when browser cookie env is present", async () => {
     process.env.DOUYIN_COOKIE = "sessionid=prod-session";
     process.env.DOUYIN_USER_AGENT = "Browser UA from a local session";
@@ -182,7 +228,7 @@ describe("douyin url utilities", () => {
         "video",
       ),
     ).toMatchObject({
-      coverUrl: "https://example.com/video-cover.jpeg",
+      coverUrls: ["https://example.com/video-cover.jpeg"],
     });
 
     expect(
@@ -200,7 +246,7 @@ describe("douyin url utilities", () => {
         "note",
       ),
     ).toMatchObject({
-      coverUrl: "https://example.com/note-first-image.webp",
+      coverUrls: ["https://example.com/note-first-image.webp"],
     });
   });
 
@@ -425,7 +471,7 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       audioUrls: [],
-      videoUrl: "https://example.com/video-with-embedded-audio.mp4",
+      videoUrls: ["https://example.com/video-with-embedded-audio.mp4"],
     });
   });
 
@@ -448,11 +494,14 @@ describe("douyin url utilities", () => {
         "note",
       ),
     ).toMatchObject({
-      audioUrls: ["https://sf11-cdn-tos.douyinstatic.com/obj/audio-main"],
+      audioUrls: [
+        "https://sf11-cdn-tos.douyinstatic.com/obj/audio-main",
+        "https://sf6-cdn-tos.douyinstatic.com/obj/audio-backup",
+      ],
     });
   });
 
-  it("locks one high-quality primary video url from douyin detail payloads", () => {
+  it("keeps high-quality video urls before fallback urls", () => {
     expect(
       parseWorkMetadata(
         {
@@ -486,7 +535,11 @@ describe("douyin url utilities", () => {
         "video",
       ),
     ).toMatchObject({
-      videoUrl: "https://example.com/1080p-video.mp4",
+      videoUrls: [
+        "https://example.com/1080p-video.mp4",
+        "https://example.com/720p-video.mp4",
+        "https://example.com/fallback-video.mp4",
+      ],
     });
   });
 
@@ -629,6 +682,52 @@ describe("audio transcription preparation", () => {
 
         expect(resumedRange).toBe(`bytes=${firstChunkSize}-`);
         expect(output.equals(source)).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the next media url when the primary CDN url fails", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
+    const outputPath = path.join(tempDir, "media.bin");
+    const source = Buffer.from("stable-backup-media");
+
+    try {
+      const server = createServer((request, response) => {
+        if (request.url === "/primary.mp4") {
+          response.writeHead(503);
+          response.end();
+          return;
+        }
+
+        response.writeHead(200, {
+          "content-length": String(source.byteLength),
+          "content-type": "video/mp4",
+        });
+        response.end(source);
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+
+      try {
+        const { port } = server.address() as AddressInfo;
+        await downloadRemoteMediaToFile(
+          [
+            `http://127.0.0.1:${port}/primary.mp4`,
+            `http://127.0.0.1:${port}/backup.mp4`,
+          ],
+          outputPath,
+        );
+
+        await expect(fs.readFile(outputPath)).resolves.toEqual(source);
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => error ? reject(error) : resolve());
