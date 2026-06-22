@@ -71,6 +71,12 @@ type SummaryPrompt = {
   title: string;
 };
 
+type ClipboardDouyinInput = {
+  tags: string[];
+  text: string;
+  url: string;
+};
+
 async function readApiPayload(response: Response, fallback: string): Promise<ApiPayload> {
   const text = await response.text();
   const contentType = response.headers.get("content-type") ?? "";
@@ -98,6 +104,66 @@ async function readSummaryPayload(response: Response): Promise<SummaryPayload> {
   } catch {
     throw new Error(`AI处理接口返回的 JSON 格式无效：HTTP ${response.status}。`);
   }
+}
+
+async function readClipboardDouyinInput(): Promise<ClipboardDouyinInput | null> {
+  if (typeof window === "undefined" || !window.isSecureContext || !navigator.clipboard?.readText) {
+    return null;
+  }
+
+  try {
+    const value = (await navigator.clipboard.readText()).trim();
+    const douyinInput = extractDouyinInput(value);
+    return value.length <= CLIPBOARD_INPUT_LIMIT && douyinInput
+      ? { text: value, ...douyinInput }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSameDouyinInput(current: string, next: ClipboardDouyinInput): boolean {
+  const currentInput = extractDouyinInput(current);
+  if (!currentInput) {
+    return false;
+  }
+
+  return currentInput.url === next.url || areSameTags(currentInput.tags, next.tags);
+}
+
+function extractDouyinInput(value: string): Pick<ClipboardDouyinInput, "tags" | "url"> | null {
+  const match = value.match(URL_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  const urlText = match[0].replace(/[)\]}.,!?;，。！？；、]+$/u, "");
+  try {
+    const hostname = new URL(urlText).hostname;
+    return hostname === "douyin.com" || hostname.endsWith(".douyin.com")
+      ? { tags: extractTagsBeforeUrl(value, match.index ?? 0), url: urlText }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTagsBeforeUrl(value: string, urlIndex: number): string[] {
+  const tags = value
+    .slice(0, urlIndex)
+    .match(TAG_PATTERN)
+    ?.map((tag) => tag.replace(/^#\s*/u, "").trim().toLocaleLowerCase())
+    .filter(Boolean);
+
+  return [...new Set(tags ?? [])].sort();
+}
+
+function areSameTags(currentTags: string[], nextTags: string[]): boolean {
+  return (
+    currentTags.length > 0 &&
+    currentTags.length === nextTags.length &&
+    currentTags.every((tag, index) => tag === nextTags[index])
+  );
 }
 
 const KIND_LABELS: Record<DouyinKind, string> = {
@@ -128,6 +194,9 @@ const DOWNLOAD_ACTIONS: Array<{
 ];
 
 const WORK_LINK_HINT = "未识别到可处理的抖音作品。请重新粘贴正确的作品分享链接，或直接粘贴作品 URL 地址。";
+const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
+const TAG_PATTERN = /#\s*[\p{L}\p{N}_-]+/gu;
+const CLIPBOARD_INPUT_LIMIT = 5000;
 
 const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKind>> = {
   cover: "cover",
@@ -218,6 +287,7 @@ export default function HomePage() {
   const [isResolving, setIsResolving] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [lastResolvedInput, setLastResolvedInput] = useState("");
+  const isReadingClipboardRef = useRef(false);
   const cachedAssets = useWorkAssetCache(work);
 
   const normalizedInput = input.trim();
@@ -291,6 +361,48 @@ export default function HomePage() {
       setIsResolving(false);
     }
   }, []);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function fillFromClipboard() {
+      if (isReadingClipboardRef.current) {
+        return;
+      }
+
+      isReadingClipboardRef.current = true;
+      const clipboard = await readClipboardDouyinInput();
+      isReadingClipboardRef.current = false;
+
+      if (isActive && clipboard && !isSameDouyinInput(input, clipboard)) {
+        setWork(null);
+        setSelected([]);
+        setResults([]);
+        setLastResolvedInput("");
+        setError(null);
+        setInput(clipboard.text);
+      }
+    }
+
+    function retryFromClipboard() {
+      void fillFromClipboard();
+    }
+
+    window.addEventListener("focus", retryFromClipboard);
+    window.addEventListener("pointerdown", retryFromClipboard, { capture: true });
+    window.addEventListener("keydown", retryFromClipboard, { capture: true });
+    window.addEventListener("paste", retryFromClipboard, { capture: true });
+    document.addEventListener("visibilitychange", retryFromClipboard);
+
+    return () => {
+      isActive = false;
+      window.removeEventListener("focus", retryFromClipboard);
+      window.removeEventListener("pointerdown", retryFromClipboard, { capture: true });
+      window.removeEventListener("keydown", retryFromClipboard, { capture: true });
+      window.removeEventListener("paste", retryFromClipboard, { capture: true });
+      document.removeEventListener("visibilitychange", retryFromClipboard);
+    };
+  }, [input]);
 
   useEffect(() => {
     const hasUrl = /https?:\/\//i.test(normalizedInput);
@@ -381,6 +493,15 @@ export default function HomePage() {
     }
   }
 
+  function clearInput() {
+    setInput("");
+    setWork(null);
+    setSelected([]);
+    setResults([]);
+    setLastResolvedInput("");
+    setError(null);
+  }
+
   function toggleFeature(feature: ExtractionFeature) {
     setSelected((current) =>
       current.includes(feature)
@@ -443,6 +564,17 @@ export default function HomePage() {
                 className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 placeholder={hasAcceptedUsage ? "粘贴抖音作品的分享链接或者地址。" : "请先勾选使用确认。"}
               />
+              {input ? (
+                <button
+                  type="button"
+                  onClick={clearInput}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+                  aria-label="清空链接"
+                  title="清空链接"
+                >
+                  <X className="size-4" aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
             <button
               type="submit"
