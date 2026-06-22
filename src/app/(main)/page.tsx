@@ -557,6 +557,14 @@ export default function HomePage() {
               )}
             >
               <Link2 className={cn("size-5 shrink-0", hasAcceptedUsage ? "text-amber" : "text-muted-foreground")} />
+              <span
+                tabIndex={0}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none"
+                aria-label="剪贴板权限仅用于读取最新一条文本记录，检测到抖音链接时自动填入输入框，不读取图片、历史记录或其他内容。"
+                title="仅读取剪贴板最新一条文本；检测到抖音链接才自动填入，不读取图片或历史记录。"
+              >
+                <AlertCircle className="size-4" aria-hidden="true" />
+              </span>
               <input
                 value={input}
                 onChange={(event) => updateInput(event.target.value)}
@@ -875,33 +883,33 @@ function InfoRow({
   return (
     <div className="min-w-0 text-left">
       <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className={cn("flex min-h-7 min-w-0 items-center gap-1.5 text-left font-semibold text-foreground", compact && "text-xs")}>
-        <span className="min-w-0 flex-1">
+      <dd className={cn("min-h-7 min-w-0 text-left font-semibold text-foreground", compact && "text-xs")}>
+        <div className="inline-flex max-w-full items-center gap-1.5 align-top">
           {isLinked ? (
             <a
               href={href}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex max-w-full items-center justify-start gap-1.5 text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
+              className="inline-flex min-w-0 max-w-full items-center justify-start gap-1.5 text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
             >
               <span className={cn("min-w-0", compact ? "break-all" : "truncate")}>{value}</span>
               <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />
             </a>
           ) : (
-            value
+            <span className={cn("min-w-0", compact ? "break-all" : "truncate")}>{value}</span>
           )}
-        </span>
-        {value !== "未识别" ? (
-          <button
-            type="button"
-            onClick={() => void copyValue()}
-            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
-            aria-label={copied ? `已复制${label}` : `复制${label}`}
-            title={copied ? "已复制" : "复制"}
-          >
-            {copied ? <Check className="size-3.5 text-cyan" /> : <Copy className="size-3.5" />}
-          </button>
-        ) : null}
+          {value !== "未识别" ? (
+            <button
+              type="button"
+              onClick={() => void copyValue()}
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+              aria-label={copied ? `已复制${label}` : `复制${label}`}
+              title={copied ? "已复制" : "复制"}
+            >
+              {copied ? <Check className="size-3.5 text-cyan" /> : <Copy className="size-3.5" />}
+            </button>
+          ) : null}
+        </div>
       </dd>
     </div>
   );
