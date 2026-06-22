@@ -344,8 +344,8 @@ export default function HomePage() {
   }
 
   return (
-    <main className="app-shell min-h-screen overflow-hidden bg-background text-foreground">
-      <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col gap-7 px-5 py-8 md:py-10">
+    <main className="app-shell min-h-[100dvh] overflow-x-hidden bg-background text-foreground">
+      <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-5 sm:py-7 md:gap-7 md:py-10">
         <div className="flex items-center justify-center gap-3">
           <Image
             src="/echolens-logo.svg"
@@ -374,7 +374,7 @@ export default function HomePage() {
             <button
               type="submit"
               disabled={isResolving || !normalizedInput}
-              className="inline-flex h-12 items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none"
+              className="inline-flex h-12 w-full items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
             >
               {isResolving ? "检测中" : "智能检测"}
             </button>
@@ -383,7 +383,7 @@ export default function HomePage() {
 
         <section
           className={cn(
-            "relative overflow-hidden rounded-lg border p-5",
+            "relative overflow-hidden rounded-lg border p-4 sm:p-5",
             activeKind
               ? "border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
               : "empty-link-state border-cyan/35",
@@ -476,7 +476,7 @@ export default function HomePage() {
         <section
           className={cn(
             "rounded-lg border border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
-            visibleResults.length > 0 ? "p-5" : "overflow-hidden p-0",
+            visibleResults.length > 0 ? "p-4 sm:p-5" : "overflow-hidden p-0",
           )}
         >
           {visibleResults.length > 0 ? (
@@ -589,7 +589,7 @@ function FeatureToggle({
       type="button"
       onClick={onToggle}
       className={cn(
-        "group relative flex min-h-20 items-center justify-between gap-4 overflow-hidden rounded-md border p-4 text-left transition active:scale-[0.99]",
+        "group relative flex min-h-16 items-center justify-between gap-3 overflow-hidden rounded-md border p-3 text-left text-sm transition active:scale-[0.99] sm:min-h-20 sm:gap-4 sm:p-4",
         checked
           ? "border-cyan/55 bg-cyan/[0.055] text-foreground shadow-[inset_0_1px_0_rgb(255_255_255_/_0.05)]"
           : "border-white/10 bg-white/[0.02] hover:border-amber/35 hover:bg-amber/[0.035]",
@@ -656,8 +656,8 @@ function InfoRow({
   return (
     <div className="min-w-0 text-left">
       <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className={cn("flex min-h-7 items-center gap-1.5 text-left font-semibold text-foreground", compact && "text-xs")}>
-        <span className="min-w-0">
+      <dd className={cn("flex min-h-7 min-w-0 items-center gap-1.5 text-left font-semibold text-foreground", compact && "text-xs")}>
+        <span className="min-w-0 flex-1">
           {isLinked ? (
             <a
               href={href}
@@ -789,7 +789,7 @@ function WorkDownloadActions({
 
   return (
     <>
-      <div className="mt-4 grid gap-2 pb-1 md:flex md:flex-wrap md:items-center md:gap-3">
+      <div className="mt-4 grid gap-2 pb-1 sm:grid-cols-2 md:flex md:flex-wrap md:items-center md:gap-3">
         {actions.map((action) => {
           const href = buildMediaDownloadPath(work, action.asset);
           const assetLabel = action.label.replace("下载", "");
@@ -803,7 +803,7 @@ function WorkDownloadActions({
           return (
             <div
               key={action.asset}
-              className="flex h-12 w-full items-center gap-2 rounded-md border border-cyan/20 bg-cyan/[0.035] px-2.5 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] md:w-auto md:flex-none"
+              className="flex h-12 w-full min-w-0 items-center gap-2 rounded-md border border-cyan/20 bg-cyan/[0.035] px-2.5 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] md:w-auto md:flex-none"
             >
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-cyan/20 bg-black/20 text-cyan">
@@ -954,8 +954,8 @@ function AssetPreviewDialog({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
-      <div className="w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
+      <div className="max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh-3rem)]">
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2 font-semibold">
             <action.icon className="size-4 shrink-0 text-cyan" aria-hidden="true" />
@@ -982,7 +982,7 @@ function AssetPreviewDialog({
             </button>
           </div>
         </div>
-        <div className="bg-black/25 p-4">
+        <div className="max-h-[calc(100dvh-5.5rem)] overflow-auto bg-black/25 p-3 sm:p-4">
           <AssetPreviewContent asset={action.asset} url={previewUrl} />
         </div>
       </div>
@@ -1022,7 +1022,7 @@ function CoverPreview({ url }: { url: string }) {
         height={675}
         unoptimized
         onLoad={() => setLoaded(true)}
-        className={cn("h-auto max-h-[70vh] w-full object-contain transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
+        className={cn("h-auto max-h-[68dvh] w-full object-contain transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
       />
     </div>
   );
@@ -1048,7 +1048,7 @@ function VideoPreview({ url }: { url: string }) {
         playsInline
         onLoadedMetadata={() => setLoaded(true)}
         onCanPlay={() => setLoaded(true)}
-        className={cn("max-h-[72vh] w-full rounded-md bg-black transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
+        className={cn("max-h-[68dvh] w-full rounded-md bg-black transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
       />
     </div>
   );
@@ -1100,7 +1100,7 @@ function AudioPreview({ url }: { url: string }) {
   }
 
   return (
-    <div className="relative rounded-md border border-cyan/15 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-4 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)]">
+    <div className="relative rounded-md border border-cyan/15 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-3 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] sm:p-4">
       {error || !loaded ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-black/45 backdrop-blur-[2px]">
           <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
@@ -1125,7 +1125,7 @@ function AudioPreview({ url }: { url: string }) {
           setError("音频资源加载失败。");
         }}
       />
-      <div className={cn("flex min-h-14 items-center gap-3 transition-opacity duration-200", loaded && !error ? "opacity-100" : "opacity-0")}>
+      <div className={cn("grid min-h-14 grid-cols-[auto_1fr_auto] items-center gap-3 transition-opacity duration-200 sm:flex", loaded && !error ? "opacity-100" : "opacity-0")}>
         <button
           type="button"
           onClick={() => void togglePlayback()}
@@ -1136,7 +1136,7 @@ function AudioPreview({ url }: { url: string }) {
         >
           {playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
         </button>
-        <span className="w-11 shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
+        <span className="col-start-2 row-start-1 w-11 shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
         <input
           type="range"
           min="0"
@@ -1145,11 +1145,11 @@ function AudioPreview({ url }: { url: string }) {
           value={duration ? Math.min(currentTime, duration) : 0}
           onChange={(event) => seek(event.currentTarget.value)}
           disabled={!loaded || !duration}
-          className="audio-progress h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+          className="audio-progress col-span-3 row-start-2 h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-1 sm:row-auto"
           aria-label="音频播放进度"
         />
-        <span className="w-11 shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
-        <Volume2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <span className="col-start-3 row-start-1 w-11 shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
+        <Volume2 className="hidden size-4 shrink-0 text-muted-foreground sm:block" aria-hidden="true" />
       </div>
     </div>
   );
@@ -1224,7 +1224,7 @@ function TextResultPanel({ label, text }: { label: string; text: string }) {
       >
         {copied ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
       </button>
-      <div className="content-canvas content-scroll max-h-[36rem] overflow-auto rounded-md border border-white/[0.16] bg-background/70 py-4 pl-4 pr-12 text-sm leading-7 text-foreground/90">
+      <div className="content-canvas content-scroll max-h-[65dvh] overflow-auto rounded-md border border-white/[0.16] bg-background/70 py-3 pl-3 pr-11 text-sm leading-7 text-foreground/90 sm:max-h-[36rem] sm:py-4 sm:pl-4 sm:pr-12">
         <ContentText text={text} />
       </div>
     </div>
@@ -1328,7 +1328,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
             </button>
           </div>
         </div>
-        <div className="content-scroll max-h-[36rem] flex-1 space-y-3 overflow-auto p-3 text-sm leading-7 text-foreground/90">
+        <div className="content-scroll max-h-[65dvh] flex-1 space-y-3 overflow-auto p-3 text-sm leading-7 text-foreground/90 sm:max-h-[36rem]">
           {segments.map((segment, index) => (
             <TranscriptSegmentCard
               key={`${segment.startSeconds}-${index}`}
@@ -1369,7 +1369,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
               ) : null}
             </div>
           </div>
-          <div className="content-scroll max-h-[36rem] flex-1 overflow-auto p-3">
+          <div className="content-scroll max-h-[65dvh] flex-1 overflow-auto p-3 sm:max-h-[36rem]">
             {hasSummaryOutput ? (
               isSummarizing ? (
                 <div className="flex h-full min-h-52 items-center justify-center gap-2 text-sm leading-7 text-muted-foreground">
@@ -1434,6 +1434,7 @@ function MarkdownPreview({ text }: { text: string }) {
   const nodes: ReactNode[] = [];
   let listItems: string[] = [];
   let listKey = 0;
+  let tableKey = 0;
 
   function flushList() {
     if (!listItems.length) {
@@ -1453,7 +1454,45 @@ function MarkdownPreview({ text }: { text: string }) {
     listItems = [];
   }
 
-  lines.forEach((line, index) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const table = readMarkdownTable(lines, index);
+    if (table) {
+      flushList();
+      nodes.push(
+        <div key={`table-${tableKey}`} className="my-4 overflow-x-auto rounded-md border border-white/10">
+          <table className="w-full min-w-[34rem] border-collapse text-left text-sm">
+            <thead className="bg-cyan/[0.08] text-cyan">
+              <tr>
+                {table.headers.map((header, headerIndex) => (
+                  <th
+                    key={`head-${headerIndex}`}
+                    className="border-b border-white/10 px-3 py-2 font-semibold"
+                  >
+                    <MarkdownInline text={header} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {table.rows.map((row, rowIndex) => (
+                <tr key={`row-${rowIndex}`} className="align-top odd:bg-white/[0.025]">
+                  {row.map((cell, cellIndex) => (
+                    <td key={`cell-${rowIndex}-${cellIndex}`} className="px-3 py-2 leading-6 text-foreground/90">
+                      <MarkdownInline text={cell} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      tableKey += 1;
+      index = table.endIndex;
+      continue;
+    }
+
     const trimmed = line.trim();
     const heading = trimmed.match(/^(#{1,3})\s+(.+)$/u);
     const listItem = trimmed.match(/^[-*]\s+(.+)$/u);
@@ -1462,12 +1501,12 @@ function MarkdownPreview({ text }: { text: string }) {
     if (!trimmed) {
       flushList();
       nodes.push(<div key={`blank-${index}`} className="h-2" />);
-      return;
+      continue;
     }
 
     if (listItem || orderedListItem) {
       listItems.push((listItem?.[1] ?? orderedListItem?.[1] ?? "").trim());
-      return;
+      continue;
     }
 
     flushList();
@@ -1487,7 +1526,7 @@ function MarkdownPreview({ text }: { text: string }) {
           <MarkdownInline text={heading[2]} />
         </div>,
       );
-      return;
+      continue;
     }
 
     nodes.push(
@@ -1495,11 +1534,61 @@ function MarkdownPreview({ text }: { text: string }) {
         <MarkdownInline text={trimmed} />
       </p>,
     );
-  });
+  }
 
   flushList();
 
   return <div className="break-words">{nodes}</div>;
+}
+
+function readMarkdownTable(
+  lines: string[],
+  startIndex: number,
+): { endIndex: number; headers: string[]; rows: string[][] } | null {
+  const header = splitMarkdownTableRow(lines[startIndex]);
+  const separator = splitMarkdownTableRow(lines[startIndex + 1] ?? "");
+  if (!header || !separator || header.length < 2 || !isMarkdownTableSeparator(separator)) {
+    return null;
+  }
+
+  const rows: string[][] = [];
+  let endIndex = startIndex + 1;
+  for (let index = startIndex + 2; index < lines.length; index += 1) {
+    const row = splitMarkdownTableRow(lines[index]);
+    if (!row) {
+      break;
+    }
+
+    rows.push(normalizeMarkdownTableRow(row, header.length));
+    endIndex = index;
+  }
+
+  return {
+    endIndex,
+    headers: normalizeMarkdownTableRow(header, header.length),
+    rows,
+  };
+}
+
+function splitMarkdownTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) {
+    return null;
+  }
+
+  return trimmed
+    .replace(/^\|/u, "")
+    .replace(/\|$/u, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(cells: string[]): boolean {
+  return cells.every((cell) => /^:?-{3,}:?$/u.test(cell));
+}
+
+function normalizeMarkdownTableRow(cells: string[], width: number): string[] {
+  return Array.from({ length: width }, (_, index) => cells[index] ?? "");
 }
 
 function MarkdownInline({ text }: { text: string }) {
@@ -1573,8 +1662,8 @@ function CustomPromptDialog({
   const canSave = title.trim().length > 0 && prompt.trim().length > 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-lg border border-white/20 bg-background p-4 shadow-2xl shadow-black/40">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
+      <div className="max-h-[calc(100dvh-1.5rem)] w-full max-w-xl overflow-auto rounded-lg border border-white/20 bg-background p-4 shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh-3rem)]">
         <div className="mb-4 flex items-center justify-between gap-3">
           <h4 className="text-base font-semibold">添加自定义提示词</h4>
           <button
@@ -1605,11 +1694,11 @@ function CustomPromptDialog({
             placeholder="请输入描述。"
           />
         </label>
-        <div className="mt-4 flex justify-end gap-2.5">
+        <div className="mt-4 grid gap-2.5 sm:flex sm:justify-end">
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-foreground transition hover:bg-white/10 active:scale-[0.98]"
+            className="inline-flex h-10 items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-foreground transition hover:bg-white/10 active:scale-[0.98] sm:h-9"
           >
             取消
           </button>
@@ -1617,7 +1706,7 @@ function CustomPromptDialog({
             type="button"
             onClick={() => onSave(title.trim(), prompt.trim())}
             disabled={!canSave}
-            className="inline-flex h-9 items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+            className="inline-flex h-10 items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground sm:h-9"
           >
             保存
           </button>
