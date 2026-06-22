@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import {
   AlertCircle,
   AudioLines,
@@ -213,6 +214,7 @@ export default function HomePage() {
   const [selected, setSelected] = useState<ExtractionFeature[]>([]);
   const [results, setResults] = useState<ExtractionResult[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [hasAcceptedUsage, setHasAcceptedUsage] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [lastResolvedInput, setLastResolvedInput] = useState("");
@@ -220,7 +222,7 @@ export default function HomePage() {
 
   const normalizedInput = input.trim();
   const isInputDirty = Boolean(work && normalizedInput !== lastResolvedInput);
-  const activeKind = work && !isInputDirty ? work.kind : null;
+  const activeKind = hasAcceptedUsage && work && !isInputDirty ? work.kind : null;
   const displayWork = activeKind ? work : null;
   const availableFeatures = useMemo(
     () => displayWork ? getAvailableFeatures(displayWork, cachedAssets) : [],
@@ -239,7 +241,12 @@ export default function HomePage() {
     [availableFeatures, results],
   );
   const canExtract = Boolean(
-    work && !isInputDirty && selectedFeatures.length > 0 && !isExtracting && !cacheBlockMessage,
+    hasAcceptedUsage &&
+    work &&
+    !isInputDirty &&
+    selectedFeatures.length > 0 &&
+    !isExtracting &&
+    !cacheBlockMessage,
   );
 
   const resolveInput = useCallback(async (value: string, options?: { showLinkHint?: boolean; silent?: boolean }) => {
@@ -287,8 +294,11 @@ export default function HomePage() {
 
   useEffect(() => {
     const hasUrl = /https?:\/\//i.test(normalizedInput);
+    if (!hasAcceptedUsage) {
+      return;
+    }
+
     if (!normalizedInput) {
-      setError(null);
       return;
     }
 
@@ -309,7 +319,7 @@ export default function HomePage() {
     }, 700);
 
     return () => window.clearTimeout(timer);
-  }, [lastResolvedInput, normalizedInput, resolveInput]);
+  }, [hasAcceptedUsage, lastResolvedInput, normalizedInput, resolveInput]);
 
   async function extract() {
     if (!canExtract || !work || isInputDirty) {
@@ -349,7 +359,26 @@ export default function HomePage() {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!hasAcceptedUsage) {
+      setError("请先确认仅用于个人学习和非商业用途，并尊重原作者版权。");
+      return;
+    }
+
     void resolveInput(normalizedInput);
+  }
+
+  function updateUsageConsent(value: boolean) {
+    setHasAcceptedUsage(value);
+    if (value && error === "请先确认仅用于个人学习和非商业用途，并尊重原作者版权。") {
+      setError(null);
+    }
+  }
+
+  function updateInput(value: string) {
+    setInput(value);
+    if (!value.trim()) {
+      setError(null);
+    }
   }
 
   function toggleFeature(feature: ExtractionFeature) {
@@ -377,20 +406,47 @@ export default function HomePage() {
           </div>
         </div>
 
-        <form onSubmit={submit}>
-          <div className="flex flex-col gap-3 md:flex-row md:items-center">
-            <div className="flex min-h-14 flex-1 items-center gap-3 rounded-md border border-cyan/35 bg-black/20 px-4 transition focus-within:border-cyan/80 focus-within:ring-2 focus-within:ring-cyan/20">
-              <Link2 className="size-5 shrink-0 text-amber" />
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          <label className="order-1 flex cursor-pointer items-start gap-3 rounded-md border border-white/15 bg-black/20 px-3 py-3 text-left transition hover:border-cyan/35 sm:px-4 md:order-2">
+            <input
+              type="checkbox"
+              checked={hasAcceptedUsage}
+              onChange={(event) => updateUsageConsent(event.target.checked)}
+              className="mt-0.5 size-5 shrink-0 accent-cyan sm:size-4"
+            />
+            <span className="text-sm leading-6 text-muted-foreground">
+              我确认仅用于个人学习和非商业用途，并尊重原作者版权；已阅读并同意
+              <Link
+                href="/legal"
+                className="mx-1 font-semibold text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
+              >
+                法律声明
+              </Link>
+              。
+            </span>
+          </label>
+
+          <div className="order-2 flex flex-col gap-3 md:order-1 md:flex-row md:items-center">
+            <div
+              className={cn(
+                "flex min-h-14 flex-1 items-center gap-3 rounded-md border bg-black/20 px-4 transition",
+                hasAcceptedUsage
+                  ? "border-cyan/35 focus-within:border-cyan/80 focus-within:ring-2 focus-within:ring-cyan/20"
+                  : "border-white/10 opacity-65",
+              )}
+            >
+              <Link2 className={cn("size-5 shrink-0", hasAcceptedUsage ? "text-amber" : "text-muted-foreground")} />
               <input
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event) => updateInput(event.target.value)}
+                disabled={!hasAcceptedUsage}
                 className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                placeholder="粘贴抖音作品的分享链接或者地址。"
+                placeholder={hasAcceptedUsage ? "粘贴抖音作品的分享链接或者地址。" : "请先勾选使用确认。"}
               />
             </div>
             <button
               type="submit"
-              disabled={isResolving || !normalizedInput}
+              disabled={!hasAcceptedUsage || isResolving || !normalizedInput}
               className="inline-flex h-12 w-full items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
             >
               {isResolving ? "检测中" : "智能检测"}
@@ -506,8 +562,22 @@ export default function HomePage() {
             <EmptyResults isExtracting={isExtracting} />
           )}
         </section>
+
+        <LegalNoticeFooter />
       </div>
     </main>
+  );
+}
+
+function LegalNoticeFooter() {
+  return (
+    <footer className="flex flex-wrap items-center justify-center gap-2 px-2 pb-1 text-xs text-muted-foreground sm:gap-x-4">
+      <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal">法律声明</Link>
+      <span className="hidden text-white/20 sm:inline" aria-hidden="true">/</span>
+      <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal#copyright">版权合规</Link>
+      <span className="hidden text-white/20 sm:inline" aria-hidden="true">/</span>
+      <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal#usage">使用限制</Link>
+    </footer>
   );
 }
 
