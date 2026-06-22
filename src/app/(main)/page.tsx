@@ -126,6 +126,8 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "dubbedAudio", icon: Music2, label: "下载配音", previewLabel: "试听配音" },
 ];
 
+const WORK_LINK_HINT = "未识别到可处理的抖音作品。请重新粘贴正确的作品分享链接，或直接粘贴作品 URL 地址。";
+
 const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKind>> = {
   cover: "cover",
   originalTranscript: "originalAudio",
@@ -240,7 +242,7 @@ export default function HomePage() {
     work && !isInputDirty && selectedFeatures.length > 0 && !isExtracting && !cacheBlockMessage,
   );
 
-  const resolveInput = useCallback(async (value: string, options?: { silent?: boolean }) => {
+  const resolveInput = useCallback(async (value: string, options?: { showLinkHint?: boolean; silent?: boolean }) => {
     const valueToResolve = value.trim();
     if (!valueToResolve) {
       setError("请输入抖音分享链接。");
@@ -275,6 +277,8 @@ export default function HomePage() {
       setResults([]);
       if (!options?.silent) {
         setError(resolveError instanceof Error ? resolveError.message : "识别链接失败。");
+      } else if (options.showLinkHint) {
+        setError(WORK_LINK_HINT);
       }
     } finally {
       setIsResolving(false);
@@ -283,12 +287,25 @@ export default function HomePage() {
 
   useEffect(() => {
     const hasUrl = /https?:\/\//i.test(normalizedInput);
-    if (!hasUrl || normalizedInput === lastResolvedInput) {
+    if (!normalizedInput) {
+      setError(null);
+      return;
+    }
+
+    if (normalizedInput === lastResolvedInput) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      void resolveInput(normalizedInput, { silent: true });
+      if (!hasUrl) {
+        setWork(null);
+        setSelected([]);
+        setResults([]);
+        setError(WORK_LINK_HINT);
+        return;
+      }
+
+      void resolveInput(normalizedInput, { showLinkHint: true, silent: true });
     }, 700);
 
     return () => window.clearTimeout(timer);
