@@ -11,15 +11,22 @@ import {
   Copy,
   Download,
   Eye,
+  FileImage,
+  FileText,
   ExternalLink,
+  Heading1,
   Image as ImageIcon,
   Link2,
   Loader2,
+  MessageSquareText,
   Pause,
+  PencilLine,
   Play,
   Plus,
   RefreshCw,
-  ScrollText,
+  Save,
+  ScanText,
+  Search,
   Sparkles,
   Volume2,
   X,
@@ -174,11 +181,11 @@ const KIND_LABELS: Record<DouyinKind, string> = {
 };
 
 const FEATURE_ICONS: Record<ExtractionFeature, typeof Captions> = {
-  cover: ImageIcon,
-  caption: Captions,
-  originalTranscript: AudioLines,
-  imageContent: ImageIcon,
-  articleText: ScrollText,
+  cover: FileImage,
+  caption: Heading1,
+  originalTranscript: MessageSquareText,
+  imageContent: ScanText,
+  articleText: FileText,
 };
 
 const DOWNLOAD_ACTIONS: Array<{
@@ -526,15 +533,23 @@ export default function HomePage() {
           </div>
         </div>
 
-        <form onSubmit={submit} className="flex flex-col gap-3">
-          <label className="order-1 flex cursor-pointer items-start gap-3 rounded-md border border-white/15 bg-black/20 px-3 py-3 text-left transition hover:border-cyan/35 sm:px-4 md:order-2">
-            <input
-              type="checkbox"
-              checked={hasAcceptedUsage}
-              onChange={(event) => updateUsageConsent(event.target.checked)}
-              className="mt-0.5 size-5 shrink-0 accent-cyan sm:size-4"
-            />
-            <span className="text-sm leading-6 text-muted-foreground">
+        <form onSubmit={submit} className="flex flex-col gap-2">
+          <label className="order-1 flex cursor-pointer items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
+            <span className="relative mt-0.5 shrink-0">
+              <input
+                type="checkbox"
+                checked={hasAcceptedUsage}
+                onChange={(event) => updateUsageConsent(event.target.checked)}
+                className="peer absolute inset-0 z-10 cursor-pointer opacity-0"
+              />
+              <span
+                aria-hidden="true"
+                className="flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border border-white/28 bg-white/[0.03] shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06),0_0_0_1px_rgb(0_0_0_/_0.2)] transition peer-hover:border-cyan/55 peer-focus-visible:border-cyan/70 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:bg-white/[0.02] peer-checked:shadow-[inset_0_1px_0_rgb(255_255_255_/_0.08),0_0_0_1px_rgb(0_0_0_/_0.18),0_0_16px_rgb(34_211_238_/_0.12)] peer-checked:[&_svg]:opacity-100"
+              >
+                <Check className="size-[0.82rem] text-cyan opacity-0 drop-shadow-[0_0_6px_rgba(34,211,238,0.45)] transition duration-150 ease-out" strokeWidth={3.4} />
+              </span>
+            </span>
+            <span className="text-[13px] leading-5 text-muted-foreground">
               我确认仅用于个人学习和非商业用途，并尊重原作者版权；已阅读并同意
               <Link
                 href="/legal"
@@ -542,7 +557,6 @@ export default function HomePage() {
               >
                 法律声明
               </Link>
-              。
             </span>
           </label>
 
@@ -552,7 +566,7 @@ export default function HomePage() {
                 "flex min-h-14 flex-1 items-center gap-3 rounded-md border bg-black/20 px-4 transition",
                 hasAcceptedUsage
                   ? "border-cyan/35 focus-within:border-cyan/80 focus-within:ring-2 focus-within:ring-cyan/20"
-                  : "border-white/10 opacity-65",
+                  : "border-white/25",
               )}
             >
               <Link2 className={cn("size-5 shrink-0", hasAcceptedUsage ? "text-amber" : "text-muted-foreground")} />
@@ -712,10 +726,6 @@ function LegalNoticeFooter() {
   return (
     <footer className="flex flex-wrap items-center justify-center gap-2 px-2 pb-1 text-xs text-muted-foreground sm:gap-x-4">
       <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal">法律声明</Link>
-      <span className="hidden text-white/20 sm:inline" aria-hidden="true">/</span>
-      <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal#copyright">版权合规</Link>
-      <span className="hidden text-white/20 sm:inline" aria-hidden="true">/</span>
-      <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal#usage">使用限制</Link>
     </footer>
   );
 }
@@ -829,7 +839,7 @@ function FeatureToggle({
           checked ? "bg-cyan" : "bg-transparent group-hover:bg-amber/70",
         )}
       />
-      <div className="flex min-w-0 gap-3">
+      <div className="flex min-w-0 items-center gap-3">
         <div
           className={cn(
             "flex size-8 shrink-0 items-center justify-center rounded-md border transition",
@@ -1423,7 +1433,7 @@ function ResultBlock({ result }: { result: ExtractionResult }) {
       </div>
       {result.content ? (
         isTranscriptFeature(result.feature) ? (
-          <TranscriptResultPanel result={result} />
+          <TranscriptResultPanel key={result.content ?? result.label} result={result} />
         ) : (
           <TextResultPanel label={result.label} text={result.content} />
         )
@@ -1466,20 +1476,48 @@ function TextResultPanel({ label, text }: { label: string; text: string }) {
 }
 
 function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
+  const initialContent = result.content ?? "";
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [content, setContent] = useState(initialContent);
+  const [draftContent, setDraftContent] = useState(initialContent);
+  const [isEditingContent, setIsEditingContent] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [summaryMode, setSummaryMode] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [customPrompts, setCustomPrompts] = useState<SummaryPrompt[]>([]);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
-  const segments = normalizeTranscriptSegments(result.content ?? "", result.transcriptSegments);
+  const usesOriginalSegments = content === initialContent;
+  const segments = normalizeTranscriptSegments(content, usesOriginalSegments ? result.transcriptSegments : undefined);
+  const trimmedSearchQuery = searchQuery.trim();
+  const activeSearchQuery = searchOpen ? trimmedSearchQuery : "";
+  const searchMatches = useMemo(
+    () => countSearchMatches(content, activeSearchQuery),
+    [content, activeSearchQuery],
+  );
+  const firstSearchMatchIndex = useMemo(
+    () => activeSearchQuery
+      ? segments.findIndex((segment) => containsSearchMatch(segment.text, activeSearchQuery))
+      : -1,
+    [activeSearchQuery, segments],
+  );
+  const firstSearchMatchRef = useRef<HTMLDivElement | null>(null);
   const prompts = [...SUMMARY_PROMPTS, ...customPrompts];
   const hasSummaryOutput = isSummarizing || Boolean(summary || summaryError);
 
+  useEffect(() => {
+    if (firstSearchMatchIndex < 0) {
+      return;
+    }
+
+    firstSearchMatchRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [activeSearchQuery, firstSearchMatchIndex]);
+
   async function copyAll() {
-    await navigator.clipboard.writeText(result.content ?? "");
+    await navigator.clipboard.writeText(content);
     setCopiedAll(true);
     window.setTimeout(() => setCopiedAll(false), 1600);
   }
@@ -1504,7 +1542,7 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
       const response = await fetch("/api/douyin/summarize", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt: prompt.prompt, text: result.content }),
+        body: JSON.stringify({ prompt: prompt.prompt, text: content }),
       });
       const payload = await readSummaryPayload(response);
       if (!response.ok || !("summary" in payload) || !payload.summary) {
@@ -1536,40 +1574,164 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
     setIsSummarizing(false);
   }
 
+  function startEditingContent() {
+    setDraftContent(content);
+    setIsEditingContent(true);
+  }
+
+  function saveContent() {
+    setContent(draftContent);
+    setIsEditingContent(false);
+    resetSummary();
+  }
+
+  function cancelEditingContent() {
+    setDraftContent(content);
+    setIsEditingContent(false);
+  }
+
+  function toggleSearch() {
+    setSearchOpen((value) => !value);
+  }
+
   return (
     <div className={cn("grid gap-3", summaryMode ? "lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.85fr)]" : "grid-cols-1")}>
       <section className="flex min-w-0 flex-col overflow-hidden rounded-md border border-white/[0.16] bg-background/70">
         <div className="flex min-h-[4.25rem] flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
-          <span className="text-xs font-medium text-muted-foreground">原文</span>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setSummaryMode((value) => !value)}
-              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-cyan/25 bg-cyan/[0.08] px-2.5 text-xs font-semibold text-cyan transition hover:border-cyan/45 hover:bg-cyan/[0.12] active:scale-[0.96]"
-              title={summaryMode ? "收起AI面板" : "AI处理"}
+          <div className="flex min-w-[13rem] flex-1 items-center">
+            <div
+              className={cn(
+                "flex min-w-0 items-center overflow-hidden rounded-md border bg-black/20 transition",
+                searchOpen
+                  ? "w-full max-w-[18rem] border-cyan/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)]"
+                  : "w-auto border-white/10",
+              )}
             >
-              <Sparkles className="size-3.5" aria-hidden="true" />
-              AI处理
-            </button>
-            <button
-              type="button"
-              onClick={() => void copyAll()}
-              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
-              aria-label={copiedAll ? `已复制${result.label}` : `复制${result.label}`}
-              title={copiedAll ? "已复制" : "复制全文"}
-            >
-              {copiedAll ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
-            </button>
+              <button
+                type="button"
+                onClick={toggleSearch}
+                className={cn(
+                  "inline-flex h-9 shrink-0 items-center justify-center gap-1.5 px-2.5 text-xs font-semibold transition active:scale-[0.96]",
+                  "text-cyan hover:bg-cyan/[0.08]",
+                )}
+                title="搜索"
+              >
+                <Search className="size-3.5" aria-hidden="true" />
+                搜索
+              </button>
+              {searchOpen ? (
+                <>
+                  <span className="h-4 w-px shrink-0 bg-white/10" aria-hidden="true" />
+                  <label className="relative min-w-0 flex-1">
+                    <span className="sr-only">搜索原文</span>
+                    <input
+                      value={searchQuery}
+                      onChange={(event) => setSearchQuery(event.target.value)}
+                      className="h-9 w-full bg-transparent px-2 pr-8 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+                      placeholder="输入关键词"
+                    />
+                    {searchQuery ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        className="absolute right-1.5 top-1/2 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.94]"
+                        aria-label="清除搜索"
+                        title="清除搜索"
+                      >
+                        <X className="size-3.5" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </label>
+                  {activeSearchQuery ? (
+                    <span className="mr-1.5 inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-sm border border-amber/25 bg-amber/[0.1] px-1.5 text-[0.68rem] font-semibold tabular-nums text-amber">
+                      {searchMatches}
+                    </span>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center">
+              {isEditingContent ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={saveContent}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan px-2.5 text-xs font-semibold text-black transition hover:brightness-110 active:scale-[0.96]"
+                    title="保存编辑"
+                  >
+                    <Save className="size-3.5" aria-hidden="true" />
+                    保存
+                  </button>
+                  <span className="mx-2 h-5 w-px bg-cyan/35" aria-hidden="true" />
+                  <button
+                    type="button"
+                    onClick={cancelEditingContent}
+                    className="inline-flex h-8 items-center justify-center rounded-md px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.96]"
+                    title="取消编辑"
+                  >
+                    取消编辑
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={startEditingContent}
+                  className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-amber/[0.08] hover:text-amber active:scale-[0.96]"
+                  title="编辑"
+                >
+                  <PencilLine className="size-3.5" aria-hidden="true" />
+                  编辑
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setSummaryMode((value) => !value)}
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.96]"
+                title={summaryMode ? "收起AI面板" : "AI处理"}
+              >
+                <Sparkles className="size-3.5" aria-hidden="true" />
+                AI处理
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyAll()}
+                className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+                aria-label={copiedAll ? `已复制${result.label}` : `复制${result.label}`}
+                title={copiedAll ? "已复制" : "复制全文"}
+              >
+                {copiedAll ? <Check className="size-4 text-cyan" /> : <Copy className="size-4" />}
+              </button>
+            </div>
           </div>
         </div>
-        <div className="content-scroll max-h-[65dvh] flex-1 space-y-3 overflow-auto p-3 text-sm leading-7 text-foreground/90 sm:max-h-[36rem]">
-          {segments.map((segment, index) => (
-            <TranscriptSegmentCard
-              key={`${segment.startSeconds}-${index}`}
-              segment={segment}
+        {isEditingContent ? (
+          <div className="p-3">
+            <textarea
+              value={draftContent}
+              onChange={(event) => setDraftContent(event.target.value)}
+              className="content-scroll h-[65dvh] max-h-[36rem] min-h-72 w-full resize-none rounded-md border border-cyan/20 bg-black/20 p-3 text-sm leading-7 text-foreground/90 outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
+              placeholder="编辑原文内容。"
             />
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="content-scroll max-h-[65dvh] flex-1 space-y-3 overflow-auto p-3 text-sm leading-7 text-foreground/90 sm:max-h-[36rem]">
+            {segments.map((segment, index) => (
+              <div
+                key={`${segment.startSeconds}-${index}`}
+                ref={index === firstSearchMatchIndex ? firstSearchMatchRef : undefined}
+              >
+                <TranscriptSegmentCard
+                  segment={segment}
+                  searchQuery={activeSearchQuery}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {summaryMode ? (
@@ -1852,7 +2014,13 @@ function MarkdownInline({ text }: { text: string }) {
   });
 }
 
-function TranscriptSegmentCard({ segment }: { segment: TranscriptSegment }) {
+function TranscriptSegmentCard({
+  segment,
+  searchQuery,
+}: {
+  segment: TranscriptSegment;
+  searchQuery?: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function copySegment() {
@@ -1878,7 +2046,7 @@ function TranscriptSegmentCard({ segment }: { segment: TranscriptSegment }) {
         </button>
       </div>
       <div className="whitespace-pre-wrap break-words text-foreground/90">
-        <TaggedText text={segment.text} />
+        <TaggedText text={segment.text} searchQuery={searchQuery} />
       </div>
     </div>
   );
@@ -1964,6 +2132,28 @@ function normalizeTranscriptSegments(
   }
 
   return [{ endSeconds: 0, startSeconds: 0, text: content }];
+}
+
+function countSearchMatches(text: string, query: string): number {
+  if (!query) {
+    return 0;
+  }
+
+  const source = text.toLocaleLowerCase();
+  const target = query.toLocaleLowerCase();
+  let count = 0;
+  let index = source.indexOf(target);
+
+  while (index !== -1) {
+    count += 1;
+    index = source.indexOf(target, index + target.length);
+  }
+
+  return count;
+}
+
+function containsSearchMatch(text: string, query: string): boolean {
+  return text.toLocaleLowerCase().includes(query.toLocaleLowerCase());
 }
 
 function formatSegmentTime(seconds: number): string {
@@ -2092,19 +2282,58 @@ function ContentText({ text }: { text: string }) {
   );
 }
 
-function TaggedText({ text }: { text: string }) {
-  const parts = text.split(/(#[\p{L}\p{N}_-]+)/gu);
+function TaggedText({ text, searchQuery = "" }: { text: string; searchQuery?: string }) {
+  const query = searchQuery.trim();
+  const parts = query ? splitSearchMatches(text, query) : [{ highlight: false, text }];
 
-  return parts.map((part, index) =>
-    part.startsWith("#") ? (
-      <span
-        key={`${part}-${index}`}
-        className="mx-0.5 inline-flex rounded-sm border border-[#9bb892]/20 bg-[#9bb892]/10 px-1.5 py-0.5 text-[#adc4a3]"
-      >
-        {part}
-      </span>
-    ) : (
-      <span key={`${index}-${part.slice(0, 8)}`}>{part}</span>
-    ),
-  );
+  return parts.map((part, partIndex) => {
+    if (part.highlight) {
+      return (
+        <span
+          key={`match-${partIndex}-${part.text.slice(0, 8)}`}
+          className="font-bold text-[#f59e0b] underline decoration-[#f59e0b]/70 decoration-2 underline-offset-2"
+        >
+          {part.text}
+        </span>
+      );
+    }
+
+    return part.text.split(/(#[\p{L}\p{N}_-]+)/gu).map((token, tokenIndex) =>
+      token.startsWith("#") ? (
+        <span
+          key={`${partIndex}-${token}-${tokenIndex}`}
+          className="mx-0.5 inline-flex rounded-sm border border-[#9bb892]/20 bg-[#9bb892]/10 px-1.5 py-0.5 text-[#adc4a3]"
+        >
+          {token}
+        </span>
+      ) : (
+        <span key={`${partIndex}-${tokenIndex}-${token.slice(0, 8)}`}>{token}</span>
+      ),
+    );
+  });
+}
+
+function splitSearchMatches(text: string, query: string): Array<{ highlight: boolean; text: string }> {
+  const source = text.toLocaleLowerCase();
+  const target = query.toLocaleLowerCase();
+  const parts: Array<{ highlight: boolean; text: string }> = [];
+  let cursor = 0;
+  let matchIndex = source.indexOf(target);
+
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) {
+      parts.push({ highlight: false, text: text.slice(cursor, matchIndex) });
+    }
+
+    const matchEnd = matchIndex + query.length;
+    parts.push({ highlight: true, text: text.slice(matchIndex, matchEnd) });
+    cursor = matchEnd;
+    matchIndex = source.indexOf(target, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push({ highlight: false, text: text.slice(cursor) });
+  }
+
+  return parts;
 }
