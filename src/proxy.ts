@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  CLIENT_COOKIE,
+  CLIENT_COOKIE_MAX_AGE_SECONDS,
+  createClientId,
+  firstHeaderValue,
+  normalizeClientId,
+  readAnonymousIdentity,
+  readClientIp,
+  stableHash,
+  type ClientIdentity,
+} from "@/lib/request-identity";
 
-const CLIENT_COOKIE = "el_client";
-const CLIENT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 180;
 const CLEANUP_INTERVAL_MS = 60_000;
 // 1GB single-instance hosts should keep middleware state comfortably below app/runtime memory.
 const MAX_BUCKETS = 4_096;
@@ -14,16 +23,18 @@ type LimitRule = {
   windowMs: number;
 };
 
-type Bucket = {
-  count: number;
-  resetAt: number;
+type TokenBucket = {
+  expiresAt: number;
+  lastSeenAt: number;
+  tokens: number;
+  updatedAt: number;
 };
 
 type RateLimitDecision =
   | { allowed: true; limit: number; remaining: number; resetAt: number }
   | { allowed: false; limit: number; retryAfter: number; resetAt: number };
 
-const buckets = new Map<string, Bucket>();
+const buckets = new Map<string, TokenBucket>();
 let lastCleanupAt = 0;
 
 export function proxy(request: NextRequest) {
@@ -54,11 +65,7 @@ function isDouyinApiRequest(request: NextRequest): boolean {
   return request.nextUrl.pathname.startsWith("/api/douyin/");
 }
 
-function firstHeaderValue(value: string | null): string | null {
-  return value?.split(",")[0]?.trim() || null;
-}
-
-function readClientIdentity(request: NextRequest): { id: string; isNew: boolean } {
+function readClientIdentity(request: NextRequest): ClientIdentity {
   const cookieId = normalizeClientId(request.cookies.get(CLIENT_COOKIE)?.value);
   if (cookieId) {
     return { id: cookieId, isNew: false };
@@ -67,24 +74,10 @@ function readClientIdentity(request: NextRequest): { id: string; isNew: boolean 
   return { id: createClientId(), isNew: true };
 }
 
-function normalizeClientId(value: string | undefined): string | null {
-  return value && /^[a-z0-9_-]{20,80}$/iu.test(value) ? value : null;
-}
-
-function createClientId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random()
-    .toString(36)
-    .slice(2)}`;
-}
-
 function withClientCookie(
   response: NextResponse,
   request: NextRequest,
-  client: { id: string; isNew: boolean },
+  client: ClientIdentity,
 ): NextResponse {
   if (!client.isNew) {
     return response;
@@ -109,7 +102,7 @@ function isSecureRequest(request: NextRequest): boolean {
 
 function checkRateLimit(
   request: NextRequest,
-  client: { id: string; isNew: boolean },
+  client: ClientIdentity,
 ): RateLimitDecision {
   const now = Date.now();
   cleanupBuckets(now);
@@ -117,56 +110,47 @@ function checkRateLimit(
   const rules = buildLimitRules(request, client);
   const blocked = rules
     .map((rule) => ({ rule, bucket: readBucket(rule, now) }))
-    .find(({ rule, bucket }) => bucket.count >= rule.limit);
+    .find(({ bucket }) => bucket.tokens < 1);
 
   if (blocked) {
+    const refillMs = ((1 - blocked.bucket.tokens) * blocked.rule.windowMs) / blocked.rule.limit;
     return {
       allowed: false,
       limit: blocked.rule.limit,
-      resetAt: blocked.bucket.resetAt,
-      retryAfter: Math.max(1, Math.ceil((blocked.bucket.resetAt - now) / 1000)),
+      resetAt: now + refillMs,
+      retryAfter: Math.max(1, Math.ceil(refillMs / 1000)),
     };
   }
 
   const snapshots = rules.map((rule) => {
     const bucket = readBucket(rule, now);
-    bucket.count += 1;
+    bucket.tokens -= 1;
     buckets.set(rule.key, bucket);
     return { rule, bucket };
   });
   trimBuckets();
 
   const tightest = snapshots.reduce((current, next) => {
-    const currentRemaining = current.rule.limit - current.bucket.count;
-    const nextRemaining = next.rule.limit - next.bucket.count;
+    const currentRemaining = Math.floor(current.bucket.tokens);
+    const nextRemaining = Math.floor(next.bucket.tokens);
     return nextRemaining < currentRemaining ? next : current;
   });
 
   return {
     allowed: true,
     limit: tightest.rule.limit,
-    remaining: Math.max(0, tightest.rule.limit - tightest.bucket.count),
-    resetAt: tightest.bucket.resetAt,
+    remaining: Math.max(0, Math.floor(tightest.bucket.tokens)),
+    resetAt: tightest.bucket.expiresAt,
   };
 }
 
 function buildLimitRules(
   request: NextRequest,
-  client: { id: string; isNew: boolean },
+  client: ClientIdentity,
 ): LimitRule[] {
   const routeKind = readApiRouteKind(request.nextUrl.pathname);
-  const ip = readClientIp(request);
-  const identity = stableHash(
-    client.isNew
-      ? [
-          "anon",
-          ip,
-          request.headers.get("user-agent") ?? "",
-          request.headers.get("accept-language") ?? "",
-        ].join("|")
-      : `client|${client.id}`,
-  );
-  const ipHash = stableHash(ip);
+  const identity = client.isNew ? readAnonymousIdentity(request.headers) : stableHash(`client|${client.id}`);
+  const ipHash = stableHash(readClientIp(request.headers));
   const limits = readLimits(routeKind, client.isNew);
 
   return [
@@ -209,28 +193,22 @@ function readLimits(
   };
 }
 
-function readClientIp(request: NextRequest): string {
-  return (
-    firstHeaderValue(request.headers.get("cf-connecting-ip")) ??
-    firstHeaderValue(request.headers.get("x-real-ip")) ??
-    firstHeaderValue(request.headers.get("x-forwarded-for")) ??
-    readForwardedFor(request.headers.get("forwarded")) ??
-    "unknown"
-  );
-}
-
-function readForwardedFor(value: string | null): string | null {
-  const first = firstHeaderValue(value);
-  const forwardedFor = first?.match(/(?:^|;)\s*for=(?:"?)([^";,]+)(?:"?)/iu)?.[1];
-  return forwardedFor?.trim() || null;
-}
-
-function readBucket(rule: LimitRule, now: number): Bucket {
+function readBucket(rule: LimitRule, now: number): TokenBucket {
   const bucket = buckets.get(rule.key);
-  if (!bucket || bucket.resetAt <= now) {
-    return { count: 0, resetAt: now + rule.windowMs };
+  if (!bucket) {
+    return {
+      expiresAt: now + rule.windowMs,
+      lastSeenAt: now,
+      tokens: rule.limit,
+      updatedAt: now,
+    };
   }
 
+  const refill = ((now - bucket.updatedAt) * rule.limit) / rule.windowMs;
+  bucket.tokens = Math.min(rule.limit, bucket.tokens + Math.max(0, refill));
+  bucket.updatedAt = now;
+  bucket.lastSeenAt = now;
+  bucket.expiresAt = now + rule.windowMs;
   return bucket;
 }
 
@@ -241,7 +219,7 @@ function cleanupBuckets(now: number): void {
 
   lastCleanupAt = now;
   for (const [key, bucket] of buckets) {
-    if (bucket.resetAt <= now) {
+    if (bucket.expiresAt <= now) {
       buckets.delete(key);
     }
   }
@@ -254,25 +232,14 @@ function trimBuckets(): void {
   }
 
   const overflow = buckets.size - MAX_BUCKETS;
-  let deleted = 0;
-  for (const key of buckets.keys()) {
+  const staleKeys = [...buckets.entries()]
+    .sort(([, left], [, right]) => left.expiresAt - right.expiresAt || left.lastSeenAt - right.lastSeenAt)
+    .slice(0, overflow)
+    .map(([key]) => key);
+
+  for (const key of staleKeys) {
     buckets.delete(key);
-    deleted += 1;
-    if (deleted >= overflow) {
-      break;
-    }
   }
-}
-
-function stableHash(value: string): string {
-  let hash = 0x811c9dc5;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-
-  return (hash >>> 0).toString(36);
 }
 
 function withRateLimitHeaders(response: NextResponse, limit: RateLimitDecision): NextResponse {

@@ -29,11 +29,11 @@ describe("openrouter audio transcription", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses the caller-provided missing audio detail", async () => {
-    await expect(transcribeMediaSource(undefined, "没有采集到当前作品对应的配音资源。")).resolves.toEqual({
+  it("uses the caller-provided missing media detail", async () => {
+    await expect(transcribeMediaSource(undefined, "没有采集到当前作品对应的视频资源。")).resolves.toEqual({
       ok: false,
       code: "unavailable",
-      detail: "没有采集到当前作品对应的配音资源。",
+      detail: "没有采集到当前作品对应的视频资源。",
     });
     expect(transcodeAudioToMp3Chunks).not.toHaveBeenCalled();
   });

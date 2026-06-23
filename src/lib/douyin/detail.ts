@@ -29,6 +29,7 @@ type DouyinDetailPayload = {
 
 type DetailRequest = {
   label: string;
+  parse: (body: string, work: Pick<ResolvedDouyinWork, "id" | "kind">) => unknown;
   url: string;
   headers: Record<string, string>;
 };
@@ -43,6 +44,9 @@ type DetailAttempt = {
 const DETAIL_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const SHARE_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 " +
+  "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
 
 export type DouyinWorkMetadata = {
   authorName?: string;
@@ -52,7 +56,6 @@ export type DouyinWorkMetadata = {
   coverUrls?: string[];
   title?: string;
   imageUrls?: string[];
-  audioUrls?: string[];
   videoUrls?: string[];
 };
 
@@ -60,26 +63,29 @@ export async function collectWorkMetadata(
   work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">,
 ): Promise<DouyinWorkMetadata> {
   const attempts: DetailAttempt[] = [];
-  const metadataList = await Promise.all(buildDetailRequests(work).map(async (request) => {
-    const payload = await fetchDetailPayload(request, attempts);
+  let collected: DouyinWorkMetadata = {};
+
+  for (const request of buildDetailRequests(work)) {
+    const payload = await fetchDetailPayload(request, attempts, work);
     const detail = readAwemeDetail(payload);
     if (!detail) {
-      return {};
+      continue;
     }
 
     const metadata = parseWorkMetadata({ aweme_detail: detail }, work.id, work.kind);
     if (hasMetadata(metadata)) {
-      return metadata;
+      collected = mergeMetadata(collected, metadata);
+      if (hasPrimaryContent(collected)) {
+        return collected;
+      }
+      continue;
     }
 
     attempts.push({
       label: request.label,
       reason: "aweme_detail parsed without usable metadata",
     });
-    return {};
-  }));
-
-  const collected = metadataList.reduce(mergeMetadata, {});
+  }
 
   if (hasMetadata(collected)) {
     return collected;
@@ -115,7 +121,6 @@ export function parseWorkMetadata(
     caption: readCaption(detail, kind),
     coverUrls,
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
-    audioUrls: readAudioUrls(detail.music, kind),
     imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
     videoUrls,
   };
@@ -132,21 +137,33 @@ export function buildAuthorUrl(secUid: string | undefined, workId: string): stri
   return url.toString();
 }
 
-function buildDetailRequests(work: Pick<ResolvedDouyinWork, "finalUrl" | "id">): DetailRequest[] {
+function buildDetailRequests(work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">): DetailRequest[] {
   const headers = buildRequestHeaders(work.finalUrl);
 
   return [
     {
+      label: "share-page-ssr",
+      url: buildSharePageUrl(work),
+      headers: buildSharePageHeaders(),
+      parse: parseSharePagePayload,
+    },
+    {
       label: "web-detail-aid-6383",
       url: buildDetailApiUrl(work.id, "6383"),
       headers,
+      parse: parseJson,
     },
     {
       label: "web-detail-aid-1128",
       url: buildDetailApiUrl(work.id, "1128"),
       headers,
+      parse: parseJson,
     },
   ];
+}
+
+function buildSharePageUrl(work: Pick<ResolvedDouyinWork, "id" | "kind">): string {
+  return new URL(`/share/${work.kind}/${work.id}`, "https://www.douyin.com").toString();
 }
 
 function buildDetailApiUrl(workId: string, aid: string): string {
@@ -161,12 +178,25 @@ function buildDetailApiUrl(workId: string, aid: string): string {
 function buildRequestHeaders(referer: string): Record<string, string> {
   return {
     accept: "application/json, text/plain, */*",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
     referer,
     "user-agent": DETAIL_USER_AGENT,
   };
 }
 
-async function fetchDetailPayload(request: DetailRequest, attempts: DetailAttempt[]): Promise<unknown> {
+function buildSharePageHeaders(): Record<string, string> {
+  return {
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "user-agent": SHARE_USER_AGENT,
+  };
+}
+
+async function fetchDetailPayload(
+  request: DetailRequest,
+  attempts: DetailAttempt[],
+  work: Pick<ResolvedDouyinWork, "id" | "kind">,
+): Promise<unknown> {
   try {
     const response = await fetch(request.url, {
       cache: "no-store",
@@ -185,7 +215,7 @@ async function fetchDetailPayload(request: DetailRequest, attempts: DetailAttemp
       return null;
     }
 
-    const payload = parseJson(text);
+    const payload = request.parse(text, work);
     if (!payload) {
       attempts.push({
         label: request.label,
@@ -216,6 +246,44 @@ async function fetchDetailPayload(request: DetailRequest, attempts: DetailAttemp
   }
 }
 
+function parseSharePagePayload(value: string, work: Pick<ResolvedDouyinWork, "id" | "kind">): unknown {
+  const match = value.match(/<script>window\._ROUTER_DATA = ([\s\S]*?)<\/script>/u);
+  if (!match) {
+    return null;
+  }
+
+  const data = parseJson(match[1].trim());
+  const item = findSharedAwemeItem(data, work.id);
+  return item ? { aweme_detail: item } : null;
+}
+
+function findSharedAwemeItem(value: unknown, workId: string): unknown {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const itemList = record.item_list ?? record.itemList;
+  if (Array.isArray(itemList)) {
+    return itemList.find((item) => {
+      if (!item || typeof item !== "object") {
+        return false;
+      }
+      const itemRecord = item as Record<string, unknown>;
+      return readString(itemRecord.aweme_id ?? itemRecord.awemeId) === workId;
+    }) ?? itemList[0] ?? null;
+  }
+
+  for (const child of Object.values(record)) {
+    const item = findSharedAwemeItem(child, workId);
+    if (item) {
+      return item;
+    }
+  }
+
+  return null;
+}
+
 function readAwemeDetail(payload: unknown): DouyinDetailPayload["aweme_detail"] | undefined {
   if (!payload || typeof payload !== "object") {
     return undefined;
@@ -233,7 +301,15 @@ function hasMetadata(metadata: DouyinWorkMetadata): boolean {
     metadata.title ||
     metadata.coverUrls?.length ||
     metadata.videoUrls?.length ||
-    metadata.audioUrls?.length ||
+    metadata.imageUrls?.length,
+  );
+}
+
+function hasPrimaryContent(metadata: DouyinWorkMetadata): boolean {
+  return Boolean(
+    metadata.articleText ||
+    metadata.coverUrls?.length ||
+    metadata.videoUrls?.length ||
     metadata.imageUrls?.length,
   );
 }
@@ -243,7 +319,6 @@ function mergeMetadata(
   next: DouyinWorkMetadata,
 ): DouyinWorkMetadata {
   const coverUrls = uniqueMediaReferences([...(current.coverUrls ?? []), ...(next.coverUrls ?? [])]);
-  const audioUrls = uniqueMediaReferences([...(current.audioUrls ?? []), ...(next.audioUrls ?? [])]);
   const imageUrls = uniqueMediaReferences([...(current.imageUrls ?? []), ...(next.imageUrls ?? [])]);
   const videoUrls = uniqueMediaReferences([...(current.videoUrls ?? []), ...(next.videoUrls ?? [])]);
 
@@ -254,7 +329,6 @@ function mergeMetadata(
     caption: current.caption ?? next.caption,
     coverUrls,
     title: current.title ?? next.title,
-    audioUrls,
     imageUrls,
     videoUrls,
   };
@@ -291,10 +365,6 @@ function readPositiveNumber(value: string | undefined, fallback: number): number
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function readBoolean(value: unknown): boolean {
-  return value === true;
 }
 
 function readNumber(value: unknown): number | undefined {
@@ -427,27 +497,6 @@ function readCoverUrlsFromVideo(video: Record<string, unknown> | null): string[]
     ...readUrlList(video.origin_cover ?? video.originCover),
     ...readUrlList(video.dynamic_cover ?? video.dynamicCover),
   ]);
-}
-
-function readAudioUrls(musicValue: unknown, kind: DouyinKind | undefined): string[] {
-  const music = musicValue && typeof musicValue === "object"
-    ? musicValue as Record<string, unknown>
-    : null;
-  if (!music || (kind === "video" && isOriginalSoundMusic(music))) {
-    return [];
-  }
-
-  return uniqueMediaReferences(
-    readUrlList(music?.play_url ?? music?.playUrl),
-  );
-}
-
-function isOriginalSoundMusic(music: Record<string, unknown>): boolean {
-  if (readBoolean(music.is_original_sound ?? music.isOriginalSound)) {
-    return true;
-  }
-
-  return Boolean(readString(music.title)?.includes("创作的原声"));
 }
 
 function readVideoUrls(value: unknown): string[] {

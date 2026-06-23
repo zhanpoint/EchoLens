@@ -4,6 +4,7 @@ import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildMediaDownloadPath } from "@/lib/douyin/download";
 import type { CollectedContent } from "@/lib/douyin/media";
 import { DouyinResolveError, resolveDouyinInput } from "@/lib/douyin/url";
+import { withClientRouteConcurrency } from "@/lib/client-concurrency";
 import { identifyImageContent, transcribeMediaSource } from "@/lib/openrouter/provider";
 import {
   EXTRACTION_FEATURES,
@@ -31,6 +32,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "请求参数无效，至少选择一个提取功能。" }, { status: 400 });
   }
 
+  return withClientRouteConcurrency(request, "douyin:extract", async () => {
   try {
     const work = await resolveDouyinInput(parsed.data.input);
     const features = parsed.data.features;
@@ -44,7 +46,6 @@ export async function POST(request: Request) {
     const content: CollectedContent = {
       caption: work.kind === "article" ? metadata?.title : metadata?.caption,
       articleText: metadata?.articleText,
-      audioUrls: metadata?.audioUrls ?? [],
       coverUrls: metadata?.coverUrls,
       imageUrls: work.kind === "note" ? metadata?.imageUrls ?? [] : [],
       videoUrls: metadata?.videoUrls,
@@ -72,6 +73,7 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+  });
 }
 
 async function buildResults(
@@ -80,7 +82,6 @@ async function buildResults(
   content: CollectedContent,
 ): Promise<ExtractionResult[]> {
   const results: ExtractionResult[] = [];
-  const kind = work.kind;
 
   for (const feature of features) {
     if (feature === "cover") {
@@ -89,19 +90,19 @@ async function buildResults(
 
     if (feature === "caption") {
       results.push(
-        textResult(feature, kind, content.caption, `没有采集到${getFeatureLabel(feature, kind)}。`),
+        textResult(feature, content.caption, `没有采集到${getFeatureLabel(feature)}。`),
       );
     }
 
     if (feature === "articleText") {
       results.push(
-        textResult(feature, kind, content.articleText, "没有采集到文章正文。"),
+        textResult(feature, content.articleText, "没有采集到文章正文。"),
       );
     }
 
     if (feature === "imageContent") {
       const modelResult = await identifyImageContent(content.imageUrls);
-      results.push(providerResult(feature, kind, modelResult));
+      results.push(providerResult(feature, modelResult));
     }
 
     if (feature === "originalTranscript") {
@@ -109,16 +110,9 @@ async function buildResults(
         content.videoUrls,
         "没有采集到当前作品对应的视频资源。",
       );
-      results.push(providerResult(feature, kind, modelResult));
+      results.push(providerResult(feature, modelResult));
     }
 
-    if (feature === "dubbedTranscript") {
-      const modelResult = await transcribeMediaSource(
-        content.audioUrls,
-        "没有采集到当前作品对应的配音资源。",
-      );
-      results.push(providerResult(feature, kind, modelResult));
-    }
   }
 
   return results;
@@ -126,21 +120,20 @@ async function buildResults(
 
 function textResult(
   feature: ExtractionFeature,
-  kind: DouyinKind,
   content: string | undefined,
   unavailableDetail: string,
 ): ExtractionResult {
   return content
     ? {
         feature,
-        label: getFeatureLabel(feature, kind),
+        label: getFeatureLabel(feature),
         status: "success",
         source: "detail",
         content,
       }
     : {
         feature,
-        label: getFeatureLabel(feature, kind),
+        label: getFeatureLabel(feature),
         status: "unavailable",
         detail: unavailableDetail,
       };
@@ -153,7 +146,7 @@ function coverResult(
   return coverUrls?.length
     ? {
         feature: "cover",
-        label: getFeatureLabel("cover", work.kind),
+        label: getFeatureLabel("cover"),
         status: "success",
         source: "detail",
         assets: [
@@ -167,7 +160,7 @@ function coverResult(
       }
     : {
         feature: "cover",
-        label: getFeatureLabel("cover", work.kind),
+        label: getFeatureLabel("cover"),
         status: "unavailable",
         detail: "没有采集到封面图片。",
       };
@@ -175,13 +168,12 @@ function coverResult(
 
 function providerResult(
   feature: ExtractionFeature,
-  kind: DouyinKind,
   result: Awaited<ReturnType<typeof identifyImageContent>>,
 ): ExtractionResult {
   return result.ok
     ? {
         feature,
-        label: getFeatureLabel(feature, kind),
+        label: getFeatureLabel(feature),
       status: "success",
       source: "openrouter",
       content: result.content,
@@ -189,7 +181,7 @@ function providerResult(
     }
     : {
         feature,
-        label: getFeatureLabel(feature, kind),
+        label: getFeatureLabel(feature),
         status: result.code,
         detail: result.detail,
       };

@@ -24,6 +24,16 @@ afterEach(() => {
   delete process.env.FFMPEG_PATH;
 });
 
+function sharePageHtml(videoInfoRes: unknown): string {
+  return `<html><body><script>window._ROUTER_DATA = ${JSON.stringify({
+    loaderData: {
+      "video_(id)/page": {
+        videoInfoRes,
+      },
+    },
+  })}</script></body></html>`;
+}
+
 describe("douyin url utilities", () => {
   it("extracts the first url from shared text", () => {
     expect(extractFirstUrl("复制这条链接 https://v.douyin.com/abc123/ 打开抖音")).toBe(
@@ -58,21 +68,61 @@ describe("douyin url utilities", () => {
   });
 
   it("keeps feature availability strict per work type", () => {
-    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "originalTranscript", "dubbedTranscript"]);
-    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "dubbedTranscript", "imageContent"]);
-    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText", "dubbedTranscript"]);
-    expect(getFeatureLabel("cover", "video")).toBe("封面");
-    expect(getFeatureLabel("caption", "article")).toBe("标题");
-    expect(getFeatureLabel("caption", "note")).toBe("文案");
-    expect(getFeatureLabel("caption", "video")).toBe("文案");
-    expect(getFeatureLabel("originalTranscript", "video")).toBe("视频原声文本");
-    expect(getFeatureLabel("dubbedTranscript", "video")).toBe("配音文本");
+    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "originalTranscript"]);
+    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "imageContent"]);
+    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText"]);
+    expect(getFeatureLabel("cover")).toBe("封面");
+    expect(getFeatureLabel("caption")).toBe("标题");
+    expect(getFeatureLabel("originalTranscript")).toBe("视频文案");
     expect(FEATURES_BY_KIND.video.length).toBeLessThanOrEqual(EXTRACTION_FEATURES.length);
   });
 
   it("builds a douyin author url from sec_uid and work id", () => {
     expect(buildAuthorUrl("MS4wLjABAAAA-author", "7638145958106205455")).toBe(
       "https://www.douyin.com/user/MS4wLjABAAAA-author?from_tab_name=main&vid=7638145958106205455",
+    );
+  });
+
+  it("collects media from the douyin share page SSR payload", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(sharePageHtml({
+        item_list: [
+          {
+            aweme_id: "7641820631017536443",
+            author: {
+              nickname: "分享作者",
+              sec_uid: "MS4wLjABAAAA-share",
+            },
+            desc: "分享页文案",
+            video: {
+              cover: {
+                url_list: ["https://example.com/share-cover.jpg"],
+              },
+              play_addr: {
+                url_list: ["https://example.com/share-video.mp4"],
+              },
+            },
+          },
+        ],
+      })),
+    );
+
+    await expect(
+      collectWorkMetadata({
+        finalUrl: "https://www.douyin.com/video/7641820631017536443",
+        id: "7641820631017536443",
+        kind: "video",
+      }),
+    ).resolves.toMatchObject({
+      authorName: "分享作者",
+      caption: "分享页文案",
+      coverUrls: ["https://example.com/share-cover.jpg"],
+      videoUrls: ["https://example.com/share-video.mp4"],
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toBe(
+      "https://www.douyin.com/share/video/7641820631017536443",
     );
   });
 
@@ -93,13 +143,13 @@ describe("douyin url utilities", () => {
       authorName: "零点未来",
       authorUrl:
         "https://www.douyin.com/user/MS4wLjABAAAA-author?from_tab_name=main&vid=7638145958106205455",
-      audioUrls: [],
       imageUrls: [],
     });
   });
 
   it("falls back to the alternate detail request when the primary response has no aweme detail", async () => {
     vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("<!doctype html><html></html>"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ status_code: 0 })))
       .mockResolvedValueOnce(
         new Response(
@@ -126,13 +176,17 @@ describe("douyin url utilities", () => {
       caption: "生产文案",
     });
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
-    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toContain("aid=6383");
-    expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toBe(
+      "https://www.douyin.com/share/video/7652577724216692002",
+    );
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=6383");
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[2][0])).toContain("aid=1128");
   });
 
   it("merges partial detail payloads instead of returning metadata without media", async () => {
     vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("<!doctype html><html></html>"))
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
@@ -152,12 +206,6 @@ describe("douyin url utilities", () => {
                   url_list: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
                 },
               },
-              music: {
-                is_original_sound: false,
-                play_url: {
-                  url_list: ["https://example.com/audio-primary.m4a"],
-                },
-              },
             },
           }),
         ),
@@ -172,7 +220,6 @@ describe("douyin url utilities", () => {
     ).resolves.toMatchObject({
       authorName: "间歇作者",
       caption: "只有文案的响应",
-      audioUrls: ["https://example.com/audio-primary.m4a"],
       videoUrls: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
     });
   });
@@ -271,7 +318,6 @@ describe("douyin url utilities", () => {
       caption: "公开描述",
       title: "标题",
       articleText: "第一段正文\n二级标题\n第二段正文",
-      audioUrls: [],
       imageUrls: [],
     });
   });
@@ -402,105 +448,6 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("uses music play url as the dubbed audio asset for video works", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            video: {
-              bit_rate_audio: [
-                {
-                  audio_quality: 5,
-                  audio_meta: {
-                    bitrate: 48000,
-                    url_list: {
-                      main_url: "https://example.com/low-audio.m4a",
-                    },
-                  },
-                },
-                {
-                  audio_quality: 6,
-                  audio_meta: {
-                    bitrate: 64000,
-                    url_list: {
-                      main_url: "https://example.com/high-audio.m4a",
-                      backup_url: "https://example.com/high-backup-audio.m4a",
-                    },
-                  },
-                },
-              ],
-            },
-            music: {
-              is_original_sound: false,
-              play_url: {
-                url_list: ["https://example.com/music-audio.m4a"],
-              },
-            },
-          },
-        },
-        "7646726820692547263",
-        "video",
-      ),
-    ).toMatchObject({
-      audioUrls: ["https://example.com/music-audio.m4a"],
-      imageUrls: [],
-    });
-  });
-
-  it("does not reuse a video's original sound music as dubbed audio", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            music: {
-              title: "@元见UGEN创作的原声",
-              is_original_sound: true,
-              play_url: {
-                url_list: ["https://example.com/original-sound.mp3"],
-              },
-            },
-            video: {
-              play_addr: {
-                url_list: ["https://example.com/video-with-embedded-audio.mp4"],
-              },
-            },
-          },
-        },
-        "7651499056660745491",
-        "video",
-      ),
-    ).toMatchObject({
-      audioUrls: [],
-      videoUrls: ["https://example.com/video-with-embedded-audio.mp4"],
-    });
-  });
-
-  it("reads music play url as the audio asset for note and article works", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            music: {
-              play_url: {
-                url_list: [
-                  "https://sf11-cdn-tos.douyinstatic.com/obj/audio-main",
-                  "https://sf6-cdn-tos.douyinstatic.com/obj/audio-backup",
-                ],
-              },
-            },
-          },
-        },
-        "7643144296615218021",
-        "note",
-      ),
-    ).toMatchObject({
-      audioUrls: [
-        "https://sf11-cdn-tos.douyinstatic.com/obj/audio-main",
-        "https://sf6-cdn-tos.douyinstatic.com/obj/audio-backup",
-      ],
-    });
-  });
-
   it("keeps high-quality video urls before fallback urls", () => {
     expect(
       parseWorkMetadata(
@@ -552,9 +499,6 @@ describe("douyin url utilities", () => {
     expect(buildMediaDownloadPath(work, "originalAudio")).toBe(
       "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio",
     );
-    expect(buildMediaDownloadPath(work, "dubbedAudio")).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=dubbedAudio",
-    );
     expect(buildMediaDownloadPath(work, "cover", { preview: true })).toBe(
       "/api/douyin/download?id=7649250336875613449&kind=video&asset=cover&preview=1",
     );
@@ -565,8 +509,6 @@ describe("douyin url utilities", () => {
       "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio&preview=1",
     );
     expect(canDownloadAsset("note", "cover")).toBe(true);
-    expect(canDownloadAsset("note", "dubbedAudio")).toBe(true);
-    expect(canDownloadAsset("article", "dubbedAudio")).toBe(true);
     expect(canDownloadAsset("note", "originalAudio")).toBe(false);
     expect(canDownloadAsset("article", "video")).toBe(false);
     expect(isSupportedMediaUrl("https://lf3-cdn-tos.douyinstatic.com/obj/example.mp4")).toBe(true);

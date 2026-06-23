@@ -3,6 +3,7 @@ import { z } from "zod";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
 import { downloadRemoteMediaToBuffer, normalizeAudioToWav } from "@/lib/media/audio";
+import { withClientRouteConcurrency } from "@/lib/client-concurrency";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
@@ -34,6 +35,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "当前作品类型不支持该下载资源。" }, { status: 400 });
   }
 
+  return withClientRouteConcurrency(request, "douyin:download", async () => {
   const finalUrl = buildDouyinWorkUrl(kind, id);
   const metadata = await collectWorkMetadata({ id, kind, finalUrl });
   const assetUrls = selectAssetUrls(asset, metadata);
@@ -70,6 +72,7 @@ export async function GET(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
   }
+  });
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
@@ -122,7 +125,6 @@ function selectAssetUrls(
     cover: metadata.coverUrls ?? [],
     video: metadata.videoUrls ?? [],
     originalAudio: metadata.videoUrls ?? [],
-    dubbedAudio: metadata.audioUrls ?? [],
   }[asset];
 }
 
@@ -151,10 +153,10 @@ function readExtension(asset: MediaAssetKind, contentType: string): string {
     return "wav";
   }
   if (contentType.includes("mp4")) {
-    return asset === "dubbedAudio" ? "m4a" : "mp4";
+    return "mp4";
   }
 
-  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : asset === "dubbedAudio" ? "m4a" : "mp4";
+  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : "mp4";
 }
 
 function defaultContentType(asset: MediaAssetKind): string {
@@ -163,9 +165,6 @@ function defaultContentType(asset: MediaAssetKind): string {
   }
   if (asset === "originalAudio") {
     return "audio/wav";
-  }
-  if (asset === "dubbedAudio") {
-    return "audio/mp4";
   }
   return "video/mp4";
 }

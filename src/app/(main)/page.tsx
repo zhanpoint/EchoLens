@@ -15,7 +15,6 @@ import {
   Image as ImageIcon,
   Link2,
   Loader2,
-  Music2,
   Pause,
   Play,
   Plus,
@@ -27,7 +26,9 @@ import {
 } from "lucide-react";
 import {
   type FormEvent,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
   useCallback,
   useEffect,
   useMemo,
@@ -176,7 +177,6 @@ const FEATURE_ICONS: Record<ExtractionFeature, typeof Captions> = {
   cover: ImageIcon,
   caption: Captions,
   originalTranscript: AudioLines,
-  dubbedTranscript: Music2,
   imageContent: ImageIcon,
   articleText: ScrollText,
 };
@@ -190,10 +190,10 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "cover", icon: ImageIcon, label: "下载封面", previewLabel: "预览封面" },
   { asset: "video", icon: Play, label: "下载视频", previewLabel: "观看视频" },
   { asset: "originalAudio", icon: AudioLines, label: "下载原声", previewLabel: "试听原声" },
-  { asset: "dubbedAudio", icon: Music2, label: "下载配音", previewLabel: "试听配音" },
 ];
 
 const WORK_LINK_HINT = "未识别到可处理的抖音作品。请重新粘贴正确的作品分享链接，或直接粘贴作品 URL 地址。";
+const CLIPBOARD_PRIVACY_HINT = "自动粘贴功能：检测到剪贴板最新记录包含抖音链接会自动填入输入框，但不会读取粘贴板历史记录，保护您的隐私。";
 const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
 const TAG_PATTERN = /#\s*[\p{L}\p{N}_-]+/gu;
 const CLIPBOARD_INPUT_LIMIT = 5000;
@@ -201,7 +201,6 @@ const CLIPBOARD_INPUT_LIMIT = 5000;
 const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKind>> = {
   cover: "cover",
   originalTranscript: "originalAudio",
-  dubbedTranscript: "dubbedAudio",
 };
 
 const SUMMARY_PROMPTS: SummaryPrompt[] = [
@@ -560,8 +559,8 @@ export default function HomePage() {
               <span
                 tabIndex={0}
                 className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none"
-                aria-label="剪贴板权限仅用于读取最新一条文本记录，检测到抖音链接时自动填入输入框，不读取图片、历史记录或其他内容。"
-                title="仅读取剪贴板最新一条文本；检测到抖音链接才自动填入，不读取图片或历史记录。"
+                aria-label={CLIPBOARD_PRIVACY_HINT}
+                title={CLIPBOARD_PRIVACY_HINT}
               >
                 <AlertCircle className="size-4" aria-hidden="true" />
               </span>
@@ -633,7 +632,7 @@ export default function HomePage() {
                 <FeatureToggle
                   key={feature}
                   feature={feature}
-                  label={`提取${getFeatureLabel(feature, activeKind)}`}
+                  label={`提取${getFeatureLabel(feature)}`}
                   checked={selected.includes(feature)}
                   onToggle={() => toggleFeature(feature)}
                 />
@@ -770,10 +769,10 @@ function getExtractionCacheBlockMessage(
 
     const cached = getCachedAsset(cachedAssets, work, asset);
     if (!cached || cached.isLoading) {
-      return `正在缓存${getFeatureLabel(feature, work.kind)}所需资源，请等待缓存完成后再提取。`;
+      return `正在缓存${getFeatureLabel(feature)}所需资源，请等待缓存完成后再提取。`;
     }
     if (!cached.url) {
-      return cached.error ?? `${getFeatureLabel(feature, work.kind)}所需资源缓存失败，请取消该项或稍后重试。`;
+      return cached.error ?? `${getFeatureLabel(feature)}所需资源缓存失败，请取消该项或稍后重试。`;
     }
   }
 
@@ -955,37 +954,7 @@ function useWorkAssetCache(work: ResolvedDouyinWork | null): Partial<Record<Medi
       });
     });
 
-    for (const action of actions) {
-      void cacheAsset(cacheWork, workKey, action.asset, controller.signal)
-        .then((cached) => {
-          if (!cached.url) {
-            return;
-          }
-          if (controller.signal.aborted) {
-            URL.revokeObjectURL(cached.url);
-            return;
-          }
-          objectUrls.push(cached.url);
-          setCachedAssets((current) => ({
-            ...current,
-            [action.asset]: cached,
-          }));
-        })
-        .catch((error: unknown) => {
-          if (controller.signal.aborted) {
-            return;
-          }
-          setCachedAssets((current) => ({
-            ...current,
-            [action.asset]: {
-              downloadName: buildCachedAssetFilename(cacheWork, action.asset),
-              error: error instanceof Error ? error.message : "资源缓存失败。",
-              isLoading: false,
-              workKey,
-            },
-          }));
-        });
-    }
+    void cacheAssetsInOrder(actions, cacheWork, workKey, controller.signal, objectUrls, setCachedAssets);
 
     return () => {
       controller.abort();
@@ -995,6 +964,46 @@ function useWorkAssetCache(work: ResolvedDouyinWork | null): Partial<Record<Medi
   }, [actions, cacheWork, workKey]);
 
   return cachedAssets;
+}
+
+async function cacheAssetsInOrder(
+  actions: typeof DOWNLOAD_ACTIONS,
+  cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
+  workKey: string,
+  signal: AbortSignal,
+  objectUrls: string[],
+  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
+): Promise<void> {
+  for (const action of actions) {
+    try {
+      const cached = await cacheAsset(cacheWork, workKey, action.asset, signal);
+      if (!cached.url) {
+        continue;
+      }
+      if (signal.aborted) {
+        URL.revokeObjectURL(cached.url);
+        return;
+      }
+      objectUrls.push(cached.url);
+      setCachedAssets((current) => ({
+        ...current,
+        [action.asset]: cached,
+      }));
+    } catch (error: unknown) {
+      if (signal.aborted) {
+        return;
+      }
+      setCachedAssets((current) => ({
+        ...current,
+        [action.asset]: {
+          downloadName: buildCachedAssetFilename(cacheWork, action.asset),
+          error: error instanceof Error ? error.message : "资源缓存失败。",
+          isLoading: false,
+          workKey,
+        },
+      }));
+    }
+  }
 }
 
 function WorkDownloadActions({
@@ -1018,14 +1027,12 @@ function WorkDownloadActions({
     <>
       <div className="mt-4 grid gap-2 pb-1 sm:grid-cols-2 md:flex md:flex-wrap md:items-center md:gap-3">
         {actions.map((action) => {
-          const href = buildMediaDownloadPath(work, action.asset);
           const assetLabel = action.label.replace("下载", "");
           const maybeCached = cachedAssets[action.asset];
           const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
-          const assetUrl = cached?.url ?? href;
           const isCaching = !cached || cached.isLoading;
           const hasCacheError = Boolean(cached?.error && !cached.url);
-          const cacheTitle = cached?.error ?? (isCaching ? "正在缓存到本地" : action.previewLabel);
+          const cacheTitle = cached?.error ?? (isCaching ? "正在准备资源" : action.previewLabel);
 
           return (
             <div
@@ -1058,22 +1065,22 @@ function WorkDownloadActions({
                     <Eye className="size-4" aria-hidden="true" />
                   )}
                 </button>
-                {hasCacheError ? (
+                {isCaching || hasCacheError || !cached?.url ? (
                   <button
                     type="button"
                     disabled
                     className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-white/10 px-3 text-sm font-semibold text-muted-foreground opacity-60"
-                    title={cached?.error}
+                    title={cached?.error ?? "正在准备资源"}
                   >
                     <Download className="size-4" aria-hidden="true" />
                     下载
                   </button>
                 ) : (
                   <a
-                    href={assetUrl}
-                    download={cached?.url ? cached.downloadName : undefined}
+                    href={cached.url}
+                    download={cached.downloadName}
                     className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan px-3 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.96]"
-                    title={isCaching ? "正在缓存到本地，当前会使用服务端下载" : action.label}
+                    title={action.label}
                   >
                     <Download className="size-4" aria-hidden="true" />
                     下载
@@ -1084,12 +1091,12 @@ function WorkDownloadActions({
           );
         })}
       </div>
-      {preview ? (
+      {preview && previewCached?.url ? (
         <AssetPreviewDialog
           action={preview}
-          previewUrl={previewCached?.url ?? buildMediaDownloadPath(work, preview.asset, { preview: true })}
+          previewUrl={previewCached.url}
           downloadName={previewCached?.downloadName}
-          downloadUrl={previewCached?.url ?? buildMediaDownloadPath(work, preview.asset)}
+          downloadUrl={previewCached.url}
           onClose={() => setPreview(null)}
         />
       ) : null}
@@ -1161,10 +1168,10 @@ function readCachedAssetExtension(asset: MediaAssetKind, contentType: string): s
     return "mp3";
   }
   if (contentType.includes("mp4")) {
-    return asset === "dubbedAudio" ? "m4a" : "mp4";
+    return "mp4";
   }
 
-  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : asset === "dubbedAudio" ? "m4a" : "mp4";
+  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : "mp4";
 }
 
 function AssetPreviewDialog({
@@ -1944,7 +1951,7 @@ function CustomPromptDialog({
 }
 
 function isTranscriptFeature(feature: ExtractionFeature): boolean {
-  return feature === "originalTranscript" || feature === "dubbedTranscript";
+  return feature === "originalTranscript";
 }
 
 function normalizeTranscriptSegments(
