@@ -11,12 +11,13 @@ import {
   Copy,
   Download,
   Eye,
-  FileImage,
   FileText,
   ExternalLink,
   Heading1,
   Image as ImageIcon,
   Link2,
+  LogIn,
+  LogOut,
   Loader2,
   MessageSquareText,
   Pause,
@@ -31,6 +32,7 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import {
   type FormEvent,
   type Dispatch,
@@ -49,7 +51,6 @@ import {
   type ExtractResponse,
   type ExtractionFeature,
   type ExtractionResult,
-  type MediaAsset,
   type MediaAssetKind,
   type ResolvedDouyinWork,
   type TranscriptSegment,
@@ -60,10 +61,16 @@ import { cn } from "@/lib/utils";
 type ApiError = {
   error: string;
   code?: string;
+  retryAfter?: number;
 };
 
 type ApiPayload = ApiError | ExtractResponse | { work?: ResolvedDouyinWork };
 type SummaryPayload = ApiError | { summary?: string };
+type CurrentUser = {
+  email: string;
+  id: string;
+  username: string;
+};
 type CachedMediaAsset = {
   downloadName: string;
   error?: string;
@@ -84,6 +91,29 @@ type ClipboardDouyinInput = {
   text: string;
   url: string;
 };
+
+class AuthRequiredError extends Error {
+  constructor() {
+    super("请先登录后再使用。");
+  }
+}
+
+function isAuthRequiredError(error: unknown): error is AuthRequiredError {
+  return error instanceof AuthRequiredError;
+}
+
+function isUnauthenticatedApiResponse(response: Response, payload: unknown): boolean {
+  return (
+    response.status === 401 &&
+    Boolean(payload && typeof payload === "object" && "code" in payload && payload.code === "UNAUTHENTICATED")
+  );
+}
+
+function getAvatarInitial(user: CurrentUser): string {
+  const source = (user.username || user.email).trim();
+  const initial = Array.from(source)[0] ?? "?";
+  return /^[a-z]$/i.test(initial) ? initial.toLocaleUpperCase("en-US") : initial;
+}
 
 async function readApiPayload(response: Response, fallback: string): Promise<ApiPayload> {
   const text = await response.text();
@@ -181,7 +211,6 @@ const KIND_LABELS: Record<DouyinKind, string> = {
 };
 
 const FEATURE_ICONS: Record<ExtractionFeature, typeof Captions> = {
-  cover: FileImage,
   caption: Heading1,
   originalTranscript: MessageSquareText,
   imageContent: ScanText,
@@ -206,7 +235,6 @@ const TAG_PATTERN = /#\s*[\p{L}\p{N}_-]+/gu;
 const CLIPBOARD_INPUT_LIMIT = 5000;
 
 const REQUIRED_ASSET_BY_FEATURE: Partial<Record<ExtractionFeature, MediaAssetKind>> = {
-  cover: "cover",
   originalTranscript: "originalAudio",
 };
 
@@ -284,6 +312,7 @@ const SUMMARY_PROMPTS: SummaryPrompt[] = [
 ];
 
 export default function HomePage() {
+  const router = useRouter();
   const [input, setInput] = useState("");
   const [work, setWork] = useState<ResolvedDouyinWork | null>(null);
   const [selected, setSelected] = useState<ExtractionFeature[]>([]);
@@ -293,8 +322,16 @@ export default function HomePage() {
   const [isResolving, setIsResolving] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [lastResolvedInput, setLastResolvedInput] = useState("");
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const isReadingClipboardRef = useRef(false);
-  const cachedAssets = useWorkAssetCache(work);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+  const redirectToLogin = useCallback(() => {
+    setError(null);
+    const next = typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
+    router.push(`/login?next=${encodeURIComponent(next || "/")}`);
+  }, [router]);
+  const cachedAssets = useWorkAssetCache(work, redirectToLogin);
 
   const normalizedInput = input.trim();
   const isInputDirty = Boolean(work && normalizedInput !== lastResolvedInput);
@@ -325,6 +362,62 @@ export default function HomePage() {
     !cacheBlockMessage,
   );
 
+  useEffect(() => {
+    let isActive = true;
+
+    async function readCurrentUser() {
+      try {
+        const response = await fetch("/api/auth/me", { cache: "no-store" });
+        if (!response.ok) {
+          if (isActive) {
+            setCurrentUser(null);
+          }
+          return;
+        }
+
+        const payload = await response.json() as { user?: CurrentUser };
+        if (isActive) {
+          setCurrentUser(payload.user ?? null);
+        }
+      } catch {
+        if (isActive) {
+          setCurrentUser(null);
+        }
+      }
+    }
+
+    void readCurrentUser();
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!userMenuOpen) {
+      return;
+    }
+
+    function closeUserMenu(event: PointerEvent) {
+      if (userMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setUserMenuOpen(false);
+    }
+
+    function closeUserMenuOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeUserMenu);
+    document.addEventListener("keydown", closeUserMenuOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeUserMenu);
+      document.removeEventListener("keydown", closeUserMenuOnEscape);
+    };
+  }, [userMenuOpen]);
+
   const resolveInput = useCallback(async (value: string, options?: { showLinkHint?: boolean; silent?: boolean }) => {
     const valueToResolve = value.trim();
     if (!valueToResolve) {
@@ -344,6 +437,9 @@ export default function HomePage() {
         body: JSON.stringify({ input: valueToResolve }),
       });
       const payload = await readApiPayload(response, "识别链接失败。");
+      if (isUnauthenticatedApiResponse(response, payload)) {
+        throw new AuthRequiredError();
+      }
 
       if (!response.ok || !("work" in payload) || !payload.work) {
         throw new Error("error" in payload ? payload.error : "识别链接失败。");
@@ -358,6 +454,10 @@ export default function HomePage() {
       setWork(null);
       setSelected([]);
       setResults([]);
+      if (isAuthRequiredError(resolveError)) {
+        redirectToLogin();
+        return;
+      }
       if (!options?.silent) {
         setError(resolveError instanceof Error ? resolveError.message : "识别链接失败。");
       } else if (options.showLinkHint) {
@@ -366,7 +466,7 @@ export default function HomePage() {
     } finally {
       setIsResolving(false);
     }
-  }, []);
+  }, [redirectToLogin]);
 
   useEffect(() => {
     let isActive = true;
@@ -460,6 +560,9 @@ export default function HomePage() {
         body: JSON.stringify({ input: normalizedInput, features: selectedFeatures }),
       });
       const payload = await readApiPayload(response, "提取失败。");
+      if (isUnauthenticatedApiResponse(response, payload)) {
+        throw new AuthRequiredError();
+      }
 
       if (!response.ok || !("results" in payload)) {
         throw new Error("error" in payload ? payload.error : "提取失败。");
@@ -469,6 +572,10 @@ export default function HomePage() {
       setWork(payload.work);
       setResults(orderResults(payload.results, selectedFeatures));
     } catch (extractError) {
+      if (isAuthRequiredError(extractError)) {
+        redirectToLogin();
+        return;
+      }
       setError(extractError instanceof Error ? extractError.message : "提取失败。");
     } finally {
       setIsExtracting(false);
@@ -516,25 +623,103 @@ export default function HomePage() {
     );
   }
 
+  async function logout() {
+    setUserMenuOpen(false);
+    await fetch("/api/auth/logout", { method: "POST" });
+    setCurrentUser(null);
+    router.refresh();
+  }
+
   return (
     <main className="app-shell min-h-[100dvh] overflow-x-hidden bg-background text-foreground">
-      <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-5 sm:py-7 md:gap-7 md:py-10">
-        <div className="flex items-center justify-center gap-3">
-          <Image
-            src="/echolens-logo.svg"
-            alt=""
-            width={50}
-            height={45}
-            className="h-12 w-[3.375rem] shrink-0 object-contain"
-          />
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold text-foreground">EchoLens</h1>
-            <p className="text-sm text-muted-foreground">透视抖音作品的声音与文字</p>
+      <div className="relative z-10 mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-5 px-4 py-5 sm:px-5 sm:py-7 md:gap-7 md:py-10">
+        <div className="relative min-h-12 pr-12 sm:pr-36">
+          <div className="flex items-center justify-center gap-3 sm:justify-start">
+            <Image
+              src="/echolens-logo.svg"
+              alt=""
+              width={50}
+              height={45}
+              className="h-12 w-[3.375rem] shrink-0 object-contain"
+            />
+            <div className="space-y-1">
+              <h1 className="text-2xl font-semibold text-foreground">EchoLens</h1>
+              <p className="text-sm text-muted-foreground">透视抖音作品的声音与文字</p>
+            </div>
+          </div>
+          <div className="absolute right-0 top-0">
+            {currentUser ? (
+              <div ref={userMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen((open) => !open)}
+                  className="inline-flex size-11 select-none items-center justify-center rounded-full border border-white/10 bg-muted text-base font-semibold text-foreground shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06)] transition hover:border-cyan/35 hover:bg-cyan/[0.12] hover:text-cyan active:scale-[0.96]"
+                  aria-expanded={userMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label={`${currentUser.username} 用户菜单`}
+                  title={currentUser.username}
+                >
+                  {getAvatarInitial(currentUser)}
+                </button>
+
+                <aside
+                  aria-hidden={!userMenuOpen}
+                  className={cn(
+                    "fixed right-0 top-0 z-40 flex h-[100dvh] w-[min(20rem,calc(100vw-1rem))] flex-col border-l border-white/12 bg-background/95 p-4 shadow-2xl shadow-black/40 backdrop-blur-xl transition duration-200 ease-out",
+                    userMenuOpen
+                      ? "pointer-events-auto translate-x-0 opacity-100"
+                      : "pointer-events-none translate-x-full opacity-0",
+                  )}
+                  role="menu"
+                >
+                  <div className="mb-5 flex items-center gap-3 border-b border-white/10 pb-4">
+                    <span className="inline-flex size-11 shrink-0 select-none items-center justify-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-base font-semibold text-cyan">
+                      {getAvatarInitial(currentUser)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-foreground">{currentUser.username}</p>
+                      <p className="truncate text-xs text-muted-foreground">{currentUser.email}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan active:scale-[0.96]"
+                      aria-label="关闭用户面板"
+                      title="关闭用户面板"
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <div className="grid gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void logout()}
+                      className="flex h-10 w-full items-center gap-2 rounded-md px-3 text-sm font-semibold text-destructive transition hover:bg-destructive/10 active:scale-[0.98]"
+                      role="menuitem"
+                    >
+                      <LogOut className="size-4" aria-hidden="true" />
+                      退出登录
+                    </button>
+                  </div>
+                </aside>
+              </div>
+            ) : (
+              <Link
+                href="/login?next=%2F"
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-cyan/35 bg-cyan/[0.08] px-2 text-sm font-semibold text-cyan transition hover:border-cyan/55 hover:bg-cyan/[0.12] active:scale-[0.98] sm:px-3"
+                aria-label="登录"
+                title="登录"
+              >
+                <LogIn className="size-4" aria-hidden="true" />
+                <span className="hidden sm:inline">登录</span>
+              </Link>
+            )}
           </div>
         </div>
 
         <form onSubmit={submit} className="flex flex-col gap-2">
-          <label className="order-1 flex cursor-pointer items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
+          <label className="order-1 flex min-w-0 cursor-pointer items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
             <span className="relative mt-0.5 shrink-0">
               <input
                 type="checkbox"
@@ -549,7 +734,7 @@ export default function HomePage() {
                 <Check className="size-[0.82rem] text-cyan opacity-0 drop-shadow-[0_0_6px_rgba(34,211,238,0.45)] transition duration-150 ease-out" strokeWidth={3.4} />
               </span>
             </span>
-            <span className="text-[13px] leading-5 text-muted-foreground">
+            <span className="min-w-0 flex-1 break-all text-[13px] leading-5 text-muted-foreground">
               我确认仅用于个人学习和非商业用途，并尊重原作者版权；已阅读并同意
               <Link
                 href="/legal"
@@ -656,7 +841,7 @@ export default function HomePage() {
                 <div className="text-base font-semibold text-foreground">
                   {isResolving ? "正在识别作品" : "等待作品链接"}
                 </div>
-                <p className="max-w-md text-sm leading-6 text-muted-foreground">
+                <p className="max-w-md break-all text-sm leading-6 text-muted-foreground">
                   {isResolving ? "正在匹配可提取的内容模块。" : "粘贴链接后，EchoLens 会自动展开可提取的内容模块。"}
                 </p>
               </div>
@@ -708,7 +893,7 @@ export default function HomePage() {
           {visibleResults.length > 0 ? (
             <div className="grid gap-5">
               {visibleResults.map((result) => (
-                <ResultBlock key={result.feature} result={result} />
+                <ResultBlock key={result.feature} onAuthRequired={redirectToLogin} result={result} />
               ))}
             </div>
           ) : (
@@ -924,7 +1109,10 @@ function InfoRow({
   );
 }
 
-function useWorkAssetCache(work: ResolvedDouyinWork | null): Partial<Record<MediaAssetKind, CachedMediaAsset>> {
+function useWorkAssetCache(
+  work: ResolvedDouyinWork | null,
+  onAuthRequired: () => void,
+): Partial<Record<MediaAssetKind, CachedMediaAsset>> {
   const [cachedAssets, setCachedAssets] = useState<Partial<Record<MediaAssetKind, CachedMediaAsset>>>({});
   const objectUrlsRef = useRef<string[]>([]);
   const workId = work?.id ?? "";
@@ -964,14 +1152,14 @@ function useWorkAssetCache(work: ResolvedDouyinWork | null): Partial<Record<Medi
       });
     });
 
-    void cacheAssetsInOrder(actions, cacheWork, workKey, controller.signal, objectUrls, setCachedAssets);
+    void cacheAssetsInOrder(actions, cacheWork, workKey, controller.signal, objectUrls, setCachedAssets, onAuthRequired);
 
     return () => {
       controller.abort();
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       objectUrlsRef.current = [];
     };
-  }, [actions, cacheWork, workKey]);
+  }, [actions, cacheWork, onAuthRequired, workKey]);
 
   return cachedAssets;
 }
@@ -983,6 +1171,7 @@ async function cacheAssetsInOrder(
   signal: AbortSignal,
   objectUrls: string[],
   setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
+  onAuthRequired: () => void,
 ): Promise<void> {
   for (const action of actions) {
     try {
@@ -1001,6 +1190,10 @@ async function cacheAssetsInOrder(
       }));
     } catch (error: unknown) {
       if (signal.aborted) {
+        return;
+      }
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
         return;
       }
       setCachedAssets((current) => ({
@@ -1126,6 +1319,13 @@ async function cacheAsset(
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      const payload = await readJsonError(response);
+      if (isUnauthenticatedApiResponse(response, payload)) {
+        throw new AuthRequiredError();
+      }
+      throw new Error(payload?.error ?? "请先登录后再使用。");
+    }
     throw new Error(await readCacheAssetError(response));
   }
 
@@ -1140,16 +1340,25 @@ async function cacheAsset(
 
 async function readCacheAssetError(response: Response): Promise<string> {
   const fallback = `资源缓存失败：HTTP ${response.status}。`;
+  const payload = await readJsonError(response);
+  if (payload) {
+    return payload.error ? `资源缓存失败：${payload.error}` : fallback;
+  }
+
+  return fallback;
+}
+
+async function readJsonError(response: Response): Promise<Partial<ApiError> | null> {
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("json")) {
-    return fallback;
+    return null;
   }
 
   try {
     const payload = await response.json() as Partial<ApiError>;
-    return payload.error ? `资源缓存失败：${payload.error}` : fallback;
+    return payload;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -1197,6 +1406,26 @@ function AssetPreviewDialog({
   downloadUrl: string;
   onClose: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
+  const canCopyCover = action.asset === "cover";
+
+  async function copyCover() {
+    const absoluteDownloadUrl = new URL(downloadUrl, window.location.origin).toString();
+    try {
+      const response = await fetch(previewUrl);
+      const blob = await response.blob();
+      if (blob.type.startsWith("image/") && "ClipboardItem" in window) {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else {
+        await navigator.clipboard.writeText(absoluteDownloadUrl);
+      }
+    } catch {
+      await navigator.clipboard.writeText(absoluteDownloadUrl);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
       <div className="max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh-3rem)]">
@@ -1206,6 +1435,17 @@ function AssetPreviewDialog({
             <span className="truncate">{action.previewLabel}</span>
           </div>
           <div className="flex items-center gap-1">
+            {canCopyCover ? (
+              <button
+                type="button"
+                onClick={() => void copyCover()}
+                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
+                aria-label={copied ? "已复制封面" : "复制封面"}
+                title={copied ? "已复制" : "复制封面"}
+              >
+                {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
+              </button>
+            ) : null}
             <a
               href={downloadUrl}
               download={downloadName}
@@ -1420,7 +1660,13 @@ function orderResults(
   );
 }
 
-function ResultBlock({ result }: { result: ExtractionResult }) {
+function ResultBlock({
+  onAuthRequired,
+  result,
+}: {
+  onAuthRequired: () => void;
+  result: ExtractionResult;
+}) {
   const ok = result.status === "success";
 
   return (
@@ -1433,12 +1679,10 @@ function ResultBlock({ result }: { result: ExtractionResult }) {
       </div>
       {result.content ? (
         isTranscriptFeature(result.feature) ? (
-          <TranscriptResultPanel key={result.content ?? result.label} result={result} />
+          <TranscriptResultPanel key={result.content ?? result.label} onAuthRequired={onAuthRequired} result={result} />
         ) : (
           <TextResultPanel label={result.label} text={result.content} />
         )
-      ) : result.assets?.length ? (
-        <MediaAssetPanel assets={result.assets} />
       ) : (
         <p className="flex min-h-24 items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
           {result.detail ?? "没有返回内容。"}
@@ -1475,7 +1719,13 @@ function TextResultPanel({ label, text }: { label: string; text: string }) {
   );
 }
 
-function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
+function TranscriptResultPanel({
+  onAuthRequired,
+  result,
+}: {
+  onAuthRequired: () => void;
+  result: ExtractionResult;
+}) {
   const initialContent = result.content ?? "";
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
@@ -1545,11 +1795,18 @@ function TranscriptResultPanel({ result }: { result: ExtractionResult }) {
         body: JSON.stringify({ prompt: prompt.prompt, text: content }),
       });
       const payload = await readSummaryPayload(response);
+      if (isUnauthenticatedApiResponse(response, payload)) {
+        throw new AuthRequiredError();
+      }
       if (!response.ok || !("summary" in payload) || !payload.summary) {
         throw new Error("error" in payload ? payload.error : "AI处理失败。");
       }
       setSummary(payload.summary);
     } catch (error) {
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
+        return;
+      }
       setSummaryError(error instanceof Error ? error.message : "AI处理失败。");
     } finally {
       setIsSummarizing(false);
@@ -2165,92 +2422,6 @@ function formatSegmentTime(seconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const remainingSeconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
-}
-
-function MediaAssetPanel({ assets }: { assets: MediaAsset[] }) {
-  const coverAsset = assets.find((asset) => asset.kind === "cover");
-
-  if (coverAsset) {
-    return <CoverAssetPanel asset={coverAsset} />;
-  }
-
-  return (
-    <div className="rounded-md border border-white/[0.16] bg-background/70 p-4">
-      <div className="flex flex-wrap gap-2">
-        {assets.map((asset) => (
-          <a
-            key={`${asset.kind}-${asset.url}`}
-            href={asset.url}
-            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-1 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.98]"
-          >
-            <Download className="size-4" aria-hidden="true" />
-            {asset.label}
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function CoverAssetPanel({ asset }: { asset: MediaAsset }) {
-  const [copied, setCopied] = useState(false);
-  const imageUrl = asset.previewUrl ?? asset.url;
-
-  async function copyCover() {
-    try {
-      const response = await fetch(imageUrl);
-      const blob = await response.blob();
-      if (blob.type.startsWith("image/") && "ClipboardItem" in window) {
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            [blob.type]: blob,
-          }),
-        ]);
-      } else {
-        await navigator.clipboard.writeText(new URL(asset.url, window.location.origin).toString());
-      }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      await navigator.clipboard.writeText(new URL(asset.url, window.location.origin).toString());
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    }
-  }
-
-  return (
-    <div className="w-full max-w-[34rem] overflow-hidden rounded-md border border-white/[0.16] bg-background/70 p-3">
-      <div className="relative overflow-hidden rounded-md bg-black/20">
-        <Image
-          src={imageUrl}
-          alt="封面预览"
-          width={900}
-          height={506}
-          unoptimized
-          className="h-auto w-full object-cover"
-        />
-        <div className="absolute right-2 top-2 flex gap-1.5">
-          <a
-            href={asset.url}
-            className="inline-flex size-8 items-center justify-center rounded-md bg-black/45 text-white/85 backdrop-blur transition hover:bg-cyan/20 hover:text-cyan active:scale-[0.94]"
-            aria-label="下载封面"
-            title="下载封面"
-          >
-            <Download className="size-4" aria-hidden="true" />
-          </a>
-          <button
-            type="button"
-            onClick={() => void copyCover()}
-            className="inline-flex size-8 items-center justify-center rounded-md bg-black/45 text-white/85 backdrop-blur transition hover:bg-amber/20 hover:text-amber active:scale-[0.94]"
-            aria-label={copied ? "已复制封面" : "复制封面"}
-            title={copied ? "已复制" : "复制封面"}
-          >
-            {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function ContentText({ text }: { text: string }) {

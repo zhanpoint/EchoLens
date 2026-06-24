@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { requireUser } from "@/app/api/auth/_shared";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { DouyinResolveError, resolveDouyinInput } from "@/lib/douyin/url";
-import { withClientRouteConcurrency } from "@/lib/client-concurrency";
 
 export const runtime = "nodejs";
 
@@ -11,12 +11,16 @@ const ResolveSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
   const parsed = ResolveSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "请输入抖音分享链接。" }, { status: 400 });
   }
 
-  return withClientRouteConcurrency(request, "douyin:resolve", async () => {
   try {
     const work = await resolveDouyinInput(parsed.data.input);
     const metadata = await collectWorkMetadata(work).catch(() => null);
@@ -35,5 +39,4 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ error: "识别链接失败。" }, { status: 500 });
   }
-  });
 }

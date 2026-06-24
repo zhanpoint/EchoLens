@@ -11,6 +11,7 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: 3000
       FFMPEG_PATH: ${FFMPEG_PATH:-/usr/bin/ffmpeg}
+      SQLITE_PATH: /app/data/echolens.sqlite
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
       - target: 3000
@@ -18,6 +19,8 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
     read_only: true
+    volumes:
+      - echolens-data:/app/data
     tmpfs:
       - /tmp:mode=1777
     security_opt:
@@ -29,3 +32,6 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+volumes:
+  echolens-data:

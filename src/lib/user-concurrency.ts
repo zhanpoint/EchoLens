@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { readClientIdentityFromHeaders } from "@/lib/request-identity";
 
 const LOCK_TTL_MS = 150_000;
 const MAX_LOCKS = 1_024;
@@ -10,16 +9,20 @@ type Lock = {
 };
 
 const locks = new Map<string, Lock>();
+type UserRoute =
+  | "douyin:download"
+  | "douyin:extract"
+  | "douyin:summarize";
 
-export async function withClientRouteConcurrency(
-  request: Request,
-  route: string,
+export async function withUserRouteConcurrency(
+  userId: string,
+  route: UserRoute,
   handler: () => Promise<Response>,
 ): Promise<Response> {
   const now = Date.now();
   cleanupLocks(now);
 
-  const key = `${route}:${readClientIdentityFromHeaders(request.headers)}`;
+  const key = `${route}:${userId}`;
   const existing = locks.get(key);
   if (existing && existing.expiresAt > now) {
     existing.lastSeenAt = now;
@@ -70,6 +73,6 @@ function trimLocks(): void {
   }
 }
 
-export function resetClientRouteConcurrencyForTest(): void {
+export function resetUserRouteConcurrencyForTest(): void {
   locks.clear();
 }

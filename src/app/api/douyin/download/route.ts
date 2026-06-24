@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { requireUser } from "@/app/api/auth/_shared";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
-import { downloadRemoteMediaToBuffer, normalizeAudioToWav } from "@/lib/media/audio";
-import { withClientRouteConcurrency } from "@/lib/client-concurrency";
+import { downloadRemoteMediaToBuffer, normalizeAudioToWav, prepareMediaCacheForWork } from "@/lib/media/audio";
+import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
@@ -17,6 +18,11 @@ const DownloadQuerySchema = z.object({
 });
 
 export async function GET(request: Request) {
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
   const url = new URL(request.url);
   const requestRange = request.headers.get("range");
   const parsed = DownloadQuerySchema.safeParse({
@@ -35,44 +41,49 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "当前作品类型不支持该下载资源。" }, { status: 400 });
   }
 
-  return withClientRouteConcurrency(request, "douyin:download", async () => {
-  const finalUrl = buildDouyinWorkUrl(kind, id);
-  const metadata = await collectWorkMetadata({ id, kind, finalUrl });
-  const assetUrls = selectAssetUrls(asset, metadata);
+  return withUserRouteConcurrency(user.id, "douyin:download", async () => {
+    await prepareMediaCacheForWork(user.id, buildWorkCacheKey({ id, kind }));
+    const finalUrl = buildDouyinWorkUrl(kind, id);
+    const metadata = await collectWorkMetadata({ id, kind, finalUrl });
+    const assetUrls = selectAssetUrls(asset, metadata);
 
-  if (assetUrls.length === 0) {
-    return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
-  }
-  if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
-    return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
-  }
-  if (asset === "originalAudio") {
+    if (assetUrls.length === 0) {
+      return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
+    }
+    if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
+      return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
+    }
+    if (asset === "originalAudio") {
+      try {
+        const audio = await normalizeAudioToWav(user.id, assetUrls);
+        return mediaBufferResponse(audio, {
+          contentType: "audio/wav",
+          filename: buildFilename(id, asset, "audio/wav"),
+          inline: isPreview,
+          range: requestRange,
+        });
+      } catch (error) {
+        return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
+      }
+    }
+
     try {
-      const audio = await normalizeAudioToWav(assetUrls);
-      return mediaBufferResponse(audio, {
-        contentType: "audio/wav",
-        filename: buildFilename(id, asset, "audio/wav"),
+      const media = await downloadRemoteMediaToBuffer(user.id, assetUrls);
+      const contentType = media.contentType ?? defaultContentType(asset);
+      return mediaBufferResponse(media.buffer, {
+        contentType,
+        filename: buildFilename(id, asset, contentType),
         inline: isPreview,
         range: requestRange,
       });
     } catch (error) {
       return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
     }
-  }
-
-  try {
-    const media = await downloadRemoteMediaToBuffer(assetUrls);
-    const contentType = media.contentType ?? defaultContentType(asset);
-    return mediaBufferResponse(media.buffer, {
-      contentType,
-      filename: buildFilename(id, asset, contentType),
-      inline: isPreview,
-      range: requestRange,
-    });
-  } catch (error) {
-    return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
-  }
   });
+}
+
+function buildWorkCacheKey(work: { id: string; kind: string }): string {
+  return `${work.kind}:${work.id}`;
 }
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {

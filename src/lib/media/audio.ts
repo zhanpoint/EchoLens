@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -13,11 +14,16 @@ const DOUYIN_USER_AGENT =
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
 const MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3;
 const DEFAULT_MP3_CHUNK_SECONDS = 300;
+const MAX_USER_MEDIA_CACHES = 256;
 
 export type RemoteMediaSource = string | readonly string[];
 export type DownloadedRemoteMedia = {
   buffer: Buffer;
   contentType?: string;
+};
+export type CachedRemoteMedia = {
+  contentType?: string;
+  filePath: string;
 };
 
 export type AudioChunk = {
@@ -26,6 +32,25 @@ export type AudioChunk = {
   format: "mp3";
   startSeconds: number;
 };
+
+type CachedRemoteMediaEntry = CachedRemoteMedia & {
+  lastAccessedAt: number;
+};
+type CachedAudioEntry = {
+  filePath: string;
+  lastAccessedAt: number;
+};
+type UserMediaCache = {
+  activeWorkKey: string | null;
+  extractedAudio: Map<string, CachedAudioEntry>;
+  extractedAudioTasks: Map<string, Promise<CachedAudioEntry>>;
+  generation: number;
+  lastAccessedAt: number;
+  remoteMedia: Map<string, CachedRemoteMediaEntry>;
+  remoteMediaTasks: Map<string, Promise<CachedRemoteMediaEntry>>;
+};
+
+const userMediaCaches = new Map<string, UserMediaCache>();
 
 export function resolveBundledFfmpegPath(): string {
   return path.join(
@@ -37,51 +62,43 @@ export function resolveBundledFfmpegPath(): string {
   );
 }
 
-export async function normalizeAudioToWav(source: Buffer | RemoteMediaSource): Promise<Buffer> {
-  const ffmpegPath = resolveFfmpegPath();
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
-  const inputPath = path.join(tempDir, "source-audio");
-  const outputPath = path.join(tempDir, "audio.wav");
+export async function normalizeAudioToWav(userId: string, source: RemoteMediaSource): Promise<Buffer> {
+  const audio = await extractAudioToCachedWav(userId, source);
+  return await fs.readFile(audio.filePath);
+}
 
-  try {
-    await writeSourceToFile(source, inputPath);
-
-    await runFfmpeg(ffmpegPath, [
-      "-y",
-      "-i",
-      inputPath,
-      "-vn",
-      "-acodec",
-      "pcm_s16le",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      outputPath,
-    ]);
-    return await fs.readFile(outputPath);
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
+export async function prepareMediaCacheForWork(userId: string, workKey: string): Promise<void> {
+  const cache = await readUserMediaCache(userId);
+  const nextWorkKey = workKey.trim();
+  if (!nextWorkKey || cache.activeWorkKey === nextWorkKey) {
+    return;
   }
+
+  cache.activeWorkKey = nextWorkKey;
+  cache.generation += 1;
+  cache.remoteMediaTasks.clear();
+  cache.extractedAudioTasks.clear();
+  await Promise.all([
+    clearCachedFiles(cache.remoteMedia),
+    clearCachedFiles(cache.extractedAudio),
+  ]);
 }
 
 export async function transcodeAudioToMp3Chunks(
-  source: Buffer | RemoteMediaSource,
+  userId: string,
+  source: RemoteMediaSource,
   chunkSeconds = DEFAULT_MP3_CHUNK_SECONDS,
 ): Promise<AudioChunk[]> {
   const ffmpegPath = resolveFfmpegPath();
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
-  const inputPath = path.join(tempDir, "source-audio");
+  const audio = await extractAudioToCachedWav(userId, source);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-transcript-"));
   const outputPattern = path.join(tempDir, "chunk-%03d.mp3");
 
   try {
-    await writeSourceToFile(source, inputPath);
-
     await runFfmpeg(ffmpegPath, [
       "-y",
       "-i",
-      inputPath,
-      "-vn",
+      audio.filePath,
       "-acodec",
       "libmp3lame",
       "-ac",
@@ -119,13 +136,31 @@ export async function transcodeAudioToMp3Chunks(
   }
 }
 
-async function writeSourceToFile(source: Buffer | RemoteMediaSource, outputPath: string): Promise<void> {
-  if (Buffer.isBuffer(source)) {
-    await fs.writeFile(outputPath, source);
-    return;
+async function extractAudioToCachedWav(userId: string, source: RemoteMediaSource): Promise<CachedAudioEntry> {
+  const cache = await readUserMediaCache(userId);
+  const urls = normalizeRemoteMediaSource(source);
+  if (urls.length === 0) {
+    throw new Error("媒体资源地址无效。");
   }
 
-  await downloadRemoteMediaToFile(source, outputPath);
+  const mediaCacheKey = buildRemoteMediaCacheKey(userId, urls);
+  const cached = cache.extractedAudio.get(mediaCacheKey);
+  if (cached && (await readFileSize(cached.filePath)) > 0) {
+    cached.lastAccessedAt = Date.now();
+    return cached;
+  }
+  cache.extractedAudio.delete(mediaCacheKey);
+
+  const inflight = cache.extractedAudioTasks.get(mediaCacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const task = cacheExtractedAudioFile(userId, mediaCacheKey, urls, cache, cache.generation).finally(() => {
+    cache.extractedAudioTasks.delete(mediaCacheKey);
+  });
+  cache.extractedAudioTasks.set(mediaCacheKey, task);
+  return task;
 }
 
 export async function downloadRemoteMediaToFile(
@@ -134,6 +169,9 @@ export async function downloadRemoteMediaToFile(
 ): Promise<string | undefined> {
   let lastError: unknown;
   const urls = normalizeRemoteMediaSource(source);
+  if (urls.length === 0) {
+    throw new Error("媒体资源地址无效。");
+  }
 
   for (let urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
     const url = urls[urlIndex];
@@ -167,20 +205,45 @@ export async function downloadRemoteMediaToFile(
 }
 
 export async function downloadRemoteMediaToBuffer(
+  userId: string,
   source: RemoteMediaSource,
 ): Promise<DownloadedRemoteMedia> {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-"));
-  const outputPath = path.join(tempDir, "downloaded-media");
+  const media = await downloadRemoteMediaToCachedFile(userId, source);
+  return {
+    buffer: await fs.readFile(media.filePath),
+    contentType: media.contentType,
+  };
+}
 
-  try {
-    const contentType = await downloadRemoteMediaToFile(source, outputPath);
-    return {
-      buffer: await fs.readFile(outputPath),
-      contentType,
-    };
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
+export async function downloadRemoteMediaToCachedFile(
+  userId: string,
+  source: RemoteMediaSource,
+): Promise<CachedRemoteMedia> {
+  const cache = await readUserMediaCache(userId);
+  const urls = normalizeRemoteMediaSource(source);
+  if (urls.length === 0) {
+    throw new Error("媒体资源地址无效。");
   }
+
+  const cacheKey = buildRemoteMediaCacheKey(userId, urls);
+  const cached = cache.remoteMedia.get(cacheKey);
+  if (cached && (await readFileSize(cached.filePath)) > 0) {
+    cached.lastAccessedAt = Date.now();
+    return cached;
+  }
+  cache.remoteMedia.delete(cacheKey);
+
+  const inflight = cache.remoteMediaTasks.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const generation = cache.generation;
+  const task = cacheRemoteMediaFile(cacheKey, urls, cache, generation).finally(() => {
+    cache.remoteMediaTasks.delete(cacheKey);
+  });
+  cache.remoteMediaTasks.set(cacheKey, task);
+  return task;
 }
 
 async function downloadMediaRange(
@@ -257,6 +320,139 @@ function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {
         .filter((url) => url.startsWith("https://") || url.startsWith("http://")),
     ),
   );
+}
+
+async function cacheRemoteMediaFile(
+  cacheKey: string,
+  urls: string[],
+  cache: UserMediaCache,
+  generation: number,
+): Promise<CachedRemoteMediaEntry> {
+  const cacheDir = path.join(os.tmpdir(), "echolens-media-cache");
+  const filePath = path.join(cacheDir, `${cacheKey}.media`);
+  const partialPath = path.join(cacheDir, `${cacheKey}.part`);
+  await fs.mkdir(cacheDir, { recursive: true });
+
+  const contentType = await downloadRemoteMediaToFile(urls, partialPath);
+  await fs.rm(filePath, { force: true });
+  await fs.rename(partialPath, filePath);
+  if (generation !== cache.generation) {
+    await fs.rm(filePath, { force: true });
+    throw new Error("作品已切换，请重新发起处理。");
+  }
+
+  const entry = {
+    contentType,
+    filePath,
+    lastAccessedAt: Date.now(),
+  };
+  cache.remoteMedia.set(cacheKey, entry);
+  return entry;
+}
+
+async function cacheExtractedAudioFile(
+  userId: string,
+  cacheKey: string,
+  urls: string[],
+  cache: UserMediaCache,
+  generation: number,
+): Promise<CachedAudioEntry> {
+  const media = await downloadRemoteMediaToCachedFile(userId, urls);
+  const cacheDir = path.join(os.tmpdir(), "echolens-audio-cache");
+  const filePath = path.join(cacheDir, `${cacheKey}.wav`);
+  const partialPath = path.join(cacheDir, `${cacheKey}.wav.part`);
+  await fs.mkdir(cacheDir, { recursive: true });
+  await fs.rm(partialPath, { force: true });
+
+  await runFfmpeg(resolveFfmpegPath(), [
+    "-y",
+    "-i",
+    media.filePath,
+    "-vn",
+    "-acodec",
+    "pcm_s16le",
+    "-ac",
+    "1",
+    "-ar",
+    "16000",
+    "-f",
+    "wav",
+    partialPath,
+  ]);
+  await fs.rm(filePath, { force: true });
+  await fs.rename(partialPath, filePath);
+  if (generation !== cache.generation) {
+    await fs.rm(filePath, { force: true });
+    throw new Error("作品已切换，请重新发起处理。");
+  }
+
+  const entry = {
+    filePath,
+    lastAccessedAt: Date.now(),
+  };
+  cache.extractedAudio.set(cacheKey, entry);
+  return entry;
+}
+
+async function clearCachedFiles(entries: Map<string, { filePath: string }>): Promise<void> {
+  const paths = [...entries.values()].map((entry) => entry.filePath);
+  entries.clear();
+  await Promise.all(paths.map((filePath) => fs.rm(filePath, { force: true })));
+}
+
+async function readUserMediaCache(userId: string): Promise<UserMediaCache> {
+  const normalizedUserId = userId.trim();
+  if (!normalizedUserId) {
+    throw new Error("用户身份无效。");
+  }
+
+  const existing = userMediaCaches.get(normalizedUserId);
+  if (existing) {
+    existing.lastAccessedAt = Date.now();
+    return existing;
+  }
+
+  const cache: UserMediaCache = {
+    activeWorkKey: null,
+    extractedAudio: new Map(),
+    extractedAudioTasks: new Map(),
+    generation: 0,
+    lastAccessedAt: Date.now(),
+    remoteMedia: new Map(),
+    remoteMediaTasks: new Map(),
+  };
+  userMediaCaches.set(normalizedUserId, cache);
+  await trimUserMediaCaches(normalizedUserId);
+  return cache;
+}
+
+async function trimUserMediaCaches(activeUserId: string): Promise<void> {
+  if (userMediaCaches.size <= MAX_USER_MEDIA_CACHES) {
+    return;
+  }
+
+  const overflow = userMediaCaches.size - MAX_USER_MEDIA_CACHES;
+  const staleUsers = [...userMediaCaches.entries()]
+    .filter(([userId]) => userId !== activeUserId)
+    .sort(([, left], [, right]) => left.lastAccessedAt - right.lastAccessedAt)
+    .slice(0, overflow);
+
+  await Promise.all(staleUsers.map(([userId, cache]) => deleteUserMediaCache(userId, cache)));
+}
+
+async function deleteUserMediaCache(userId: string, cache: UserMediaCache): Promise<void> {
+  cache.generation += 1;
+  cache.remoteMediaTasks.clear();
+  cache.extractedAudioTasks.clear();
+  await Promise.all([
+    clearCachedFiles(cache.remoteMedia),
+    clearCachedFiles(cache.extractedAudio),
+  ]);
+  userMediaCaches.delete(userId);
+}
+
+function buildRemoteMediaCacheKey(userId: string, urls: string[]): string {
+  return createHash("sha256").update(JSON.stringify([userId, urls])).digest("hex");
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {

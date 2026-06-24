@@ -16,7 +16,6 @@ describe("openrouter audio transcription", () => {
       OPENROUTER_API_KEY: "test-key",
       OPENROUTER_ASR_MODEL: "qwen/qwen3-asr-flash-2026-02-10",
       OPENROUTER_BASE_URL: "https://openrouter.test/api/v1",
-      EXTRACTION_TIMEOUT_MS: "1000",
     };
     vi.mocked(transcodeAudioToMp3Chunks).mockReset();
     vi.mocked(transcodeAudioToMp3Chunks).mockResolvedValue([
@@ -30,7 +29,7 @@ describe("openrouter audio transcription", () => {
   });
 
   it("uses the caller-provided missing media detail", async () => {
-    await expect(transcribeMediaSource(undefined, "没有采集到当前作品对应的视频资源。")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:1", undefined, "没有采集到当前作品对应的视频资源。")).resolves.toEqual({
       ok: false,
       code: "unavailable",
       detail: "没有采集到当前作品对应的视频资源。",
@@ -38,8 +37,7 @@ describe("openrouter audio transcription", () => {
     expect(transcodeAudioToMp3Chunks).not.toHaveBeenCalled();
   });
 
-  it("does not enforce the removed local audio byte limit", async () => {
-    process.env.OPENROUTER_MAX_AUDIO_BYTES = "1";
+  it("transcribes large audio chunks without a local byte-limit setting", async () => {
     vi.mocked(transcodeAudioToMp3Chunks).mockResolvedValue([
       { buffer: Buffer.alloc(12 * 1024 * 1024), endSeconds: 300, format: "mp3", startSeconds: 0 },
     ]);
@@ -47,7 +45,7 @@ describe("openrouter audio transcription", () => {
       new Response(JSON.stringify({ text: "大音频转录成功" }), { status: 200 }),
     );
 
-    await expect(transcribeMediaSource("https://example.com/large-audio.m4a")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:large", "https://example.com/large-video.mp4")).resolves.toEqual({
       ok: true,
       content: "大音频转录成功",
       transcriptSegments: [
@@ -66,7 +64,7 @@ describe("openrouter audio transcription", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ text: "第一段" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ text: "第二段" }), { status: 200 }));
 
-    await expect(transcribeMediaSource("https://example.com/long-audio.mp4")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:long", "https://example.com/long-video.mp4")).resolves.toEqual({
       ok: true,
       content: "第一段第二段",
       transcriptSegments: [
@@ -74,7 +72,7 @@ describe("openrouter audio transcription", () => {
         { endSeconds: 600, startSeconds: 300, text: "第二段" },
       ],
     });
-    expect(transcodeAudioToMp3Chunks).toHaveBeenCalledWith("https://example.com/long-audio.mp4", 300);
+    expect(transcodeAudioToMp3Chunks).toHaveBeenCalledWith("user-1", "https://example.com/long-video.mp4", 300);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -95,7 +93,7 @@ describe("openrouter audio transcription", () => {
     );
   });
 
-  it("retries a 429 response once and caches the successful transcript by source url", async () => {
+  it("retries a 429 response once and caches the successful transcript by user and source url", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -106,14 +104,14 @@ describe("openrouter audio transcription", () => {
       )
       .mockResolvedValueOnce(new Response(JSON.stringify({ text: "转录成功" }), { status: 200 }));
 
-    await expect(transcribeMediaSource("https://example.com/audio.m4a")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:cache", "https://example.com/video.mp4")).resolves.toEqual({
       ok: true,
       content: "转录成功",
       transcriptSegments: [
         { endSeconds: 300, startSeconds: 0, text: "转录成功" },
       ],
     });
-    await expect(transcribeMediaSource("https://example.com/audio.m4a")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:cache", "https://example.com/video.mp4")).resolves.toEqual({
       ok: true,
       content: "转录成功",
       transcriptSegments: [
@@ -125,6 +123,25 @@ describe("openrouter audio transcription", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps transcript cache scoped to the user's current work", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ text: "第一个作品" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ text: "第二个作品" }), { status: 200 }));
+
+    await expect(transcribeMediaSource("user-1", "video:first", "https://example.com/video.mp4")).resolves.toMatchObject({
+      ok: true,
+      content: "第一个作品",
+    });
+    await expect(transcribeMediaSource("user-1", "video:second", "https://example.com/video.mp4")).resolves.toMatchObject({
+      ok: true,
+      content: "第二个作品",
+    });
+
+    expect(transcodeAudioToMp3Chunks).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("returns a clear message after retry exhaustion on 429", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response(JSON.stringify({ error: { message: "Provider returned 429" } }), {
@@ -133,7 +150,7 @@ describe("openrouter audio transcription", () => {
       }),
     );
 
-    await expect(transcribeMediaSource("https://example.com/rate-limited.m4a")).resolves.toEqual({
+    await expect(transcribeMediaSource("user-1", "video:rate-limited", "https://example.com/rate-limited-video.mp4")).resolves.toEqual({
       ok: false,
       code: "error",
       detail: expect.stringContaining("限流"),

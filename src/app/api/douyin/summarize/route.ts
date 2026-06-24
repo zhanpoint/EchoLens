@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { withClientRouteConcurrency } from "@/lib/client-concurrency";
+import { requireUser } from "@/app/api/auth/_shared";
 import { summarizeTranscript } from "@/lib/openrouter/provider";
+import { withUserRouteConcurrency } from "@/lib/user-concurrency";
+import { withUserRateLimit } from "@/lib/user-rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -12,17 +14,24 @@ const SummarySchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const parsed = SummarySchema.safeParse(await request.json().catch(() => null));
-  if (!parsed.success) {
-    return NextResponse.json({ error: "总结参数无效。" }, { status: 400 });
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
   }
 
-  return withClientRouteConcurrency(request, "douyin:summarize", async () => {
-  const result = await summarizeTranscript(parsed.data.text, parsed.data.prompt);
-  if (!result.ok) {
-    return NextResponse.json({ error: result.detail, code: result.code }, { status: 502 });
-  }
+  return withUserRateLimit(user.id, "douyin:summarize", async () => {
+    const parsed = SummarySchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) {
+      return NextResponse.json({ error: "总结参数无效。" }, { status: 400 });
+    }
 
-  return NextResponse.json({ summary: result.content });
+    return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
+      const result = await summarizeTranscript(parsed.data.text, parsed.data.prompt);
+      if (!result.ok) {
+        return NextResponse.json({ error: result.detail, code: result.code }, { status: 502 });
+      }
+
+      return NextResponse.json({ summary: result.content });
+    });
   });
 }

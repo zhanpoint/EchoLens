@@ -17,7 +17,6 @@ type DouyinDetailPayload = {
     images?: unknown;
     item_title?: unknown;
     itemTitle?: unknown;
-    music?: unknown;
     preview_title?: unknown;
     previewTitle?: unknown;
     share_info?: {
@@ -47,6 +46,7 @@ const DETAIL_USER_AGENT =
 const SHARE_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 " +
   "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
+const METADATA_REQUEST_TIMEOUT_MS = 12_000;
 
 export type DouyinWorkMetadata = {
   authorName?: string;
@@ -201,7 +201,7 @@ async function fetchDetailPayload(
     const response = await fetch(request.url, {
       cache: "no-store",
       headers: request.headers,
-      signal: AbortSignal.timeout(readPositiveNumber(process.env.DOUYIN_METADATA_TIMEOUT_MS, 12_000)),
+      signal: AbortSignal.timeout(METADATA_REQUEST_TIMEOUT_MS),
     });
     const text = await response.text();
 
@@ -356,11 +356,6 @@ function warnMetadataFailure(
     kind: work.kind,
     attempts,
   });
-}
-
-function readPositiveNumber(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function readString(value: unknown): string | undefined {

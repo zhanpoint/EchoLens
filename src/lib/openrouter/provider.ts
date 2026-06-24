@@ -24,13 +24,25 @@ type OpenRouterError = {
 
 const TRANSCRIPT_CACHE_TTL_MS = 10 * 60_000;
 const TRANSCRIPT_CACHE_MAX_ENTRIES = 64;
+const MAX_USER_TRANSCRIPT_CACHES = 256;
 const OPENROUTER_MAX_RETRIES = 2;
 const OPENROUTER_RETRYABLE_STATUSES = new Set([429, 503]);
+const OPENROUTER_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_ASR_CHUNK_SECONDS = 300;
 const DEFAULT_SUMMARY_MODEL = "deepseek/deepseek-v4-flash";
 
-const transcriptCache = new Map<string, { expiresAt: number; result: Extract<ProviderResult, { ok: true }> }>();
-const transcriptInflight = new Map<string, Promise<ProviderResult>>();
+type CachedTranscript = {
+  expiresAt: number;
+  result: Extract<ProviderResult, { ok: true }>;
+};
+type UserTranscriptCache = {
+  activeWorkKey: string | null;
+  entries: Map<string, CachedTranscript>;
+  inflight: Map<string, Promise<ProviderResult>>;
+  lastAccessedAt: number;
+};
+
+const userTranscriptCaches = new Map<string, UserTranscriptCache>();
 
 export async function summarizeTranscript(
   transcript: string,
@@ -62,7 +74,6 @@ export async function summarizeTranscript(
     ],
     {
       model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
-      timeoutMs: readPositiveNumber(process.env.SUMMARY_TIMEOUT_MS, readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000)),
     },
   );
 }
@@ -100,6 +111,8 @@ export async function identifyImageContent(imageUrls: string[]): Promise<Provide
 }
 
 export async function transcribeMediaSource(
+  userId: string,
+  workKey: string,
   sourceUrl: string | readonly string[] | undefined,
   missingDetail = "没有采集到当前作品对应的音频资源。",
 ): Promise<ProviderResult> {
@@ -107,23 +120,24 @@ export async function transcribeMediaSource(
     return { ok: false, code: "unavailable", detail: missingDetail };
   }
 
-  const cacheKey = buildTranscriptCacheKey(sourceUrl);
-  const cached = getCachedTranscript(cacheKey);
+  const cache = prepareTranscriptCacheForWork(userId, workKey);
+  const cacheKey = buildTranscriptCacheKey(cache.activeWorkKey, sourceUrl);
+  const cached = getCachedTranscript(cache, cacheKey);
   if (cached) {
     return cached;
   }
 
-  const inflight = transcriptInflight.get(cacheKey);
+  const inflight = cache.inflight.get(cacheKey);
   if (inflight) {
     return inflight;
   }
 
   const task = (async (): Promise<ProviderResult> => {
     try {
-      const audioInputs = await fetchAudioAsModelInputs(sourceUrl);
+      const audioInputs = await fetchAudioAsModelInputs(userId, sourceUrl);
       const result = await transcribeAudioChunksWithOpenRouter(audioInputs);
-      if (result.ok) {
-        cacheTranscript(cacheKey, result);
+      if (result.ok && cache.activeWorkKey === workKey.trim()) {
+        cacheTranscript(cache, cacheKey, result);
       }
       return result;
     } catch (error) {
@@ -133,12 +147,25 @@ export async function transcribeMediaSource(
         detail: error instanceof Error ? error.message : "读取作品音频失败。",
       };
     } finally {
-      transcriptInflight.delete(cacheKey);
+      cache.inflight.delete(cacheKey);
     }
   })();
 
-  transcriptInflight.set(cacheKey, task);
+  cache.inflight.set(cacheKey, task);
   return task;
+}
+
+export function prepareTranscriptCacheForWork(userId: string, workKey: string): UserTranscriptCache {
+  const cache = readUserTranscriptCache(userId);
+  const nextWorkKey = workKey.trim();
+  if (!nextWorkKey || cache.activeWorkKey === nextWorkKey) {
+    return cache;
+  }
+
+  cache.activeWorkKey = nextWorkKey;
+  cache.entries.clear();
+  cache.inflight.clear();
+  return cache;
 }
 
 async function transcribeAudioChunksWithOpenRouter(
@@ -244,7 +271,7 @@ async function transcribeWithOpenRouter(inputAudio: { data: string; format: stri
 
 async function callOpenRouter(
   content: ChatContentPart[],
-  options?: { model?: string; timeoutMs?: number },
+  options?: { model?: string },
 ): Promise<ProviderResult> {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) {
@@ -256,7 +283,7 @@ async function callOpenRouter(
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    options?.timeoutMs ?? readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000),
+    OPENROUTER_REQUEST_TIMEOUT_MS,
   );
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -313,12 +340,10 @@ async function callOpenRouter(
   return { ok: true, content: contentText.trim() };
 }
 
-async function fetchAudioAsModelInputs(sourceUrl: string | readonly string[]): Promise<AudioInputSegment[]> {
-  const source = typeof sourceUrl === "string" && sourceUrl.startsWith("data:")
-    ? parseDataUrl(sourceUrl)
-    : sourceUrl;
+async function fetchAudioAsModelInputs(userId: string, sourceUrl: string | readonly string[]): Promise<AudioInputSegment[]> {
   const chunks = await transcodeAudioToMp3Chunks(
-    source,
+    userId,
+    sourceUrl,
     readPositiveNumber(process.env.OPENROUTER_ASR_CHUNK_SECONDS, DEFAULT_ASR_CHUNK_SECONDS),
   );
 
@@ -342,7 +367,7 @@ async function postOpenRouterAudioTranscription(
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    readPositiveNumber(process.env.EXTRACTION_TIMEOUT_MS, 60_000),
+    OPENROUTER_REQUEST_TIMEOUT_MS,
   );
 
   return fetch(`${baseUrl}/audio/transcriptions`, {
@@ -366,15 +391,6 @@ async function postOpenRouterAudioTranscription(
     .finally(() => clearTimeout(timeout));
 }
 
-function parseDataUrl(value: string): Buffer {
-  const match = value.match(/^data:([^;,]+)?;base64,([\s\S]+)$/);
-  if (!match) {
-    throw new Error("媒体 data URL 格式无效。");
-  }
-
-  return Buffer.from(match[2], "base64");
-}
-
 function parseJson(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -392,47 +408,94 @@ function getAsrModel(): string {
   return process.env.OPENROUTER_ASR_MODEL || "qwen/qwen3-asr-flash-2026-02-10";
 }
 
-function buildTranscriptCacheKey(sourceUrl: string | readonly string[]): string {
-  return `${getAsrModel()}:${createHash("sha256").update(JSON.stringify(sourceUrl)).digest("hex")}`;
+function buildTranscriptCacheKey(workKey: string | null, sourceUrl: string | readonly string[]): string {
+  return `${getAsrModel()}:${createHash("sha256").update(JSON.stringify([workKey, sourceUrl])).digest("hex")}`;
 }
 
 function hasMediaSource(sourceUrl: string | readonly string[] | undefined): sourceUrl is string | readonly string[] {
   return typeof sourceUrl === "string" ? Boolean(sourceUrl.trim()) : Boolean(sourceUrl?.length);
 }
 
-function getCachedTranscript(key: string): Extract<ProviderResult, { ok: true }> | null {
-  const cached = transcriptCache.get(key);
+function getCachedTranscript(
+  cache: UserTranscriptCache,
+  key: string,
+): Extract<ProviderResult, { ok: true }> | null {
+  const cached = cache.entries.get(key);
   if (!cached) {
     return null;
   }
   if (cached.expiresAt <= Date.now()) {
-    transcriptCache.delete(key);
+    cache.entries.delete(key);
     return null;
   }
   return cached.result;
 }
 
-function cacheTranscript(key: string, result: Extract<ProviderResult, { ok: true }>): void {
-  pruneTranscriptCache();
-  transcriptCache.set(key, {
+function cacheTranscript(
+  cache: UserTranscriptCache,
+  key: string,
+  result: Extract<ProviderResult, { ok: true }>,
+): void {
+  pruneTranscriptCache(cache);
+  cache.entries.set(key, {
     result,
     expiresAt: Date.now() + TRANSCRIPT_CACHE_TTL_MS,
   });
 
-  while (transcriptCache.size > TRANSCRIPT_CACHE_MAX_ENTRIES) {
-    const oldestKey = transcriptCache.keys().next().value;
+  while (cache.entries.size > TRANSCRIPT_CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.entries.keys().next().value;
     if (!oldestKey) {
       break;
     }
-    transcriptCache.delete(oldestKey);
+    cache.entries.delete(oldestKey);
   }
 }
 
-function pruneTranscriptCache(now = Date.now()): void {
-  for (const [key, cached] of transcriptCache) {
+function pruneTranscriptCache(cache: UserTranscriptCache, now = Date.now()): void {
+  for (const [key, cached] of cache.entries) {
     if (cached.expiresAt <= now) {
-      transcriptCache.delete(key);
+      cache.entries.delete(key);
     }
+  }
+}
+
+function readUserTranscriptCache(userId: string): UserTranscriptCache {
+  const normalizedUserId = userId.trim();
+  if (!normalizedUserId) {
+    throw new Error("用户身份无效。");
+  }
+
+  const existing = userTranscriptCaches.get(normalizedUserId);
+  if (existing) {
+    existing.lastAccessedAt = Date.now();
+    return existing;
+  }
+
+  const cache: UserTranscriptCache = {
+    activeWorkKey: null,
+    entries: new Map(),
+    inflight: new Map(),
+    lastAccessedAt: Date.now(),
+  };
+  userTranscriptCaches.set(normalizedUserId, cache);
+  trimUserTranscriptCaches(normalizedUserId);
+  return cache;
+}
+
+function trimUserTranscriptCaches(activeUserId: string): void {
+  if (userTranscriptCaches.size <= MAX_USER_TRANSCRIPT_CACHES) {
+    return;
+  }
+
+  const overflow = userTranscriptCaches.size - MAX_USER_TRANSCRIPT_CACHES;
+  const staleUsers = [...userTranscriptCaches.entries()]
+    .filter(([userId]) => userId !== activeUserId)
+    .sort(([, left], [, right]) => left.lastAccessedAt - right.lastAccessedAt)
+    .slice(0, overflow)
+    .map(([userId]) => userId);
+
+  for (const userId of staleUsers) {
+    userTranscriptCaches.delete(userId);
   }
 }
 

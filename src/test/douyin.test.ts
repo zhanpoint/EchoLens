@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,10 +9,13 @@ import type { AddressInfo } from "node:net";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
 import {
+  downloadRemoteMediaToBuffer,
   downloadRemoteMediaToFile,
   normalizeAudioToWav,
+  prepareMediaCacheForWork,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
+  transcodeAudioToMp3Chunks,
 } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
@@ -20,7 +24,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.DOUYIN_COOKIE;
   delete process.env.DOUYIN_USER_AGENT;
-  delete process.env.DOUYIN_METADATA_TIMEOUT_MS;
   delete process.env.FFMPEG_PATH;
 });
 
@@ -68,10 +71,9 @@ describe("douyin url utilities", () => {
   });
 
   it("keeps feature availability strict per work type", () => {
-    expect(FEATURES_BY_KIND.video).toEqual(["cover", "caption", "originalTranscript"]);
-    expect(FEATURES_BY_KIND.note).toEqual(["cover", "caption", "imageContent"]);
-    expect(FEATURES_BY_KIND.article).toEqual(["cover", "caption", "articleText"]);
-    expect(getFeatureLabel("cover")).toBe("封面");
+    expect(FEATURES_BY_KIND.video).toEqual(["caption", "originalTranscript"]);
+    expect(FEATURES_BY_KIND.note).toEqual(["caption", "imageContent"]);
+    expect(FEATURES_BY_KIND.article).toEqual(["caption", "articleText"]);
     expect(getFeatureLabel("caption")).toBe("标题");
     expect(getFeatureLabel("originalTranscript")).toBe("视频文案");
     expect(FEATURES_BY_KIND.video.length).toBeLessThanOrEqual(EXTRACTION_FEATURES.length);
@@ -543,8 +545,10 @@ describe("audio transcription preparation", () => {
       ]);
       const source = await fs.readFile(wavPath);
       let referer = "";
+      let requestCount = 0;
       let userAgent = "";
       const server = createServer((request, response) => {
+        requestCount += 1;
         referer = request.headers.referer ?? "";
         userAgent = request.headers["user-agent"] ?? "";
         response.writeHead(200, {
@@ -561,12 +565,43 @@ describe("audio transcription preparation", () => {
 
       try {
         const { port } = server.address() as AddressInfo;
-        const output = await normalizeAudioToWav(`http://127.0.0.1:${port}/video.mp4`);
+        const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
+        const userA = "user-a";
+        const userB = "user-b";
+        await prepareMediaCacheForWork(userA, "video:7644929016692636809");
+        const output = await normalizeAudioToWav(userA, mediaUrl);
+        const audioCachePath = path.join(
+          os.tmpdir(),
+          "echolens-audio-cache",
+          `${createHash("sha256").update(JSON.stringify([userA, [mediaUrl]])).digest("hex")}.wav`,
+        );
+        const otherUserAudioCachePath = path.join(
+          os.tmpdir(),
+          "echolens-audio-cache",
+          `${createHash("sha256").update(JSON.stringify([userB, [mediaUrl]])).digest("hex")}.wav`,
+        );
+        const audioMtime = (await fs.stat(audioCachePath)).mtimeMs;
+        await prepareMediaCacheForWork(userA, "video:7644929016692636809");
+        await normalizeAudioToWav(userA, mediaUrl);
+        const cachedMedia = await downloadRemoteMediaToBuffer(userA, mediaUrl);
+        const chunks = await transcodeAudioToMp3Chunks(userA, mediaUrl);
 
         expect(referer).toBe("https://www.douyin.com/");
         expect(userAgent).toContain("Mozilla/5.0");
         expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
         expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
+        expect(cachedMedia.buffer.equals(source)).toBe(true);
+        expect(chunks.length).toBeGreaterThan(0);
+        expect((await fs.stat(audioCachePath)).mtimeMs).toBe(audioMtime);
+        expect(requestCount).toBe(1);
+
+        await prepareMediaCacheForWork(userB, "video:7644929016692636809");
+        await normalizeAudioToWav(userB, mediaUrl);
+        expect(requestCount).toBe(2);
+
+        await prepareMediaCacheForWork(userA, "video:7644929016692636810");
+        await expect(fs.stat(audioCachePath)).rejects.toThrow();
+        await expect(fs.stat(otherUserAudioCachePath)).resolves.toBeTruthy();
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((error) => error ? reject(error) : resolve());
@@ -680,29 +715,6 @@ describe("audio transcription preparation", () => {
     }
   });
 
-  it("normalizes non-MP4 audio containers through ffmpeg probing", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const wavPath = path.join(tempDir, "tone.wav");
-
-    try {
-      await runFfmpeg(resolveBundledFfmpegPath(), [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=0.1",
-        wavPath,
-      ]);
-
-      const output = await normalizeAudioToWav(await fs.readFile(wavPath));
-
-      expect(output.byteLength).toBeGreaterThan(0);
-      expect(output.subarray(0, 4).toString("ascii")).toBe("RIFF");
-      expect(output.subarray(8, 12).toString("ascii")).toBe("WAVE");
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
 });
 
 async function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {

@@ -1,5 +1,4 @@
 export type MediaResources = {
-  coverUrls?: string[];
   imageUrls: string[];
   videoUrls?: string[];
 };
