@@ -59,6 +59,18 @@ describe("douyin url utilities", () => {
     });
   });
 
+  it("classifies official iesdouyin share intermediates as canonical works", () => {
+    expect(
+      classifyDouyinUrl(
+        "https://www.iesdouyin.com/share/video/7637528968758324707/?region=CN&from=web_code_link",
+      ),
+    ).toEqual({
+      finalUrl: "https://www.douyin.com/video/7637528968758324707",
+      kind: "video",
+      id: "7637528968758324707",
+    });
+  });
+
   it("resolves direct work urls without a redirect request", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
@@ -68,6 +80,27 @@ describe("douyin url utilities", () => {
       id: "7649250336875613449",
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves short links when redirects stop at an iesdouyin share intermediate", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            "https://www.iesdouyin.com/share/video/7637528968758324707/?region=CN&from=web_code_link",
+        },
+      }),
+    );
+
+    await expect(resolveDouyinInput("https://v.douyin.com/XO1jdgGD8SY/")).resolves.toEqual({
+      inputUrl: "https://v.douyin.com/XO1jdgGD8SY/",
+      finalUrl: "https://www.douyin.com/video/7637528968758324707",
+      kind: "video",
+      id: "7637528968758324707",
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("keeps feature availability strict per work type", () => {

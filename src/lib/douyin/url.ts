@@ -3,6 +3,7 @@ import type { DouyinKind, ResolvedDouyinWork } from "@/types/douyin";
 const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 8;
+const CANONICAL_DOUYIN_ORIGIN = "https://www.douyin.com";
 
 export class DouyinResolveError extends Error {
   constructor(
@@ -39,20 +40,16 @@ export function classifyDouyinUrl(value: string): Pick<
     throw new DouyinResolveError("这个链接格式不太对，请检查后再试。", "invalid_url");
   }
 
-  if (!isDouyinHost(url.hostname)) {
+  const work = classifyCanonicalWorkUrl(url) ?? classifyShareWorkUrl(url);
+  if (work) {
+    return work;
+  }
+
+  if (!isSupportedDouyinHost(url.hostname)) {
     throw new DouyinResolveError("目前只支持抖音作品链接。", "unsupported_host");
   }
 
-  const [, rawKind, id] = url.pathname.split("/");
-  if (!id || !isDouyinKind(rawKind)) {
-    throw new DouyinResolveError("请粘贴抖音视频、图文或文章作品链接。", "unsupported_type");
-  }
-
-  return {
-    finalUrl: `${url.origin}/${rawKind}/${id}`,
-    kind: rawKind,
-    id,
-  };
+  throw new DouyinResolveError("请粘贴抖音视频、图文或文章作品链接。", "unsupported_type");
 }
 
 export async function resolveDouyinInput(input: string): Promise<ResolvedDouyinWork> {
@@ -88,10 +85,23 @@ function classifyDirectWorkUrl(inputUrl: string): Pick<
   }
 }
 
+function classifySupportedWorkUrl(value: string): Pick<
+  ResolvedDouyinWork,
+  "finalUrl" | "kind" | "id"
+> | null {
+  const url = new URL(value);
+  return classifyCanonicalWorkUrl(url) ?? classifyShareWorkUrl(url);
+}
+
 async function followRedirects(inputUrl: string): Promise<string> {
   let current = inputUrl;
 
   for (let i = 0; i < MAX_REDIRECTS; i += 1) {
+    const work = classifySupportedWorkUrl(current);
+    if (work) {
+      return work.finalUrl;
+    }
+
     const response = await fetch(current, {
       method: "GET",
       redirect: "manual",
@@ -136,8 +146,63 @@ function requestHeaders(): HeadersInit {
   };
 }
 
+function classifyCanonicalWorkUrl(url: URL): Pick<
+  ResolvedDouyinWork,
+  "finalUrl" | "kind" | "id"
+> | null {
+  if (!isDouyinHost(url.hostname)) {
+    return null;
+  }
+
+  const [rawKind, id] = pathSegments(url);
+  if (!id || !isDouyinKind(rawKind)) {
+    return null;
+  }
+
+  return buildCanonicalWork(rawKind, id);
+}
+
+function classifyShareWorkUrl(url: URL): Pick<
+  ResolvedDouyinWork,
+  "finalUrl" | "kind" | "id"
+> | null {
+  if (!isIesDouyinHost(url.hostname)) {
+    return null;
+  }
+
+  const [share, rawKind, id] = pathSegments(url);
+  if (share !== "share" || !id || !isDouyinKind(rawKind)) {
+    return null;
+  }
+
+  return buildCanonicalWork(rawKind, id);
+}
+
+function buildCanonicalWork(kind: DouyinKind, id: string): Pick<
+  ResolvedDouyinWork,
+  "finalUrl" | "kind" | "id"
+> {
+  return {
+    finalUrl: `${CANONICAL_DOUYIN_ORIGIN}/${kind}/${id}`,
+    kind,
+    id,
+  };
+}
+
+function pathSegments(url: URL): string[] {
+  return url.pathname.split("/").filter(Boolean);
+}
+
+function isSupportedDouyinHost(hostname: string): boolean {
+  return isDouyinHost(hostname) || isIesDouyinHost(hostname);
+}
+
 function isDouyinHost(hostname: string): boolean {
   return hostname === "douyin.com" || hostname.endsWith(".douyin.com");
+}
+
+function isIesDouyinHost(hostname: string): boolean {
+  return hostname === "iesdouyin.com" || hostname === "www.iesdouyin.com";
 }
 
 function isDouyinKind(value: string | undefined): value is DouyinKind {
