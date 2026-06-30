@@ -11,27 +11,35 @@ const DOUYIN_REFERER = "https://www.douyin.com/";
 const DOUYIN_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 600_000;
 const MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3;
-const DEFAULT_MP3_CHUNK_SECONDS = 300;
+const MEDIA_DOWNLOAD_RETRY_BASE_DELAY_MS = 500;
 const MAX_USER_MEDIA_CACHES = 256;
+const MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS = 12 * 60 * 60;
+const MAX_TRANSCRIBE_AUDIO_BYTES = 2 * 1024 * 1024 * 1024;
+const AUDIO_DURATION_LIMIT_MESSAGE = "音频时长不能超过 12 小时，暂不能提取。";
+const AUDIO_DURATION_READ_MESSAGE = "无法识别缓存音频时长，请重新缓存后再提取。";
+const AUDIO_SIZE_LIMIT_MESSAGE = "转写的音频大小不能超过 2GB，暂不能提取。";
 
 export type RemoteMediaSource = string | readonly string[];
-export type DownloadedRemoteMedia = {
-  buffer: Buffer;
-  contentType?: string;
-};
 export type CachedRemoteMedia = {
   contentType?: string;
   filePath: string;
 };
-
-export type AudioChunk = {
-  buffer: Buffer;
-  endSeconds: number;
-  format: "mp3";
-  startSeconds: number;
+export type AudioTranscriptionLimits = {
+  durationLimitMessage?: string;
+  maxBytes: number;
+  maxDurationSeconds: number;
+  sizeLimitMessage?: string;
 };
+export type TranscribableWavAudio = {
+  durationSeconds: number;
+  filePath: string;
+  sizeBytes: number;
+};
+
+export class AudioTranscriptionLimitError extends Error {}
+class RangeResumeUnsupportedError extends Error {}
 
 type CachedRemoteMediaEntry = CachedRemoteMedia & {
   lastAccessedAt: number;
@@ -41,13 +49,17 @@ type CachedAudioEntry = {
   lastAccessedAt: number;
 };
 type UserMediaCache = {
+  activeCacheRunId: string | null;
   activeWorkKey: string | null;
   extractedAudio: Map<string, CachedAudioEntry>;
   extractedAudioTasks: Map<string, Promise<CachedAudioEntry>>;
-  generation: number;
   lastAccessedAt: number;
   remoteMedia: Map<string, CachedRemoteMediaEntry>;
   remoteMediaTasks: Map<string, Promise<CachedRemoteMediaEntry>>;
+  taskController: AbortController;
+};
+type AbortableOptions = {
+  signal?: AbortSignal;
 };
 
 const userMediaCaches = new Map<string, UserMediaCache>();
@@ -62,83 +74,39 @@ export function resolveBundledFfmpegPath(): string {
   );
 }
 
-export async function normalizeAudioToWav(userId: string, source: RemoteMediaSource): Promise<Buffer> {
-  const audio = await extractAudioToCachedWav(userId, source);
-  return await fs.readFile(audio.filePath);
-}
-
-export async function prepareMediaCacheForWork(userId: string, workKey: string): Promise<void> {
+export async function prepareMediaCacheForWork(userId: string, workKey: string, cacheRunId?: string): Promise<void> {
   const cache = await readUserMediaCache(userId);
   const nextWorkKey = workKey.trim();
-  if (!nextWorkKey || cache.activeWorkKey === nextWorkKey) {
+  const hasRunId = cacheRunId !== undefined;
+  const nextRunId = cacheRunId?.trim() || null;
+  if (!nextWorkKey || (cache.activeWorkKey === nextWorkKey && (!hasRunId || cache.activeCacheRunId === nextRunId))) {
     return;
   }
 
+  const isDifferentWork = cache.activeWorkKey !== null && cache.activeWorkKey !== nextWorkKey;
+  cache.taskController.abort();
+  cache.taskController = new AbortController();
   cache.activeWorkKey = nextWorkKey;
-  cache.generation += 1;
+  cache.activeCacheRunId = nextRunId;
   cache.remoteMediaTasks.clear();
   cache.extractedAudioTasks.clear();
-  await Promise.all([
-    clearCachedFiles(cache.remoteMedia),
-    clearCachedFiles(cache.extractedAudio),
-  ]);
-}
-
-export async function transcodeAudioToMp3Chunks(
-  userId: string,
-  source: RemoteMediaSource,
-  chunkSeconds = DEFAULT_MP3_CHUNK_SECONDS,
-): Promise<AudioChunk[]> {
-  const ffmpegPath = resolveFfmpegPath();
-  const audio = await extractAudioToCachedWav(userId, source);
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-transcript-"));
-  const outputPattern = path.join(tempDir, "chunk-%03d.mp3");
-
-  try {
-    await runFfmpeg(ffmpegPath, [
-      "-y",
-      "-i",
-      audio.filePath,
-      "-acodec",
-      "libmp3lame",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-b:a",
-      "48k",
-      "-f",
-      "segment",
-      "-segment_time",
-      String(chunkSeconds),
-      "-reset_timestamps",
-      "1",
-      outputPattern,
+  if (isDifferentWork) {
+    await Promise.all([
+      clearCachedFiles(cache.remoteMedia),
+      clearCachedFiles(cache.extractedAudio),
     ]);
-
-    const files = (await fs.readdir(tempDir))
-      .filter((file) => /^chunk-\d+\.mp3$/.test(file))
-      .sort();
-    if (files.length === 0) {
-      throw new Error("ffmpeg 没有抽取到可转写的音频片段。");
-    }
-
-    return Promise.all(
-      files.map(async (file, index) => ({
-        buffer: await fs.readFile(path.join(tempDir, file)),
-        endSeconds: (index + 1) * chunkSeconds,
-        format: "mp3" as const,
-        startSeconds: index * chunkSeconds,
-      })),
-    );
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
 
-async function extractAudioToCachedWav(userId: string, source: RemoteMediaSource): Promise<CachedAudioEntry> {
+async function extractAudioToCachedWav(
+  userId: string,
+  source: RemoteMediaSource,
+  options: AbortableOptions = {},
+): Promise<CachedAudioEntry> {
   const cache = await readUserMediaCache(userId);
   const urls = normalizeRemoteMediaSource(source);
+  const signal = linkedAbortSignal(cache.taskController.signal, options.signal);
+  throwIfAborted(signal);
   if (urls.length === 0) {
     throw new Error("媒体资源地址无效。");
   }
@@ -156,8 +124,10 @@ async function extractAudioToCachedWav(userId: string, source: RemoteMediaSource
     return inflight;
   }
 
-  const task = cacheExtractedAudioFile(userId, mediaCacheKey, urls, cache, cache.generation).finally(() => {
-    cache.extractedAudioTasks.delete(mediaCacheKey);
+  const task = cacheExtractedAudioFile(userId, mediaCacheKey, urls, cache, signal).finally(() => {
+    if (cache.extractedAudioTasks.get(mediaCacheKey) === task) {
+      cache.extractedAudioTasks.delete(mediaCacheKey);
+    }
   });
   cache.extractedAudioTasks.set(mediaCacheKey, task);
   return task;
@@ -166,14 +136,17 @@ async function extractAudioToCachedWav(userId: string, source: RemoteMediaSource
 export async function downloadRemoteMediaToFile(
   source: RemoteMediaSource,
   outputPath: string,
+  options: AbortableOptions = {},
 ): Promise<string | undefined> {
   let lastError: unknown;
   const urls = normalizeRemoteMediaSource(source);
+  throwIfAborted(options.signal);
   if (urls.length === 0) {
     throw new Error("媒体资源地址无效。");
   }
 
   for (let urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
+    throwIfAborted(options.signal);
     const url = urls[urlIndex];
     if (urlIndex > 0) {
       await fs.rm(outputPath, { force: true });
@@ -183,7 +156,7 @@ export async function downloadRemoteMediaToFile(
       const offset = await readFileSize(outputPath);
 
       try {
-        const result = await downloadMediaRange(url, outputPath, offset);
+        const result = await downloadMediaRange(url, outputPath, offset, options.signal);
         const downloadedSize = await readFileSize(outputPath);
         if (result.totalSize === null || downloadedSize >= result.totalSize) {
           return result.contentType;
@@ -192,35 +165,68 @@ export async function downloadRemoteMediaToFile(
         lastError = new Error(`下载不完整：${downloadedSize}/${result.totalSize}`);
       } catch (error) {
         lastError = error;
+        if (error instanceof RangeResumeUnsupportedError) {
+          try {
+            const result = await downloadMediaRange(url, outputPath, 0, options.signal);
+            const downloadedSize = await readFileSize(outputPath);
+            if (result.totalSize === null || downloadedSize >= result.totalSize) {
+              return result.contentType;
+            }
+
+            lastError = new Error(`下载不完整：${downloadedSize}/${result.totalSize}`);
+          } catch (restartError) {
+            lastError = restartError;
+          }
+        }
+        if (!isRetryableMediaDownloadError(lastError)) {
+          break;
+        }
       }
 
       if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
-        await delay(500 * attempt);
+        await delay(exponentialDelay(attempt, MEDIA_DOWNLOAD_RETRY_BASE_DELAY_MS, 5_000), options.signal);
       }
     }
 
   }
 
+  if (lastError instanceof Error && lastError.name === "AbortError") {
+    throw lastError;
+  }
   throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
 }
 
-export async function downloadRemoteMediaToBuffer(
-  userId: string,
-  source: RemoteMediaSource,
-): Promise<DownloadedRemoteMedia> {
-  const media = await downloadRemoteMediaToCachedFile(userId, source);
-  return {
-    buffer: await fs.readFile(media.filePath),
-    contentType: media.contentType,
-  };
+function isRetryableMediaDownloadError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return true;
+  }
+  if (error.name === "AbortError") {
+    return false;
+  }
+
+  const httpStatus = error.message.match(/\bHTTP (\d{3})\b/)?.[1];
+  if (httpStatus) {
+    const status = Number(httpStatus);
+    return status === 429 || status >= 500;
+  }
+
+  return /超时|fetch failed|network|socket|timeout|timed out|premature close|terminated|UND_ERR|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT/i.test(error.message);
+}
+
+function exponentialDelay(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
+  const jitter = Math.floor(Math.random() * Math.min(baseDelayMs, 250));
+  return Math.min(baseDelayMs * 2 ** Math.max(0, attempt - 1) + jitter, maxDelayMs);
 }
 
 export async function downloadRemoteMediaToCachedFile(
   userId: string,
   source: RemoteMediaSource,
+  options: AbortableOptions = {},
 ): Promise<CachedRemoteMedia> {
   const cache = await readUserMediaCache(userId);
   const urls = normalizeRemoteMediaSource(source);
+  const signal = linkedAbortSignal(cache.taskController.signal, options.signal);
+  throwIfAborted(signal);
   if (urls.length === 0) {
     throw new Error("媒体资源地址无效。");
   }
@@ -238,9 +244,10 @@ export async function downloadRemoteMediaToCachedFile(
     return inflight;
   }
 
-  const generation = cache.generation;
-  const task = cacheRemoteMediaFile(cacheKey, urls, cache, generation).finally(() => {
-    cache.remoteMediaTasks.delete(cacheKey);
+  const task = cacheRemoteMediaFile(cacheKey, urls, cache, signal).finally(() => {
+    if (cache.remoteMediaTasks.get(cacheKey) === task) {
+      cache.remoteMediaTasks.delete(cacheKey);
+    }
   });
   cache.remoteMediaTasks.set(cacheKey, task);
   return task;
@@ -250,13 +257,15 @@ async function downloadMediaRange(
   url: string,
   outputPath: string,
   offset: number,
+  signal?: AbortSignal,
 ): Promise<{ contentType?: string; totalSize: number | null }> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
+  const fetchSignal = linkedAbortSignal(timeoutController.signal, signal);
 
   try {
     const response = await fetch(url, {
-      signal: controller.signal,
+      signal: fetchSignal,
       headers: {
         accept: "video/mp4,audio/*,*/*;q=0.8",
         referer: DOUYIN_REFERER,
@@ -269,8 +278,9 @@ async function downloadMediaRange(
       throw new Error(`HTTP ${response.status}`);
     }
     if (offset > 0 && response.status !== 206) {
+      await response.body.cancel();
       await fs.rm(outputPath, { force: true });
-      throw new Error("服务器不支持断点续传。");
+      throw new RangeResumeUnsupportedError("服务器不支持断点续传，已重新完整下载。");
     }
 
     await pipeline(
@@ -282,6 +292,11 @@ async function downloadMediaRange(
       contentType: response.headers.get("content-type") ?? undefined,
       totalSize: readTotalSize(response, offset),
     };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw signal?.aborted ? abortError() : new Error("媒体资源下载超时，请稍后重试或改用更短的视频。");
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -307,8 +322,19 @@ async function readFileSize(filePath: string): Promise<number> {
   }
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {
@@ -326,28 +352,31 @@ async function cacheRemoteMediaFile(
   cacheKey: string,
   urls: string[],
   cache: UserMediaCache,
-  generation: number,
+  signal: AbortSignal,
 ): Promise<CachedRemoteMediaEntry> {
   const cacheDir = path.join(os.tmpdir(), "echolens-media-cache");
   const filePath = path.join(cacheDir, `${cacheKey}.media`);
   const partialPath = path.join(cacheDir, `${cacheKey}.part`);
   await fs.mkdir(cacheDir, { recursive: true });
+  await fs.rm(partialPath, { force: true });
 
-  const contentType = await downloadRemoteMediaToFile(urls, partialPath);
-  await fs.rm(filePath, { force: true });
-  await fs.rename(partialPath, filePath);
-  if (generation !== cache.generation) {
+  try {
+    const contentType = await downloadRemoteMediaToFile(urls, partialPath, { signal });
+    throwIfAborted(signal);
     await fs.rm(filePath, { force: true });
-    throw new Error("作品已切换，请重新发起处理。");
-  }
+    await fs.rename(partialPath, filePath);
 
-  const entry = {
-    contentType,
-    filePath,
-    lastAccessedAt: Date.now(),
-  };
-  cache.remoteMedia.set(cacheKey, entry);
-  return entry;
+    const entry = {
+      contentType,
+      filePath,
+      lastAccessedAt: Date.now(),
+    };
+    cache.remoteMedia.set(cacheKey, entry);
+    return entry;
+  } catch (error) {
+    await fs.rm(partialPath, { force: true });
+    throw error;
+  }
 }
 
 async function cacheExtractedAudioFile(
@@ -355,35 +384,37 @@ async function cacheExtractedAudioFile(
   cacheKey: string,
   urls: string[],
   cache: UserMediaCache,
-  generation: number,
+  signal: AbortSignal,
 ): Promise<CachedAudioEntry> {
-  const media = await downloadRemoteMediaToCachedFile(userId, urls);
+  const media = await downloadRemoteMediaToCachedFile(userId, urls, { signal });
   const cacheDir = path.join(os.tmpdir(), "echolens-audio-cache");
   const filePath = path.join(cacheDir, `${cacheKey}.wav`);
   const partialPath = path.join(cacheDir, `${cacheKey}.wav.part`);
   await fs.mkdir(cacheDir, { recursive: true });
   await fs.rm(partialPath, { force: true });
 
-  await runFfmpeg(resolveFfmpegPath(), [
-    "-y",
-    "-i",
-    media.filePath,
-    "-vn",
-    "-acodec",
-    "pcm_s16le",
-    "-ac",
-    "1",
-    "-ar",
-    "16000",
-    "-f",
-    "wav",
-    partialPath,
-  ]);
-  await fs.rm(filePath, { force: true });
-  await fs.rename(partialPath, filePath);
-  if (generation !== cache.generation) {
+  try {
+    await runFfmpeg(resolveFfmpegPath(), [
+      "-y",
+      "-i",
+      media.filePath,
+      "-vn",
+      "-acodec",
+      "pcm_s16le",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-f",
+      "wav",
+      partialPath,
+    ], signal);
+    throwIfAborted(signal);
     await fs.rm(filePath, { force: true });
-    throw new Error("作品已切换，请重新发起处理。");
+    await fs.rename(partialPath, filePath);
+  } catch (error) {
+    await fs.rm(partialPath, { force: true });
+    throw error;
   }
 
   const entry = {
@@ -392,6 +423,103 @@ async function cacheExtractedAudioFile(
   };
   cache.extractedAudio.set(cacheKey, entry);
   return entry;
+}
+
+export async function prepareTranscribableWavAudio(
+  userId: string,
+  source: RemoteMediaSource,
+  limits: AudioTranscriptionLimits = {
+    maxBytes: MAX_TRANSCRIBE_AUDIO_BYTES,
+    maxDurationSeconds: MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS,
+  },
+  options: AbortableOptions = {},
+): Promise<TranscribableWavAudio> {
+  const audio = await extractAudioToCachedWav(userId, source, options);
+  throwIfAborted(options.signal);
+  const size = await readFileSize(audio.filePath);
+  if (size > limits.maxBytes) {
+    throw new AudioTranscriptionLimitError(limits.sizeLimitMessage ?? AUDIO_SIZE_LIMIT_MESSAGE);
+  }
+
+  const durationSeconds = await readCachedWavDurationSeconds(audio.filePath).catch(() => {
+    throw new AudioTranscriptionLimitError(AUDIO_DURATION_READ_MESSAGE);
+  });
+  throwIfAborted(options.signal);
+  if (durationSeconds > limits.maxDurationSeconds) {
+    throw new AudioTranscriptionLimitError(limits.durationLimitMessage ?? AUDIO_DURATION_LIMIT_MESSAGE);
+  }
+
+  return {
+    durationSeconds,
+    filePath: audio.filePath,
+    sizeBytes: size,
+  };
+}
+
+async function readCachedWavDurationSeconds(filePath: string): Promise<number> {
+  const file = await fs.open(filePath, "r");
+  try {
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await file.read(header, 0, header.byteLength, 0);
+    if (
+      bytesRead < header.byteLength ||
+      header.subarray(0, 4).toString("ascii") !== "RIFF" ||
+      header.subarray(8, 12).toString("ascii") !== "WAVE"
+    ) {
+      throw new Error("Invalid WAV header");
+    }
+
+    const stat = await file.stat();
+    const chunkHeader = Buffer.alloc(8);
+    let byteRate: number | null = null;
+    let dataBytes: number | null = null;
+    let offset = 12;
+
+    while (offset + chunkHeader.byteLength <= stat.size) {
+      const chunk = await file.read(chunkHeader, 0, chunkHeader.byteLength, offset);
+      if (chunk.bytesRead < chunkHeader.byteLength) {
+        break;
+      }
+
+      const chunkId = chunkHeader.subarray(0, 4).toString("ascii");
+      const chunkSize = chunkHeader.readUInt32LE(4);
+      const dataOffset = offset + chunkHeader.byteLength;
+      const nextOffset = dataOffset + chunkSize + (chunkSize % 2);
+      if (dataOffset + chunkSize > stat.size) {
+        throw new Error("Invalid WAV chunk size");
+      }
+
+      if (chunkId === "fmt ") {
+        if (chunkSize < 16) {
+          throw new Error("Invalid WAV fmt chunk");
+        }
+
+        const fmt = Buffer.alloc(16);
+        const fmtRead = await file.read(fmt, 0, fmt.byteLength, dataOffset);
+        if (fmtRead.bytesRead < fmt.byteLength) {
+          throw new Error("Invalid WAV fmt payload");
+        }
+        byteRate = fmt.readUInt32LE(8);
+      } else if (chunkId === "data") {
+        dataBytes = chunkSize;
+      }
+
+      if (byteRate && dataBytes !== null) {
+        break;
+      }
+
+      offset = nextOffset;
+    }
+
+    const durationSeconds = byteRate && dataBytes !== null ? dataBytes / byteRate : 0;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      throw new Error("Invalid WAV duration");
+    }
+
+    return durationSeconds;
+  } finally {
+    await file.close();
+  }
 }
 
 async function clearCachedFiles(entries: Map<string, { filePath: string }>): Promise<void> {
@@ -413,13 +541,14 @@ async function readUserMediaCache(userId: string): Promise<UserMediaCache> {
   }
 
   const cache: UserMediaCache = {
+    activeCacheRunId: null,
     activeWorkKey: null,
     extractedAudio: new Map(),
     extractedAudioTasks: new Map(),
-    generation: 0,
     lastAccessedAt: Date.now(),
     remoteMedia: new Map(),
     remoteMediaTasks: new Map(),
+    taskController: new AbortController(),
   };
   userMediaCaches.set(normalizedUserId, cache);
   await trimUserMediaCaches(normalizedUserId);
@@ -441,7 +570,7 @@ async function trimUserMediaCaches(activeUserId: string): Promise<void> {
 }
 
 async function deleteUserMediaCache(userId: string, cache: UserMediaCache): Promise<void> {
-  cache.generation += 1;
+  cache.taskController.abort();
   cache.remoteMediaTasks.clear();
   cache.extractedAudioTasks.clear();
   await Promise.all([
@@ -455,15 +584,35 @@ function buildRemoteMediaCacheKey(userId: string, urls: string[]): string {
   return createHash("sha256").update(JSON.stringify([userId, urls])).digest("hex");
 }
 
-function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
+function runFfmpeg(ffmpegPath: string, args: string[], signal?: AbortSignal): Promise<void> {
   const stderr: string[] = [];
+  throwIfAborted(signal);
 
   return new Promise<void>((resolve, reject) => {
     const child = spawn(ffmpegPath, args, { windowsHide: true });
+    let settled = false;
+    const abort = () => {
+      if (settled) {
+        return;
+      }
+      child.kill("SIGTERM");
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => stderr.push(chunk));
-    child.on("error", reject);
+    child.on("error", (error) => {
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      reject(error);
+    });
     child.on("close", (code) => {
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
       if (code === 0) {
         resolve();
         return;
@@ -472,6 +621,35 @@ function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
       reject(new Error(`ffmpeg 抽取音频失败：${stderr.join("").slice(-600)}`));
     });
   });
+}
+
+function linkedAbortSignal(...signals: Array<AbortSignal | undefined>): AbortSignal {
+  const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (activeSignals.length === 1) {
+    return activeSignals[0];
+  }
+
+  const controller = new AbortController();
+  for (const signal of activeSignals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw abortError();
+  }
+}
+
+function abortError(): Error {
+  const error = new Error("缓存任务已取消。");
+  error.name = "AbortError";
+  return error;
 }
 
 export function resolveFfmpegPath(): string {

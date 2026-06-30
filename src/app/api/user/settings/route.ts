@@ -1,0 +1,68 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { requireUser } from "@/app/api/auth/_shared";
+import { isUserSettingsCategory, readUserSettings, upsertUserSetting } from "@/lib/user-settings";
+
+export const runtime = "nodejs";
+
+const TranslationSettingsSchema = z.object({
+  domains: z.string().max(2000).catch(""),
+  showSource: z.boolean().catch(true),
+  targetLang: z.string().max(80).catch(""),
+  termsText: z.string().max(16_000).catch(""),
+  tmText: z.string().max(16_000).catch(""),
+});
+const TranscriptSettingsSchema = z.object({
+  includeSpeakerEmotion: z.boolean().catch(false),
+  showSpeaker: z.boolean().catch(true),
+  showSpeakerEmotion: z.boolean().catch(false),
+});
+
+const PutSettingsSchema = z.object({
+  category: z.string().trim().min(1).max(80),
+  value: z.unknown(),
+});
+
+export async function GET(request: Request) {
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
+  return NextResponse.json({ settings: readUserSettings(user.id) });
+}
+
+export async function PUT(request: Request) {
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
+  const parsed = PutSettingsSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success || !isUserSettingsCategory(parsed.data.category)) {
+    return NextResponse.json({ error: "设置参数无效。" }, { status: 400 });
+  }
+
+  const value = parseSettingsValue(parsed.data.category, parsed.data.value);
+  if (!value.ok) {
+    return NextResponse.json({ error: "设置内容无效。" }, { status: 400 });
+  }
+
+  upsertUserSetting(user.id, parsed.data.category, value.data);
+  return NextResponse.json({ settings: readUserSettings(user.id) });
+}
+
+function parseSettingsValue(
+  category: "transcript" | "translation",
+  value: unknown,
+): { ok: true; data: z.infer<typeof TranscriptSettingsSchema> | z.infer<typeof TranslationSettingsSchema> } | { ok: false } {
+  if (category === "transcript") {
+    const parsed = TranscriptSettingsSchema.safeParse(value);
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  }
+  if (category === "translation") {
+    const parsed = TranslationSettingsSchema.safeParse(value);
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  }
+  return { ok: false };
+}

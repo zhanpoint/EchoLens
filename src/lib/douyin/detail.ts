@@ -1,4 +1,5 @@
 import { cleanText, uniqueMediaReferences } from "./media";
+import { fetchWithRetry } from "@/lib/http/retry";
 import type { DouyinKind } from "../../types/douyin";
 import type { ResolvedDouyinWork } from "../../types/douyin";
 
@@ -54,6 +55,7 @@ export type DouyinWorkMetadata = {
   articleText?: string;
   caption?: string;
   coverUrls?: string[];
+  durationSeconds?: number;
   title?: string;
   imageUrls?: string[];
   videoUrls?: string[];
@@ -113,6 +115,7 @@ export function parseWorkMetadata(
   const secUid = readString(author?.sec_uid) ?? readString(author?.secUid);
   const coverUrls = readCoverUrls(detail, kind);
   const videoUrls = kind === "video" ? readVideoUrls(detail.video) : [];
+  const durationSeconds = kind === "video" ? readVideoDurationSeconds(detail) : undefined;
 
   return {
     authorName: cleanText(readString(author?.nickname)),
@@ -120,6 +123,7 @@ export function parseWorkMetadata(
     articleText: readArticleText(detail.article_info?.article_content),
     caption: readCaption(detail, kind),
     coverUrls,
+    durationSeconds,
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
     imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
     videoUrls,
@@ -198,10 +202,10 @@ async function fetchDetailPayload(
   work: Pick<ResolvedDouyinWork, "id" | "kind">,
 ): Promise<unknown> {
   try {
-    const response = await fetch(request.url, {
+    const response = await fetchWithRetry(request.url, {
       cache: "no-store",
       headers: request.headers,
-      signal: AbortSignal.timeout(METADATA_REQUEST_TIMEOUT_MS),
+      retry: { timeoutMs: METADATA_REQUEST_TIMEOUT_MS },
     });
     const text = await response.text();
 
@@ -305,6 +309,15 @@ function hasMetadata(metadata: DouyinWorkMetadata): boolean {
   );
 }
 
+export function selectResolvedTitle(
+  kind: DouyinKind,
+  metadata: DouyinWorkMetadata,
+): string | undefined {
+  return kind === "article"
+    ? metadata.title ?? metadata.caption
+    : metadata.caption ?? metadata.title;
+}
+
 function hasPrimaryContent(metadata: DouyinWorkMetadata): boolean {
   return Boolean(
     metadata.articleText ||
@@ -328,6 +341,7 @@ function mergeMetadata(
     articleText: current.articleText ?? next.articleText,
     caption: current.caption ?? next.caption,
     coverUrls,
+    durationSeconds: current.durationSeconds ?? next.durationSeconds,
     title: current.title ?? next.title,
     imageUrls,
     videoUrls,
@@ -505,6 +519,22 @@ function readVideoUrls(value: unknown): string[] {
     ...readUrlList(video.play_addr ?? video.playAddr),
     ...readUrlList(video.download_addr ?? video.downloadAddr),
   ]);
+}
+
+function readVideoDurationSeconds(detail: NonNullable<DouyinDetailPayload["aweme_detail"]>): number | undefined {
+  const detailRecord = detail as Record<string, unknown>;
+  const video = detail.video && typeof detail.video === "object"
+    ? detail.video as Record<string, unknown>
+    : null;
+  const durationMs = readNumber(video?.duration);
+  if (durationMs && durationMs > 0) {
+    return durationMs > 1000 ? durationMs / 1000 : durationMs;
+  }
+
+  return [
+    readNumber(detailRecord.duration),
+    readNumber(detailRecord.video_duration ?? detailRecord.videoDuration),
+  ].find((duration): duration is number => Boolean(duration && duration > 0));
 }
 
 function readBitRateVideoUrls(value: unknown): string[] {

@@ -4,7 +4,6 @@ export type MediaResources = {
 };
 
 export type CollectedContent = MediaResources & {
-  caption?: string;
   articleText?: string;
 };
 

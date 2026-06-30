@@ -1,6 +1,8 @@
 import type { DouyinKind, ResolvedDouyinWork } from "@/types/douyin";
+import { fetchWithRetry } from "@/lib/http/retry";
 
 const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
+const TRAILING_URL_PUNCTUATION_PATTERN = /[)\]}.,!?;:，。！？；：、]+$/u;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 8;
 const CANONICAL_DOUYIN_ORIGIN = "https://www.douyin.com";
@@ -26,7 +28,7 @@ export function extractFirstUrl(input: string): string {
     throw new DouyinResolveError("还没有识别到有效链接，请粘贴完整的抖音作品分享链接。", "no_url");
   }
 
-  return match[0].replace(/[)\]}.,!?;，。！？；、]+$/u, "");
+  return match[0].replace(TRAILING_URL_PUNCTUATION_PATTERN, "");
 }
 
 export function classifyDouyinUrl(value: string): Pick<
@@ -102,13 +104,14 @@ async function followRedirects(inputUrl: string): Promise<string> {
       return work.finalUrl;
     }
 
-    const response = await fetch(current, {
+    const response = await fetchWithRetry(current, {
       method: "GET",
       redirect: "manual",
       headers: requestHeaders(),
+      retry: { timeoutMs: 12_000 },
     }).catch((error: unknown) => {
       throw new DouyinResolveError(
-        error instanceof Error ? error.message : "追踪重定向失败。",
+        formatResolveNetworkError(error),
         "network_error",
       );
     });
@@ -126,6 +129,14 @@ async function followRedirects(inputUrl: string): Promise<string> {
   }
 
   throw new DouyinResolveError("重定向次数过多。", "too_many_redirects");
+}
+
+function formatResolveNetworkError(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") {
+    return "抖音链接响应超时，请稍后重试。";
+  }
+
+  return "暂时无法访问抖音链接，请稍后重试。";
 }
 
 function isShortDouyinUrl(value: string): boolean {

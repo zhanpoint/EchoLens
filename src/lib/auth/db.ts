@@ -24,16 +24,17 @@ type EmailCodeRow = {
 };
 
 type GlobalWithAuthDb = typeof globalThis & {
-  __echolensAuthDbMigrated?: boolean;
+  __echolensAuthDbMigrated?: number;
 };
 
+const AUTH_SCHEMA_VERSION = 4;
 const globalForAuthDb = globalThis as GlobalWithAuthDb;
 
 export function getAuthDb(): Database.Database {
   const db = getSqliteDb();
-  if (!globalForAuthDb.__echolensAuthDbMigrated) {
+  if (globalForAuthDb.__echolensAuthDbMigrated !== AUTH_SCHEMA_VERSION) {
     migrate(db);
-    globalForAuthDb.__echolensAuthDbMigrated = true;
+    globalForAuthDb.__echolensAuthDbMigrated = AUTH_SCHEMA_VERSION;
   }
   return db;
 }
@@ -218,5 +219,53 @@ function migrate(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS email_codes_lookup_idx ON email_codes(email, purpose, used_at, sent_at);
+
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      category TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, category)
+    );
+
+    CREATE INDEX IF NOT EXISTS user_settings_user_id_idx ON user_settings(user_id);
+
+    DROP VIEW IF EXISTS users_display;
+    DROP VIEW IF EXISTS sessions_display;
+    DROP VIEW IF EXISTS email_codes_display;
+    DROP VIEW IF EXISTS auth_users_display;
+    DROP VIEW IF EXISTS auth_sessions_display;
+    DROP VIEW IF EXISTS auth_email_codes_display;
+
+    CREATE VIEW users_display AS
+    SELECT
+      id,
+      username,
+      email,
+      strftime('%Y年%m月%d日 %H:%M:%S', terms_accepted_at / 1000, 'unixepoch', '+8 hours') AS terms_accepted_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', created_at / 1000, 'unixepoch', '+8 hours') AS created_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', updated_at / 1000, 'unixepoch', '+8 hours') AS updated_at
+    FROM users;
+
+    CREATE VIEW sessions_display AS
+    SELECT
+      token_hash,
+      user_id,
+      strftime('%Y年%m月%d日 %H:%M:%S', expires_at / 1000, 'unixepoch', '+8 hours') AS expires_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', created_at / 1000, 'unixepoch', '+8 hours') AS created_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', last_seen_at / 1000, 'unixepoch', '+8 hours') AS last_seen_at
+    FROM sessions;
+
+    CREATE VIEW email_codes_display AS
+    SELECT
+      id,
+      email,
+      purpose,
+      code_hash,
+      attempts,
+      strftime('%Y年%m月%d日 %H:%M:%S', expires_at / 1000, 'unixepoch', '+8 hours') AS expires_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', sent_at / 1000, 'unixepoch', '+8 hours') AS sent_at,
+      strftime('%Y年%m月%d日 %H:%M:%S', used_at / 1000, 'unixepoch', '+8 hours') AS used_at
+    FROM email_codes;
   `);
 }

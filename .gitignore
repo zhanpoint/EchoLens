@@ -49,3 +49,6 @@ data/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 测试文件
+/src/test/

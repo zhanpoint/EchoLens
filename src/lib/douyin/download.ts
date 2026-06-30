@@ -3,7 +3,7 @@ import type { DouyinKind, MediaAssetKind } from "@/types/douyin";
 export function buildMediaDownloadPath(
   work: { id: string; kind: DouyinKind },
   asset: MediaAssetKind,
-  options?: { preview?: boolean },
+  options?: { cacheRunId?: string; preview?: boolean },
 ): string {
   const params = new URLSearchParams({
     id: work.id,
@@ -11,6 +11,9 @@ export function buildMediaDownloadPath(
     asset,
   });
 
+  if (options?.cacheRunId) {
+    params.set("cacheRunId", options.cacheRunId);
+  }
   if (options?.preview) {
     params.set("preview", "1");
   }

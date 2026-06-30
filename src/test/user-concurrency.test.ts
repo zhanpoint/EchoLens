@@ -6,6 +6,7 @@ import {
 
 describe("user route concurrency", () => {
   beforeEach(() => {
+    delete process.env.USER_ROUTE_CONCURRENCY_ENABLED;
     resetUserRouteConcurrencyForTest();
   });
 
@@ -13,7 +14,7 @@ describe("user route concurrency", () => {
     let release!: () => void;
     const first = withUserRouteConcurrency(
       "user-1",
-      "douyin:extract",
+      "douyin:download",
       () => new Promise<Response>((resolve) => {
         release = () => resolve(new Response("ok"));
       }),
@@ -21,7 +22,7 @@ describe("user route concurrency", () => {
 
     const blocked = await withUserRouteConcurrency(
       "user-1",
-      "douyin:extract",
+      "douyin:download",
       async () => new Response("unexpected"),
     );
 
@@ -74,6 +75,50 @@ describe("user route concurrency", () => {
 
     release();
     expect(second.status).toBe(200);
+    expect((await first).status).toBe(200);
+  });
+
+  it("allows concurrent requests when disabled by environment", async () => {
+    process.env.USER_ROUTE_CONCURRENCY_ENABLED = "false";
+    let release!: () => void;
+    const first = withUserRouteConcurrency(
+      "user-1",
+      "douyin:resolve",
+      () => new Promise<Response>((resolve) => {
+        release = () => resolve(new Response("ok"));
+      }),
+    );
+
+    const second = await withUserRouteConcurrency(
+      "user-1",
+      "douyin:resolve",
+      async () => new Response("ok"),
+    );
+
+    release();
+    expect(second.status).toBe(200);
+    expect((await first).status).toBe(200);
+  });
+
+  it("keeps concurrency enabled for non-false environment values", async () => {
+    process.env.USER_ROUTE_CONCURRENCY_ENABLED = "0";
+    let release!: () => void;
+    const first = withUserRouteConcurrency(
+      "user-1",
+      "douyin:resolve",
+      () => new Promise<Response>((resolve) => {
+        release = () => resolve(new Response("ok"));
+      }),
+    );
+
+    const blocked = await withUserRouteConcurrency(
+      "user-1",
+      "douyin:resolve",
+      async () => new Response("unexpected"),
+    );
+
+    release();
+    expect(blocked.status).toBe(429);
     expect((await first).status).toBe(200);
   });
 });

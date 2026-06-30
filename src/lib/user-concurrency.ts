@@ -12,13 +12,20 @@ const locks = new Map<string, Lock>();
 type UserRoute =
   | "douyin:download"
   | "douyin:extract"
-  | "douyin:summarize";
+  | "douyin:resolve"
+  | "douyin:summarize"
+  | "douyin:translate"
+  | "douyin:transcribe";
 
 export async function withUserRouteConcurrency(
   userId: string,
   route: UserRoute,
   handler: () => Promise<Response>,
 ): Promise<Response> {
+  if (!isUserRouteConcurrencyEnabled()) {
+    return await handler();
+  }
+
   const now = Date.now();
   cleanupLocks(now);
 
@@ -46,6 +53,11 @@ export async function withUserRouteConcurrency(
   } finally {
     locks.delete(key);
   }
+}
+
+function isUserRouteConcurrencyEnabled(): boolean {
+  const value = process.env.USER_ROUTE_CONCURRENCY_ENABLED?.trim().toLowerCase();
+  return value !== "false";
 }
 
 function cleanupLocks(now: number): void {

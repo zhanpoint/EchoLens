@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { AuthFlow } from "../auth-flow";
+import { AuthFlow } from "../(auth)/auth-flow";
 
 export const metadata: Metadata = {
   title: "重置密码 | EchoLens",

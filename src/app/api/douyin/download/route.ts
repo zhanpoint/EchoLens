@@ -1,20 +1,31 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
-import { downloadRemoteMediaToBuffer, normalizeAudioToWav, prepareMediaCacheForWork } from "@/lib/media/audio";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
+import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
+import {
+  downloadRemoteMediaToCachedFile,
+  prepareMediaCacheForWork,
+  prepareTranscribableWavAudio,
+} from "@/lib/media/audio";
+import { upsertAsrAudioCache } from "@/lib/transcript/db";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
+const OFFICIAL_AD_VIDEO_UNSUPPORTED_MESSAGE = "官方广告视频无法缓存，请尝试其他抖音作品链接。";
+
 const DownloadQuerySchema = z.object({
   id: z.string().regex(/^\d{6,30}$/),
   kind: z.enum(DOUYIN_KINDS),
   asset: z.enum(MEDIA_ASSET_KINDS),
+  cacheRunId: z.string().trim().regex(/^[A-Za-z0-9._-]{1,100}$/).optional(),
 });
 
 export async function GET(request: Request) {
@@ -29,88 +40,108 @@ export async function GET(request: Request) {
     id: url.searchParams.get("id"),
     kind: url.searchParams.get("kind"),
     asset: url.searchParams.get("asset"),
+    cacheRunId: url.searchParams.get("cacheRunId") || undefined,
   });
 
   if (!parsed.success) {
     return NextResponse.json({ error: "下载参数无效。" }, { status: 400 });
   }
 
-  const { id, kind, asset } = parsed.data;
+  const { id, kind, asset, cacheRunId } = parsed.data;
   const isPreview = url.searchParams.get("preview") === "1";
   if (!canDownloadAsset(kind, asset)) {
     return NextResponse.json({ error: "当前作品类型不支持该下载资源。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:download", async () => {
-    await prepareMediaCacheForWork(user.id, buildWorkCacheKey({ id, kind }));
-    const finalUrl = buildDouyinWorkUrl(kind, id);
-    const metadata = await collectWorkMetadata({ id, kind, finalUrl });
-    const assetUrls = selectAssetUrls(asset, metadata);
+  await prepareMediaCacheForWork(user.id, buildWorkCacheKey({ id, kind }), cacheRunId);
 
-    if (assetUrls.length === 0) {
-      return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
-    }
-    if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
-      return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
-    }
+  const finalUrl = buildDouyinWorkUrl(kind, id);
+  const metadata = await collectWorkMetadata({ id, kind, finalUrl });
+  const assetUrls = selectAssetUrls(asset, metadata);
+
+  if (assetUrls.length === 0) {
+    return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
+  }
+  if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
+    return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
+  }
+
+  try {
     if (asset === "originalAudio") {
-      try {
-        const audio = await normalizeAudioToWav(user.id, assetUrls);
-        return mediaBufferResponse(audio, {
-          contentType: "audio/wav",
-          filename: buildFilename(id, asset, "audio/wav"),
-          inline: isPreview,
-          range: requestRange,
-        });
-      } catch (error) {
-        return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
-      }
-    }
-
-    try {
-      const media = await downloadRemoteMediaToBuffer(user.id, assetUrls);
-      const contentType = media.contentType ?? defaultContentType(asset);
-      return mediaBufferResponse(media.buffer, {
-        contentType,
-        filename: buildFilename(id, asset, contentType),
+      const workKey = buildWorkCacheKey({ id, kind });
+      const audio = await prepareTranscribableWavAudio(user.id, assetUrls, undefined, { signal: request.signal });
+      const asrAudio = await uploadAsrAudioFile({
+        filePath: audio.filePath,
+        userId: user.id,
+        workKey,
+      });
+      upsertAsrAudioCache({
+        durationSeconds: audio.durationSeconds,
+        objectKey: asrAudio.objectKey,
+        userId: user.id,
+        workKey,
+      });
+      return await fileResponse(audio.filePath, {
+        asrAudio,
+        contentType: "audio/wav",
+        filename: buildFilename(id, asset, "audio/wav"),
         inline: isPreview,
         range: requestRange,
       });
-    } catch (error) {
-      return NextResponse.json({ error: formatDownloadError(error) }, { status: 502 });
     }
-  });
+
+    const media = await downloadRemoteMediaToCachedFile(user.id, assetUrls, { signal: request.signal });
+    const contentType = media.contentType ?? defaultContentType(asset);
+    return await fileResponse(media.filePath, {
+      contentType,
+      filename: buildFilename(id, asset, contentType),
+      inline: isPreview,
+      range: requestRange,
+    });
+  } catch (error) {
+    return downloadErrorResponse(error);
+  }
 }
 
 function buildWorkCacheKey(work: { id: string; kind: string }): string {
   return `${work.kind}:${work.id}`;
 }
 
-function toArrayBuffer(buffer: Buffer): ArrayBuffer {
-  return new Uint8Array(buffer).buffer;
-}
-
-function mediaBufferResponse(
-  buffer: Buffer,
-  options: { contentType: string; filename: string; inline: boolean; range: string | null },
-): Response {
+async function fileResponse(
+  filePath: string,
+  options: {
+    asrAudio?: { objectKey: string; signedUrl: string };
+    contentType: string;
+    filename: string;
+    inline: boolean;
+    range: string | null;
+  },
+): Promise<Response> {
+  const size = (await stat(filePath)).size;
   const headers = new Headers({
     "accept-ranges": "bytes",
     "cache-control": "no-store",
     "content-type": options.contentType,
     "content-disposition": `${options.inline ? "inline" : "attachment"}; filename="${options.filename}"`,
   });
-  const range = parseSingleRange(options.range, buffer.byteLength);
+  if (options.asrAudio) {
+    headers.set("x-echolens-asr-audio-object-key", encodeURIComponent(options.asrAudio.objectKey));
+    headers.set("x-echolens-asr-audio-url", encodeURIComponent(options.asrAudio.signedUrl));
+  }
+  const range = parseSingleRange(options.range, size);
 
   if (!range) {
-    headers.set("content-length", String(buffer.byteLength));
-    return new Response(toArrayBuffer(buffer), { headers });
+    headers.set("content-length", String(size));
+    return new Response(readFileStream(filePath), { headers });
   }
 
-  const chunk = buffer.subarray(range.start, range.end + 1);
-  headers.set("content-length", String(chunk.byteLength));
-  headers.set("content-range", `bytes ${range.start}-${range.end}/${buffer.byteLength}`);
-  return new Response(toArrayBuffer(chunk), { status: 206, headers });
+  headers.set("content-length", String(range.end - range.start + 1));
+  headers.set("content-range", `bytes ${range.start}-${range.end}/${size}`);
+  return new Response(readFileStream(filePath, range), { status: 206, headers });
+}
+
+function readFileStream(filePath: string, range?: { start: number; end: number }): ReadableStream<Uint8Array> {
+  return Readable.toWeb(createReadStream(filePath, range)) as ReadableStream<Uint8Array>;
 }
 
 function parseSingleRange(value: string | null, size: number): { start: number; end: number } | null {
@@ -182,8 +213,19 @@ function defaultContentType(asset: MediaAssetKind): string {
 
 function formatDownloadError(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {
+    if (/\bHTTP 404\b/.test(error.message)) {
+      return OFFICIAL_AD_VIDEO_UNSUPPORTED_MESSAGE;
+    }
     return error.message.trim();
   }
 
   return "媒体资源下载失败。";
+}
+
+function downloadErrorResponse(error: unknown): NextResponse {
+  const message = formatDownloadError(error);
+  return NextResponse.json(
+    { error: message },
+    { status: message === OFFICIAL_AD_VIDEO_UNSUPPORTED_MESSAGE ? 400 : 502 },
+  );
 }

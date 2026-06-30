@@ -10,7 +10,7 @@ import {
   readSessionUser,
   updateUserPassword,
 } from "@/lib/auth/db";
-import { type EmailCodePurpose, verifyEmailCode } from "@/lib/auth/email";
+import { verifyEmailCode } from "@/lib/auth/email";
 import { hashPassword, validatePassword, verifyPassword } from "@/lib/auth/password";
 import {
   createSessionCookieValue,
@@ -74,6 +74,20 @@ export async function loginUser(input: {
   const user = findUserByIdentifier(input.identifier.trim());
   if (!user || !(await verifyPassword(input.password, user.password_hash))) {
     throw new AuthError("账号或密码错误。", 401, "INVALID_CREDENTIALS");
+  }
+  return toAuthUser(user);
+}
+
+export async function loginUserWithEmailCode(input: {
+  acceptedLegal: boolean;
+  code: string;
+  email: string;
+}): Promise<AuthUser> {
+  assertLegalAccepted(input.acceptedLegal);
+  const email = normalizeEmail(input.email);
+  const user = findUserByEmail(email);
+  if (!user || !verifyEmailCode(email, "login", input.code)) {
+    throw new AuthError("验证码无效或已过期。", 401, "INVALID_CODE");
   }
   return toAuthUser(user);
 }
@@ -155,13 +169,6 @@ export function assertPassword(password: string): void {
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
-}
-
-export function normalizePurpose(value: string): EmailCodePurpose {
-  if (value === "signup" || value === "reset") {
-    return value;
-  }
-  throw new AuthError("验证码场景无效。");
 }
 
 function readCurrentUserFromCookieValue(value: string | undefined): AuthUser | null {

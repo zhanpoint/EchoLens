@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { authJson, EmailSchema, errorJson } from "@/app/api/auth/_shared";
 import { EmailRateLimitError, sendEmailCode } from "@/lib/auth/email";
-import { AuthError, emailExists, normalizePurpose } from "@/lib/auth/service";
+import { AuthError, emailExists } from "@/lib/auth/service";
 
 export const runtime = "nodejs";
 
 const SendCodeSchema = z.object({
   email: EmailSchema,
-  purpose: z.enum(["reset", "signup"]),
+  purpose: z.enum(["login", "reset", "signup"]),
 });
 
 export async function POST(request: Request) {
@@ -18,12 +18,12 @@ export async function POST(request: Request) {
     }
 
     const email = parsed.data.email.toLowerCase();
-    const purpose = normalizePurpose(parsed.data.purpose);
+    const purpose = parsed.data.purpose;
     if (purpose === "signup" && emailExists(email)) {
       throw new AuthError("邮箱已被注册。");
     }
 
-    if (purpose === "reset" && !emailExists(email)) {
+    if ((purpose === "login" || purpose === "reset") && !emailExists(email)) {
       return authJson({ message: "如果邮箱已注册，验证码将发送到该邮箱。", expiresIn: 300 });
     }
 

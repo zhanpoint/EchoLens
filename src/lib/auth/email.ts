@@ -16,9 +16,9 @@ const EMAIL_CODE_RESEND_SECONDS = 60;
 const EMAIL_CODE_MAX_ATTEMPTS = 5;
 const LOGO_CID = "echolens-logo";
 
-export type EmailCodePurpose = "reset" | "signup";
+export type EmailCodePurpose = "login" | "reset" | "signup";
 
-type AuthEmailKind = EmailCodePurpose | "login";
+type AuthEmailKind = EmailCodePurpose | "loginNotice";
 type AuthEmailCopy = {
   description: string;
   subject: string;
@@ -27,6 +27,11 @@ type AuthEmailCopy = {
 
 const AUTH_EMAIL_COPY: Record<AuthEmailKind, AuthEmailCopy> = {
   login: {
+    description: "你正在登录 EchoLens，请使用以下验证码完成验证。",
+    subject: "EchoLens - 登录验证码",
+    title: "登录验证码",
+  },
+  loginNotice: {
     description: "你的 EchoLens 账户刚刚完成登录。如果不是你本人操作，请尽快重置密码。",
     subject: "EchoLens - 登录提醒",
     title: "登录提醒",
@@ -69,7 +74,7 @@ export async function sendLoginNoticeEmail(email: string, username: string): Pro
     return;
   }
   await sendAuthEmail({
-    copy: AUTH_EMAIL_COPY.login,
+    copy: AUTH_EMAIL_COPY.loginNotice,
     email,
     username,
   });
