@@ -50,7 +50,7 @@ SMTP_USE_TLS="false"
 
 视频音频转录不再调用 OpenRouter ASR。`DASHSCOPE_BASE_URL` 使用百炼业务空间对应地域的 `/api/v1` 地址，`DASHSCOPE_ASR_MODEL_E1` 和 `DASHSCOPE_ASR_MODEL_E2` 分别配置 E1/E2 的真实转录模型。E1 与 E2 都走 DashScope 异步转录任务，单个音频文件大小不超过 2GB、时长不超过 12 小时；E1 固定开启情感识别和时间戳，句级时间戳使用 `enable_words: false`，不支持说话人分离和敏感词过滤；E2 支持说话人分离和敏感词过滤。翻译使用 `DASHSCOPE_TRANSLATION_BASE_URL` 的 OpenAI 兼容 `/compatible-mode/v1` 地址和 `DASHSCOPE_TRANSLATION_MODEL`，默认 `qwen-mt-flash`。转录结果会写入 SQLite 的 `transcript_results` 表，并尽力删除临时 OSS 对象。OSS 生命周期规则仍建议保留，用于清理异常中断时遗留的 `echolens/asr/` 临时文件。
 
-E1/E2 异步转录可在阿里云 EventBridge 中配置 HTTP 回调到 `/api/dashscope/asr-callback`。回调端点会校验 `x-eventbridge-signature-v2`、签名时间戳、证书来源和 RSA-SHA256 签名，收到 `AsyncTaskFinish` 后按 DashScope `task_id` 幂等写入结果。未配置回调时，前端仍可查询任务状态；服务端会按 15 秒间隔节流 DashScope 查询，降低高并发下触发任务查询接口限流的风险。
+E1/E2 异步转录统一使用主动查询任务状态。服务端提交 DashScope 异步任务后保存 `task_id`，前端按间隔请求转录状态接口，服务端通过 DashScope 任务查询接口获取完成结果并写入 SQLite。
 
 ffmpeg 路径解析规则是：优先使用 `FFMPEG_PATH`，没有配置时回退到 `@ffmpeg-installer/ffmpeg` 随包提供的可执行文件。Docker 镜像内通过 apt 安装系统 ffmpeg，并把 `FFMPEG_PATH` 固定为 `/usr/bin/ffmpeg`；本地开发默认留空，使用依赖包内置的 ffmpeg。
 

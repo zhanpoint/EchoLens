@@ -9,7 +9,6 @@ import {
   markAsrTaskSucceeded,
   nextAsrQuotaResetAt,
   readAsrTask,
-  readAsrTaskByTaskId,
   readDailySucceededAsrDurationSeconds,
   readRunningAsrTask,
   readStoredTranscript,
@@ -163,29 +162,13 @@ function buildTranscriptPayload(content: string, segments: TranscriptSegment[]):
   };
 }
 
-export async function handleDashScopeAsrCallback(taskId: string, payload: unknown): Promise<DashScopeAsrJobResult | null> {
-  const job = readAsrTaskByTaskId(taskId);
-  if (!job) {
-    console.warn("[dashscope-asr-callback] no local ASR task matched DashScope task_id", { taskId });
-    return null;
-  }
-  if (job.status !== "running") {
-    return readStoredAsrTaskResult(job);
-  }
-
-  return await settleDashScopeAsrTask(job, payload);
-}
-
 async function settleDashScopeAsrTask(
   job: StoredAsrTask,
   taskPayload: unknown,
 ): Promise<DashScopeAsrJobResult> {
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
-    const resultPayload = hasTranscriptionResult(taskPayload)
-      ? taskPayload
-      : await queryDashScopeAsrTask(job.taskId);
-    const transcript = stripLastTranscriptSegment(await readDashScopeTranscript(resultPayload));
+    const transcript = stripLastTranscriptSegment(await readDashScopeTranscript(taskPayload));
     upsertStoredTranscript({
       cacheKey: job.cacheKey,
       content: transcript.content,
@@ -216,19 +199,6 @@ async function settleDashScopeAsrTask(
 
   markAsrTaskRunning(job.id);
   return { status: "running", jobId: job.id };
-}
-
-function hasTranscriptionResult(payload: unknown): boolean {
-  return findTranscriptionUrls(payload).length > 0 || Boolean(parseDashScopeTranscriptPayload(payload));
-}
-
-export function readDashScopeAsrJob(userId: string, jobId: string): DashScopeAsrJobResult | null {
-  const job = readAsrTask({ id: jobId, userId });
-  if (!job) {
-    return null;
-  }
-
-  return readStoredAsrTaskResult(job);
 }
 
 export async function refreshDashScopeAsrJob(userId: string, jobId: string): Promise<DashScopeAsrJobResult | null> {

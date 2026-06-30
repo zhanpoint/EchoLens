@@ -5,14 +5,12 @@ import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   DailyAsrQuotaExceededError,
   getDashScopeAsrModelForProfile,
-  readDashScopeAsrJob,
   refreshDashScopeAsrJob,
   transcribeDashScopeAsr,
   type DashScopeAsrModelProfile,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
 import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
-import { isProdRuntime } from "@/lib/runtime";
 import { readAsrAudioCache } from "@/lib/transcript/db";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 import {
@@ -134,9 +132,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
   }
 
-  const result = isProdRuntime()
-    ? readDashScopeAsrJob(user.id, parsed.data.jobId)
-    : await refreshDashScopeAsrJob(user.id, parsed.data.jobId);
+  const result = await refreshDashScopeAsrJob(user.id, parsed.data.jobId);
   if (!result) {
     return NextResponse.json({ error: "转录任务不存在或已过期。" }, { status: 404 });
   }
