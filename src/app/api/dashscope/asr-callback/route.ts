@@ -123,6 +123,9 @@ function readPublicRequestUrl(request: Request): string {
   if (host) {
     url.host = host;
   }
+  if (url.protocol === "https:" && url.port === "3000") {
+    url.port = "";
+  }
 
   return url.toString();
 }
