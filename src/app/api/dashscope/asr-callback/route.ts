@@ -24,16 +24,39 @@ export async function POST(request: Request) {
   const body = await request.text();
   const verified = await verifyEventBridgeSignature(request, body);
   if (!verified.ok) {
+    console.warn("[dashscope-asr-callback] rejected EventBridge request", {
+      error: verified.error,
+      hasSignature: Boolean(request.headers.get("x-eventbridge-signature-v2")),
+      publicUrl: readPublicRequestUrl(request),
+      requestUrl: request.url,
+      signatureUrl: request.headers.get("x-eventbridge-signature-url"),
+      timestamp: request.headers.get("x-eventbridge-signature-timestamp"),
+    });
     return NextResponse.json({ error: verified.error }, { status: 401 });
   }
 
   const payload = parseJsonObject(body);
   const taskId = readStringPath(payload, ["data", "task_id"]);
+  const source = readStringPath(payload, ["source"]);
+  const type = readStringPath(payload, ["type"]);
+  const taskStatus = readStringPath(payload, ["data", "task_status"]);
   if (!taskId) {
+    console.warn("[dashscope-asr-callback] missing DashScope task_id", {
+      source,
+      type,
+      taskStatus,
+    });
     return NextResponse.json({ error: "缺少 DashScope task_id。" }, { status: 400 });
   }
 
-  await handleDashScopeAsrCallback(taskId, payload);
+  const result = await handleDashScopeAsrCallback(taskId, payload);
+  console.info("[dashscope-asr-callback] processed DashScope event", {
+    resultStatus: result?.status ?? "not_found",
+    source,
+    taskId,
+    taskStatus,
+    type,
+  });
   return NextResponse.json({ ok: true });
 }
 

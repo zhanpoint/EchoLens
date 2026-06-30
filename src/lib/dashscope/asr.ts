@@ -166,6 +166,7 @@ function buildTranscriptPayload(content: string, segments: TranscriptSegment[]):
 export async function handleDashScopeAsrCallback(taskId: string, payload: unknown): Promise<DashScopeAsrJobResult | null> {
   const job = readAsrTaskByTaskId(taskId);
   if (!job) {
+    console.warn("[dashscope-asr-callback] no local ASR task matched DashScope task_id", { taskId });
     return null;
   }
   if (job.status !== "running") {
