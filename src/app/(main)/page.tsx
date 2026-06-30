@@ -829,6 +829,15 @@ export default function HomePage() {
       )
     : canStartTranscribe;
 
+  const ensureAuthenticated = useCallback((): boolean => {
+    if (currentUser !== null) {
+      return true;
+    }
+
+    redirectToLogin();
+    return false;
+  }, [currentUser, redirectToLogin]);
+
   function updateSpecialWordFilterEnabled(checked: boolean) {
     setSpecialWordFilterEnabled(checked);
     setSpecialWordFilterPanelOpen(checked);
@@ -909,6 +918,10 @@ export default function HomePage() {
       return;
     }
 
+    if (!ensureAuthenticated()) {
+      return;
+    }
+
     setIsResolving(true);
     if (!options?.silent) {
       setError(null);
@@ -958,7 +971,7 @@ export default function HomePage() {
         setIsResolving(false);
       }
     }
-  }, [redirectToLogin]);
+  }, [ensureAuthenticated, redirectToLogin]);
 
   useEffect(() => {
     let isActive = true;
@@ -1011,6 +1024,9 @@ export default function HomePage() {
     if (!canExtract || !work || isInputDirty) {
       return;
     }
+    if (!ensureAuthenticated()) {
+      return;
+    }
 
     setIsExtracting(true);
     setError(null);
@@ -1048,6 +1064,9 @@ export default function HomePage() {
 
   async function transcribe() {
     if (!work || isInputDirty || isTranscribing) {
+      return;
+    }
+    if (!ensureAuthenticated()) {
       return;
     }
 
@@ -1123,6 +1142,9 @@ export default function HomePage() {
     event.preventDefault();
     if (!hasAcceptedUsage) {
       setError("请先确认仅用于个人学习和非商业用途，并尊重原作者版权。");
+      return;
+    }
+    if (!ensureAuthenticated()) {
       return;
     }
 

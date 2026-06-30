@@ -181,7 +181,10 @@ async function settleDashScopeAsrTask(
 ): Promise<DashScopeAsrJobResult> {
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
-    const transcript = stripLastTranscriptSegment(await readDashScopeTranscript(taskPayload));
+    const resultPayload = hasTranscriptionResult(taskPayload)
+      ? taskPayload
+      : await queryDashScopeAsrTask(job.taskId);
+    const transcript = stripLastTranscriptSegment(await readDashScopeTranscript(resultPayload));
     upsertStoredTranscript({
       cacheKey: job.cacheKey,
       content: transcript.content,
@@ -212,6 +215,10 @@ async function settleDashScopeAsrTask(
 
   markAsrTaskRunning(job.id);
   return { status: "running", jobId: job.id };
+}
+
+function hasTranscriptionResult(payload: unknown): boolean {
+  return findTranscriptionUrls(payload).length > 0 || Boolean(parseDashScopeTranscriptPayload(payload));
 }
 
 export function readDashScopeAsrJob(userId: string, jobId: string): DashScopeAsrJobResult | null {

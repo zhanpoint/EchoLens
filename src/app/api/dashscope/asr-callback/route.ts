@@ -86,7 +86,27 @@ function buildEventBridgeStringToSign(request: Request, body: string): string {
     })
     .filter((line): line is string => Boolean(line));
 
-  return `${request.url}\n${signedHeaders.join("\n")}\n${body}`;
+  return `${readPublicRequestUrl(request)}\n${signedHeaders.join("\n")}\n${body}`;
+}
+
+function readPublicRequestUrl(request: Request): string {
+  const url = new URL(request.url);
+  const forwardedProto = readForwardedHeader(request, "x-forwarded-proto");
+  const forwardedHost = readForwardedHeader(request, "x-forwarded-host");
+  const host = forwardedHost || request.headers.get("host")?.trim();
+  if (forwardedProto) {
+    url.protocol = `${forwardedProto.replace(/:$/, "")}:`;
+  }
+  if (host) {
+    url.host = host;
+  }
+
+  return url.toString();
+}
+
+function readForwardedHeader(request: Request, name: string): string {
+  const value = request.headers.get(name)?.split(",")[0]?.trim() ?? "";
+  return value;
 }
 
 function parseTrustedCertificateUrl(value: string): URL | null {
