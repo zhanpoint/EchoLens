@@ -5,8 +5,9 @@ import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   DailyAsrQuotaExceededError,
   getDashScopeAsrModelForProfile,
-  refreshDashScopeAsrJob,
+  refreshDashScopeAsrJobWithOptions,
   transcribeDashScopeAsr,
+  type DashScopeAsrJobResult,
   type DashScopeAsrModelProfile,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
@@ -61,6 +62,13 @@ const ReadJobSchema = z.object({
   jobId: z.string().min(1).max(128),
 }).strict();
 
+type TranscribeStreamEvent =
+  | { type: "running"; jobId: string; work?: z.infer<typeof WorkSchema> }
+  | { type: "postprocess_start"; work?: z.infer<typeof WorkSchema> }
+  | { type: "delta"; value: string }
+  | { type: "done"; results: ExtractionResult[]; status: "succeeded"; work?: z.infer<typeof WorkSchema> }
+  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; work?: z.infer<typeof WorkSchema> };
+
 export async function POST(request: Request) {
   const user = requireUser(request);
   if (user instanceof NextResponse) {
@@ -75,9 +83,6 @@ export async function POST(request: Request) {
   return withUserRouteConcurrency(user.id, "douyin:transcribe", async () => {
     try {
       const { audioObjectKey, audioUrl, work } = parsed.data;
-      if (work.kind !== "video") {
-        return NextResponse.json({ error: "当前作品类型不支持转录文本提取。" }, { status: 400 });
-      }
       if (!isManagedAsrAudioUrl({ objectKey: audioObjectKey, signedUrl: audioUrl })) {
         return NextResponse.json({ error: "原声音频缓存地址无效，请重新缓存后再转录。" }, { status: 400 });
       }
@@ -91,23 +96,29 @@ export async function POST(request: Request) {
       }
 
       const asrOptions = buildAsrOptions(parsed.data);
-      const result = await transcribeDashScopeAsr(
-        user.id,
-        buildWorkCacheKey(work),
+      return streamTranscribeOperation(
+        ({ onDelta }) => transcribeDashScopeAsr(
+          user.id,
+          buildWorkCacheKey(work),
+          {
+            durationSeconds: audioCache.durationSeconds,
+            objectKey: audioObjectKey,
+            signedUrl: audioUrl,
+          },
+          asrOptions,
+          {
+            postprocess: {
+              enabled: true,
+              onDelta,
+            },
+          },
+        ),
         {
-          durationSeconds: audioCache.durationSeconds,
-          objectKey: audioObjectKey,
-          signedUrl: audioUrl,
+          fallbackAsrModel: asrOptions.model,
+          work,
         },
-        asrOptions,
       );
-
-      return buildTranscribeResponse(result, work, asrOptions.model);
     } catch (error) {
-      if (error instanceof DailyAsrQuotaExceededError) {
-        return asrQuotaExceededResponse(error);
-      }
-
       return NextResponse.json(
         {
           error: error instanceof Error ? error.message : "转录失败。",
@@ -132,64 +143,98 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
   }
 
-  const result = await refreshDashScopeAsrJob(user.id, parsed.data.jobId);
-  if (!result) {
-    return NextResponse.json({ error: "转录任务不存在或已过期。" }, { status: 404 });
-  }
-
-  if (result.status === "running") {
-    return NextResponse.json({ jobId: result.jobId, status: "running" }, { status: 202 });
-  }
-
-  return NextResponse.json({
-    results: [transcriptionResult(result.result)],
-    status: result.status,
-  });
-}
-
-function buildTranscribeResponse(
-  result: Awaited<ReturnType<typeof transcribeDashScopeAsr>>,
-  work: z.infer<typeof WorkSchema>,
-  model?: DashScopeAsrModel,
-): NextResponse {
-  if (result.status === "running") {
-    return NextResponse.json(
-      {
-        jobId: result.jobId,
-        status: "running",
-        work,
+  return streamTranscribeOperation(
+    ({ onDelta }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+      postprocess: {
+        enabled: true,
+        onDelta,
       },
-      { status: 202 },
-    );
-  }
-
-  return NextResponse.json(
-    result.result.ok
-      ? {
-          results: [transcriptionResult(result.result, model)],
-          status: result.status,
-          work,
-        }
-      : {
-          error: result.result.detail,
-          status: result.status,
-          work,
-        },
+    }),
+    {},
   );
 }
 
-function asrQuotaExceededResponse(error: DailyAsrQuotaExceededError): NextResponse {
-  const retryAfter = Math.max(1, Math.ceil((error.resetAt - Date.now()) / 1000));
-  const response = NextResponse.json(
-    {
-      error: error.message,
-      resetAt: new Date(error.resetAt).toISOString(),
-      retryAfter,
+function streamTranscribeOperation(
+  run: (input: { onDelta: (delta: string) => void }) => Promise<DashScopeAsrJobResult | null>,
+  options: {
+    fallbackAsrModel?: DashScopeAsrModel;
+    work?: z.infer<typeof WorkSchema>;
+  },
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: TranscribeStreamEvent) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+
+      try {
+        let postprocessStarted = false;
+        const result = await run({
+          onDelta: (delta) => {
+            if (!postprocessStarted) {
+              postprocessStarted = true;
+              send({ type: "postprocess_start", work: options.work });
+            }
+            send({ type: "delta", value: delta });
+          },
+        });
+
+        if (!result) {
+          send({ type: "error", error: "转录任务不存在或已过期。", work: options.work });
+          return;
+        }
+        if (result.status === "running") {
+          send({ type: "running", jobId: result.jobId, work: options.work });
+          return;
+        }
+        if (!result.result.ok) {
+          send({
+            type: "error",
+            code: result.result.code,
+            error: result.result.detail,
+            work: options.work,
+          });
+          return;
+        }
+
+        send({
+          type: "done",
+          results: [transcriptionResult(result.result, options.fallbackAsrModel)],
+          status: "succeeded",
+          work: options.work,
+        });
+      } catch (error) {
+        if (error instanceof DailyAsrQuotaExceededError) {
+          const retryAfter = Math.max(1, Math.ceil((error.resetAt - Date.now()) / 1000));
+          send({
+            type: "error",
+            error: error.message,
+            resetAt: new Date(error.resetAt).toISOString(),
+            retryAfter,
+            work: options.work,
+          });
+          return;
+        }
+
+        send({
+          type: "error",
+          error: error instanceof Error ? error.message : "转录失败。",
+          work: options.work,
+        });
+      } finally {
+        controller.close();
+      }
     },
-    { status: 429 },
-  );
-  response.headers.set("Retry-After", String(retryAfter));
-  return response;
+  });
+
+  return new Response(stream, {
+    headers: {
+      "cache-control": "no-cache, no-transform",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-accel-buffering": "no",
+    },
+  });
 }
 
 function buildAsrOptions(input: z.infer<typeof TranscribeSchema>) {

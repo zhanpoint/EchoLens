@@ -10,9 +10,11 @@ vi.mock("@/lib/douyin/detail", () => ({
 }));
 
 vi.mock("@/lib/media/audio", () => ({
+  CompletedMediaCacheRequiredError: class CompletedMediaCacheRequiredError extends Error {},
   downloadRemoteMediaToCachedFile: vi.fn(),
   prepareMediaCacheForWork: vi.fn(),
-  prepareTranscribableWavAudio: vi.fn(),
+  prepareTranscribableWavAudioFromCachedMedia: vi.fn(),
+  streamRemoteMediaToCachedFile: vi.fn(),
 }));
 
 vi.mock("@/lib/oss/asr-audio", () => ({
@@ -28,7 +30,11 @@ vi.mock("@/app/api/auth/_shared", () => ({
 }));
 
 import { collectWorkMetadata } from "@/lib/douyin/detail";
-import { downloadRemoteMediaToCachedFile, prepareTranscribableWavAudio } from "@/lib/media/audio";
+import {
+  downloadRemoteMediaToCachedFile,
+  prepareTranscribableWavAudioFromCachedMedia,
+  streamRemoteMediaToCachedFile,
+} from "@/lib/media/audio";
 import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
 import { upsertAsrAudioCache } from "@/lib/transcript/db";
 import { requireUser } from "@/app/api/auth/_shared";
@@ -36,8 +42,9 @@ import { GET } from "../app/api/douyin/download/route";
 
 const collectWorkMetadataMock = vi.mocked(collectWorkMetadata);
 const downloadRemoteMediaToCachedFileMock = vi.mocked(downloadRemoteMediaToCachedFile);
-const prepareTranscribableWavAudioMock = vi.mocked(prepareTranscribableWavAudio);
+const prepareTranscribableWavAudioFromCachedMediaMock = vi.mocked(prepareTranscribableWavAudioFromCachedMedia);
 const requireUserMock = vi.mocked(requireUser);
+const streamRemoteMediaToCachedFileMock = vi.mocked(streamRemoteMediaToCachedFile);
 const upsertAsrAudioCacheMock = vi.mocked(upsertAsrAudioCache);
 const uploadAsrAudioFileMock = vi.mocked(uploadAsrAudioFile);
 
@@ -86,9 +93,14 @@ describe("douyin download route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("image/jpeg");
     expect(await response.text()).toBe("cover");
-    expect(downloadRemoteMediaToCachedFileMock).toHaveBeenCalledWith("user-1", ["https://example.com/cover.jpg"], {
-      signal: expect.any(AbortSignal),
-    });
+    expect(downloadRemoteMediaToCachedFileMock).toHaveBeenCalledWith(
+      "user-1",
+      ["https://example.com/cover.jpg"],
+      {
+        cacheKey: "video:7649250336875613449:cover",
+        signal: expect.any(AbortSignal),
+      },
+    );
   });
 
   it("returns a clear error when the selected asset is absent from metadata", async () => {
@@ -112,12 +124,49 @@ describe("douyin download route", () => {
     expect(downloadRemoteMediaToCachedFileMock).not.toHaveBeenCalled();
   });
 
-  it("streams cached original audio and exposes the ASR OSS URL headers", async () => {
-    const filePath = await writeTempMediaFile("wav");
+  it("streams video assets through the media cache stream", async () => {
     collectWorkMetadataMock.mockResolvedValue({
       videoUrls: ["https://example.com/video.mp4"],
     });
-    prepareTranscribableWavAudioMock.mockResolvedValue({
+    streamRemoteMediaToCachedFileMock.mockResolvedValue({
+      contentLength: 5,
+      contentType: "video/mp4",
+      kind: "stream",
+      stream: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("video"));
+          controller.close();
+        },
+      }),
+    });
+
+    const response = await GET(new Request(
+      "https://echolens.dreamlog.xyz/api/douyin/download?id=7649250336875613449&kind=video&asset=video",
+      {
+        headers: {
+          cookie: "el_session=test",
+        },
+      },
+    ));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("video/mp4");
+    expect(response.headers.get("content-length")).toBe("5");
+    expect(await response.text()).toBe("video");
+    expect(streamRemoteMediaToCachedFileMock).toHaveBeenCalledWith(
+      "user-1",
+      ["https://example.com/video.mp4"],
+      {
+        cacheKey: "video:7649250336875613449:video",
+        signal: expect.any(AbortSignal),
+      },
+    );
+    expect(downloadRemoteMediaToCachedFileMock).not.toHaveBeenCalled();
+  });
+
+  it("streams cached original audio and exposes the ASR OSS URL headers", async () => {
+    const filePath = await writeTempMediaFile("wav");
+    prepareTranscribableWavAudioFromCachedMediaMock.mockResolvedValue({
       durationSeconds: 1,
       filePath,
       sizeBytes: 3,
@@ -143,12 +192,15 @@ describe("douyin download route", () => {
       encodeURIComponent("https://oss.example.com/echolens/asr/test.wav?OSSAccessKeyId=test&Expires=1&Signature=sig"),
     );
     expect(await response.text()).toBe("wav");
-    expect(prepareTranscribableWavAudioMock).toHaveBeenCalledWith(
+    expect(prepareTranscribableWavAudioFromCachedMediaMock).toHaveBeenCalledWith(
       "user-1",
-      ["https://example.com/video.mp4"],
+      "video:7649250336875613449:video",
       undefined,
-      { signal: expect.any(AbortSignal) },
+      {
+        signal: expect.any(AbortSignal),
+      },
     );
+    expect(collectWorkMetadataMock).not.toHaveBeenCalled();
     expect(uploadAsrAudioFileMock).toHaveBeenCalledWith({
       filePath,
       userId: "user-1",
@@ -167,7 +219,7 @@ describe("douyin download route", () => {
       coverUrls: ["https://example.com/cover.jpg"],
       videoUrls: ["https://aweme.snssdk.com/aweme/v1/playwm/?video_id=ad&ratio=720p&line=0"],
     });
-    downloadRemoteMediaToCachedFileMock.mockRejectedValue(new Error("媒体资源下载失败：HTTP 404"));
+    streamRemoteMediaToCachedFileMock.mockRejectedValue(new Error("媒体资源下载失败：HTTP 404"));
 
     const response = await GET(new Request(
       "https://echolens.dreamlog.xyz/api/douyin/download?id=7651467787881303306&kind=video&asset=video",
@@ -182,10 +234,13 @@ describe("douyin download route", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: "官方广告视频无法缓存，请尝试其他抖音作品链接。",
     });
-    expect(downloadRemoteMediaToCachedFileMock).toHaveBeenCalledWith(
+    expect(streamRemoteMediaToCachedFileMock).toHaveBeenCalledWith(
       "user-1",
       ["https://aweme.snssdk.com/aweme/v1/playwm/?video_id=ad&ratio=720p&line=0"],
-      { signal: expect.any(AbortSignal) },
+      {
+        cacheKey: "video:7651467787881303306:video",
+        signal: expect.any(AbortSignal),
+      },
     );
   });
 });

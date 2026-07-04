@@ -3,6 +3,10 @@ import type { ProviderResult } from "@/lib/ai/provider-result";
 import { fetchWithRetry } from "@/lib/http/retry";
 import type { UploadedAsrAudio } from "@/lib/oss/asr-audio";
 import {
+  TRANSCRIPT_POSTPROCESS_VERSION,
+  streamQwenTranscriptPostprocess,
+} from "@/lib/dashscope/transcript-postprocess";
+import {
   insertAsrTask,
   markAsrTaskFailed,
   markAsrTaskRunning,
@@ -15,6 +19,7 @@ import {
   type StoredAsrTask,
   upsertStoredTranscript,
 } from "@/lib/transcript/db";
+import { stripTrailingDouyinWatermarkFromTranscript } from "@/lib/transcript/normalize";
 import type { TranscriptSegment } from "@/types/douyin";
 
 type DashScopeConfig = {
@@ -32,6 +37,13 @@ export type DashScopeAsrOptions = {
   model?: DashScopeAsrModel;
   specialWordFilter?: DashScopeSpecialWordFilter;
   speakerCount?: number;
+};
+
+export type DashScopeAsrRuntimeOptions = {
+  postprocess?: {
+    enabled: boolean;
+    onDelta?: (delta: string) => void;
+  };
 };
 
 export type DashScopeSpecialWordFilter = {
@@ -77,6 +89,7 @@ export async function submitDashScopeAsrJob(
   workKey: string,
   audio: DashScopeAsrAudio | undefined,
   options: DashScopeAsrOptions = {},
+  runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult> {
   if (!audio?.signedUrl || !audio.objectKey || !Number.isFinite(audio.durationSeconds) || audio.durationSeconds <= 0) {
     return { status: "failed", result: { ok: false, code: "unavailable", detail: "原声音频缓存未就绪。" } };
@@ -89,7 +102,14 @@ export async function submitDashScopeAsrJob(
     const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions);
     const stored = readStoredTranscript({ cacheKey, userId });
     if (stored) {
-      return { status: "succeeded", result: stored };
+      return await storedTranscriptJobResult({
+        cacheKey,
+        model,
+        runtimeOptions,
+        transcript: stored,
+        userId,
+        workKey,
+      });
     }
 
     const runningTask = readRunningAsrTask({ cacheKey, userId });
@@ -124,8 +144,9 @@ export async function transcribeDashScopeAsr(
   workKey: string,
   audio: DashScopeAsrAudio | undefined,
   options: DashScopeAsrOptions = {},
+  runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult> {
-  return await submitDashScopeAsrJob(userId, workKey, audio, options);
+  return await submitDashScopeAsrJob(userId, workKey, audio, options, runtimeOptions);
 }
 
 export function parseDashScopeTranscriptPayload(payload: unknown): TranscriptPayload | null {
@@ -165,30 +186,35 @@ function buildTranscriptPayload(content: string, segments: TranscriptSegment[]):
 async function settleDashScopeAsrTask(
   job: StoredAsrTask,
   taskPayload: unknown,
+  runtimeOptions: DashScopeAsrRuntimeOptions,
 ): Promise<DashScopeAsrJobResult> {
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
-    const transcript = stripLastTranscriptSegment(await readDashScopeTranscript(taskPayload));
-    upsertStoredTranscript({
-      cacheKey: job.cacheKey,
-      content: transcript.content,
-      model: job.model || DEFAULT_ASR_MODEL,
-      source: "dashscope",
-      transcriptSegments: transcript.transcriptSegments,
-      userId: job.userId,
-      workKey: job.workKey,
-    });
-    markAsrTaskSucceeded(job.id);
-    return {
-      status: "succeeded",
-      result: {
-        asrModel: job.model || DEFAULT_ASR_MODEL,
+    const transcript = stripTrailingDouyinWatermarkFromTranscript(await readDashScopeTranscript(taskPayload));
+    const model = parseDashScopeAsrModel(job.model) ?? DEFAULT_ASR_MODEL;
+    const result = await postprocessTranscriptForStorage({
+      model,
+      runtimeOptions,
+      transcript: {
+        asrModel: model,
         ok: true,
         content: transcript.content,
         emotions: transcript.emotions,
         transcriptSegments: transcript.transcriptSegments,
       },
-    };
+    });
+    upsertStoredTranscript({
+      cacheKey: job.cacheKey,
+      content: result.ok ? result.content : transcript.content,
+      model,
+      postprocessVersion: result.ok ? result.postprocessVersion : undefined,
+      source: "dashscope",
+      transcriptSegments: result.ok ? result.transcriptSegments : transcript.transcriptSegments,
+      userId: job.userId,
+      workKey: job.workKey,
+    });
+    markAsrTaskSucceeded(job.id);
+    return result.ok ? { status: "succeeded", result } : { status: "failed", result };
   }
 
   if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
@@ -202,16 +228,24 @@ async function settleDashScopeAsrTask(
 }
 
 export async function refreshDashScopeAsrJob(userId: string, jobId: string): Promise<DashScopeAsrJobResult | null> {
+  return await refreshDashScopeAsrJobWithOptions(userId, jobId);
+}
+
+export async function refreshDashScopeAsrJobWithOptions(
+  userId: string,
+  jobId: string,
+  runtimeOptions: DashScopeAsrRuntimeOptions = {},
+): Promise<DashScopeAsrJobResult | null> {
   const job = readAsrTask({ id: jobId, userId });
   if (!job) {
     return null;
   }
   if (job.status !== "running") {
-    return readStoredAsrTaskResult(job);
+    return await readStoredAsrTaskResult(job, runtimeOptions);
   }
 
   const payload = await queryDashScopeAsrTask(job.taskId);
-  return await settleDashScopeAsrTask(job, payload);
+  return await settleDashScopeAsrTask(job, payload, runtimeOptions);
 }
 
 async function submitDashScopeAsrTask(
@@ -332,11 +366,21 @@ async function dashScopeFetch(
   }
 }
 
-function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
+async function readStoredAsrTaskResult(
+  job: StoredAsrTask,
+  runtimeOptions: DashScopeAsrRuntimeOptions,
+): Promise<DashScopeAsrJobResult> {
   if (job.status === "succeeded") {
     const stored = readStoredTranscript({ cacheKey: job.cacheKey, userId: job.userId });
     return stored
-      ? { status: "succeeded", result: stored }
+      ? await storedTranscriptJobResult({
+          cacheKey: job.cacheKey,
+          model: parseDashScopeAsrModel(job.model) ?? DEFAULT_ASR_MODEL,
+          runtimeOptions,
+          transcript: stored,
+          userId: job.userId,
+          workKey: job.workKey,
+        })
       : { status: "failed", result: { ok: false, code: "error", detail: "转录结果已过期，请重新提取。" } };
   }
   if (job.status === "failed") {
@@ -347,6 +391,63 @@ function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
   }
 
   return { status: "running", jobId: job.id };
+}
+
+async function storedTranscriptJobResult(input: {
+  cacheKey: string;
+  model: DashScopeAsrModel;
+  runtimeOptions: DashScopeAsrRuntimeOptions;
+  transcript: Extract<ProviderResult, { ok: true }>;
+  userId: string;
+  workKey: string;
+}): Promise<DashScopeAsrJobResult> {
+  const result = await postprocessTranscriptForStorage({
+    model: input.model,
+    runtimeOptions: input.runtimeOptions,
+    transcript: input.transcript,
+  });
+  if (result.ok) {
+    upsertStoredTranscript({
+      cacheKey: input.cacheKey,
+      content: result.content,
+      model: input.model,
+      postprocessVersion: result.postprocessVersion,
+      source: "dashscope",
+      transcriptSegments: result.transcriptSegments,
+      userId: input.userId,
+      workKey: input.workKey,
+    });
+    return { status: "succeeded", result };
+  }
+
+  return { status: "failed", result };
+}
+
+async function postprocessTranscriptForStorage(input: {
+  model: DashScopeAsrModel;
+  runtimeOptions: DashScopeAsrRuntimeOptions;
+  transcript: Extract<ProviderResult, { ok: true }>;
+}): Promise<ProviderResult> {
+  if (!input.runtimeOptions.postprocess?.enabled ||
+    input.transcript.postprocessVersion === TRANSCRIPT_POSTPROCESS_VERSION) {
+    return {
+      ...input.transcript,
+      asrModel: input.transcript.asrModel ?? input.model,
+    };
+  }
+
+  const result = await streamQwenTranscriptPostprocess({
+    content: input.transcript.content,
+    segments: input.transcript.transcriptSegments,
+    onDelta: input.runtimeOptions.postprocess.onDelta ?? (() => undefined),
+  });
+
+  return result.ok
+    ? {
+        ...result,
+        asrModel: input.model,
+      }
+    : result;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -391,24 +492,6 @@ function parseTranscriptSegments(payload: unknown): TranscriptSegment[] {
 function readSegmentEmotions(segments: TranscriptSegment[]): string[] | undefined {
   const emotions = [...new Set(segments.map((segment) => segment.emotion).filter((emotion): emotion is string => Boolean(emotion)))];
   return emotions.length > 0 ? emotions : undefined;
-}
-
-function stripLastTranscriptSegment<T extends { content: string; transcriptSegments?: TranscriptSegment[] }>(
-  payload: T,
-): T {
-  const segments = payload.transcriptSegments;
-  const shouldDropLastSegment = segments?.at(-1)?.text.trim() === "抖音";
-  const transcriptSegments = shouldDropLastSegment
-    ? segments.slice(0, -1)
-    : segments;
-
-  return {
-    ...payload,
-    content: transcriptSegments?.length
-      ? joinTranscriptText(transcriptSegments.map((segment) => segment.text))
-      : payload.content.replace(/\s*抖音\s*$/u, "").trim(),
-    transcriptSegments,
-  };
 }
 
 function findTranscriptionUrls(value: unknown): string[] {

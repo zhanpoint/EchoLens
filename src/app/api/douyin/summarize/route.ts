@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
-import { summarizeTranscript } from "@/lib/openrouter/provider";
+import { streamSummarizeTranscript } from "@/lib/openrouter/provider";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
@@ -24,24 +24,46 @@ export async function POST(request: Request) {
   }
 
   return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
-    const result = await summarizeTranscript(parsed.data.text, parsed.data.prompt);
-    if (!result.ok) {
-      return NextResponse.json({ error: result.detail, code: result.code }, { status: providerErrorStatus(result) });
-    }
-
-    return NextResponse.json({ summary: result.content });
+    return streamSummary(parsed.data.text, parsed.data.prompt);
   });
 }
 
-function providerErrorStatus(result: { code: string; detail: string }): number {
-  if (result.code === "not_configured") {
-    return 500;
-  }
-  if (/限流|请求过于频繁|429/.test(result.detail)) {
-    return 429;
-  }
-  if (result.code === "unavailable") {
-    return 503;
-  }
-  return 502;
+type SummaryEvent =
+  | { type: "delta"; value: string }
+  | { type: "done"; value: string }
+  | { type: "error"; error: string; code?: string };
+
+function streamSummary(transcript: string, prompt: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: SummaryEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+
+      try {
+        const result = await streamSummarizeTranscript({
+          prompt,
+          transcript,
+          onDelta: (delta) => send({ type: "delta", value: delta }),
+        });
+
+        if (result.ok) {
+          send({ type: "done", value: result.content });
+        } else {
+          send({ type: "error", error: result.detail, code: result.code });
+        }
+      } catch (error) {
+        send({ type: "error", error: error instanceof Error ? error.message : "AI处理失败。" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "cache-control": "no-cache, no-transform",
+      "content-type": "text/event-stream; charset=utf-8",
+      "x-accel-buffering": "no",
+    },
+  });
 }

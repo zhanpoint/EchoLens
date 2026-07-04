@@ -23,6 +23,7 @@ type LoginMethod = "code" | "password";
 type FieldName = Exclude<keyof FormState, "acceptedLegal">;
 
 type ApiMessage = {
+  code?: string;
   error?: string;
   expiresIn?: number;
   message?: string;
@@ -266,9 +267,9 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                         autoComplete="username"
                         error={fieldError("identifier")}
                         icon={<UserRound className="size-4" />}
-                        label="用户名"
+                        label="用户名 / 邮箱"
                         onChange={(value) => update("identifier", value)}
-                        placeholder="输入用户名"
+                        placeholder="输入用户名或邮箱"
                         value={form.identifier}
                       />
                     ) : (
@@ -421,7 +422,7 @@ function LoginMethodTabs({
   onChange: (method: LoginMethod) => void;
 }) {
   return (
-    <div className="grid grid-cols-2 gap-1 rounded-md border border-white/12 bg-white/[0.045] p-1">
+    <div className="grid grid-cols-2 gap-1 rounded-md bg-white/[0.045] p-1">
       {[
         { label: "用户名密码", value: "password" as const },
         { label: "邮箱验证码", value: "code" as const },
@@ -477,7 +478,7 @@ function TextField({
         {icon}
         <input
           autoComplete={autoComplete}
-          className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground/70"
+          className="auth-input min-w-0 flex-1 text-sm text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(event) => onChange(event.currentTarget.value)}
           placeholder={placeholder}
           required
@@ -520,7 +521,7 @@ function PasswordField({
         <KeyRound className="size-4" />
         <input
           autoComplete={autoComplete}
-          className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground/70"
+          className="auth-input min-w-0 flex-1 text-sm text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(event) => onChange(event.currentTarget.value)}
           placeholder={placeholder}
           required
@@ -566,7 +567,7 @@ function CodeField({
         <input
           autoComplete="one-time-code"
           className={cn(
-            "h-11 min-w-0 rounded-md border bg-white/[0.055] px-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:ring-2",
+            "auth-input h-11 min-w-0 rounded-md border bg-white/[0.055] px-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:ring-2",
             error
               ? "border-destructive/65 focus:border-destructive/80 focus:ring-destructive/15"
               : "border-white/15 focus:border-cyan/60 focus:ring-cyan/15",
@@ -668,10 +669,13 @@ function validateUsername(value: string): string | undefined {
 function validateIdentifier(value: string): string | undefined {
   const identifier = value.trim();
   if (!identifier) {
-    return "请输入用户名。";
+    return "请输入用户名或邮箱。";
   }
-  if (identifier.includes("@") && validateEmail(identifier)) {
-    return "用户名登录不支持邮箱，请改用邮箱验证码登录。";
+  if (identifier.includes("@")) {
+    return validateEmail(identifier);
+  }
+  if (!USERNAME_PATTERN.test(identifier)) {
+    return "用户名需为 3 到 24 位，可包含中文、字母、数字、下划线或短横线。";
   }
 }
 
@@ -767,14 +771,20 @@ function getSafeNextPath(): string {
 }
 
 async function postJson(url: string, body: unknown): Promise<ApiMessage> {
-  const response = await fetch(url, {
-    body: JSON.stringify(body),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+  } catch (error) {
+    throw new Error(readNetworkError(error));
+  }
+
   const payload = (await response.json().catch(() => ({}))) as ApiMessage;
   if (!response.ok) {
-    throw new Error(payload.error || "请求失败。");
+    throw new Error(payload.error || formatRequestError(response.status, payload.code));
   }
   return payload;
 }
@@ -783,6 +793,13 @@ function readError(error: unknown): string {
   if (!(error instanceof Error)) {
     return "请求失败，请稍后重试。";
   }
+  return error.message || "请求失败，请稍后重试。";
+}
+
+function readNetworkError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "网络连接异常，请检查网络后重试。";
+  }
   if (error.name === "AbortError") {
     return "请求超时，请稍后重试。";
   }
@@ -790,5 +807,27 @@ function readError(error: unknown): string {
     return "网络连接异常，请检查网络后重试。";
   }
 
-  return error.message || "请求失败，请稍后重试。";
+  return "网络连接异常，请检查网络后重试。";
+}
+
+function formatRequestError(status: number, code: string | undefined): string {
+  if (status === 401) {
+    if (code === "ACCOUNT_NOT_FOUND") {
+      return "账号不存在，请检查用户名或邮箱，或先注册账号。";
+    }
+    if (code === "INVALID_PASSWORD") {
+      return "密码错误，请重新输入，或使用“忘记密码”重置。";
+    }
+    return "登录状态无效，请重新登录。";
+  }
+  if (status === 400) {
+    return "提交信息不完整或格式不正确，请检查后重试。";
+  }
+  if (status === 429) {
+    return "请求过于频繁，请稍后重试。";
+  }
+  if (status >= 500) {
+    return "服务暂时不可用，请稍后重试。";
+  }
+  return "请求失败，请稍后重试。";
 }

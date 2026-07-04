@@ -25,10 +25,6 @@ export function buildDouyinWorkUrl(kind: DouyinKind, id: string): string {
   return new URL(`/${kind}/${id}`, "https://www.douyin.com").toString();
 }
 
-export function canDownloadAsset(kind: DouyinKind, asset: MediaAssetKind): boolean {
-  return (asset !== "video" && asset !== "originalAudio") || kind === "video";
-}
-
 export function isSupportedMediaUrl(value: string): boolean {
   try {
     return new URL(value).protocol === "https:";

@@ -1,12 +1,11 @@
 # EchoLens
 
-EchoLens 是一个单页面 Next.js 工具，用于从抖音分享链接识别作品类型和标题，并处理文章正文、图片可见文字或视频音频转录。
+EchoLens 是一个单页面 Next.js 工具，用于从抖音分享链接识别视频作品标题，并处理视频音频转录、总结和翻译。
 
 ## 功能边界
 
-- 支持重定向后的 `video`、`note`、`article` 三类抖音作品链接。
-- 抖音详情接口用于读取作者、标题、文章正文、图片和视频资源。
-- 图片内容识别走 OpenRouter 多模态模型，默认 `xiaomi/mimo-v2.5`。
+- 仅支持重定向后的 `video` 抖音作品链接。
+- 抖音详情接口用于读取作者、标题、封面和视频资源。
 - 视频作品走独立转录接口，音频会先用 ffmpeg 标准化为 16kHz 单声道 WAV，再上传到阿里云 OSS 生成公网签名 URL。默认 E1 使用 DashScope `qwen3-asr-flash-filetrans` 异步转录，E2 使用 `fun-asr` 异步转录。
 - 支持用户名、邮箱、密码和邮箱验证码注册，登录后才能访问核心抖音处理接口。
 - 用户身份、验证码哈希和会话数据保存在 SQLite，后续需要持久化的数据也统一写入 SQLite，默认路径为 `data/echolens.sqlite`。
@@ -17,7 +16,6 @@ EchoLens 是一个单页面 Next.js 工具，用于从抖音分享链接识别�
 
 ```bash
 OPENROUTER_API_KEY=""
-OPENROUTER_MODEL="xiaomi/mimo-v2.5"
 OPENROUTER_SUMMARY_MODEL="deepseek/deepseek-v4-flash"
 OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 DASHSCOPE_API_KEY=""

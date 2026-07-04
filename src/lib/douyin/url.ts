@@ -51,7 +51,7 @@ export function classifyDouyinUrl(value: string): Pick<
     throw new DouyinResolveError("目前只支持抖音作品链接。", "unsupported_host");
   }
 
-  throw new DouyinResolveError("请粘贴抖音视频、图文或文章作品链接。", "unsupported_type");
+  throw new DouyinResolveError("请粘贴抖音视频作品链接。", "unsupported_type");
 }
 
 export async function resolveDouyinInput(input: string): Promise<ResolvedDouyinWork> {
@@ -217,5 +217,5 @@ function isIesDouyinHost(hostname: string): boolean {
 }
 
 function isDouyinKind(value: string | undefined): value is DouyinKind {
-  return value === "video" || value === "note" || value === "article";
+  return value === "video";
 }

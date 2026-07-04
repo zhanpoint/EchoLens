@@ -1,5 +1,6 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import { fetchWithRetry } from "@/lib/http/retry";
+import { readSseJsonStream } from "@/lib/http/sse";
 
 export type QwenMtTerm = {
   source: string;
@@ -70,7 +71,7 @@ export async function streamQwenMtText(input: {
     }
 
     let output = "";
-    for await (const payload of readSseJsonStream(response.body)) {
+    for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body)) {
       const delta = payload.choices?.[0]?.delta?.content;
       if (typeof delta === "string" && delta) {
         output += delta;
@@ -116,58 +117,6 @@ async function callQwenMt(
       timeoutMs: QWEN_MT_REQUEST_TIMEOUT_MS,
     },
   });
-}
-
-async function* readSseJsonStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<DashScopeChatCompletionPayload> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split(/\r?\n\r?\n/u);
-      buffer = events.pop() ?? "";
-      for (const event of events) {
-        const payload = parseSseJsonPayload(event);
-        if (payload) {
-          yield payload;
-        }
-      }
-    }
-
-    buffer += decoder.decode();
-    const payload = parseSseJsonPayload(buffer);
-    if (payload) {
-      yield payload;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-function parseSseJsonPayload(event: string): DashScopeChatCompletionPayload | null {
-  const data = event
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart())
-    .join("\n")
-    .trim();
-
-  if (!data || data === "[DONE]") {
-    return null;
-  }
-
-  try {
-    return JSON.parse(data) as DashScopeChatCompletionPayload;
-  } catch {
-    return null;
-  }
 }
 
 function normalizeTranslationText(text: string): string {
@@ -222,19 +171,11 @@ function readDashScopeTranslationConfig(): DashScopeTranslationConfig {
 }
 
 function readDashScopeTranslationBaseUrl(): string {
-  const configured = (
-    process.env.DASHSCOPE_TRANSLATION_BASE_URL
-    || process.env.DASHSCOPE_BASE_URL
-    || "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  ).trim().replace(/\/+$/u, "");
-
-  if (configured.endsWith("/compatible-mode/v1")) {
-    return configured;
+  const baseUrl = process.env.DASHSCOPE_TRANSLATION_BASE_URL?.trim().replace(/\/+$/u, "");
+  if (!baseUrl) {
+    throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
   }
-  if (configured.endsWith("/api/v1")) {
-    return `${configured.slice(0, -"/api/v1".length)}/compatible-mode/v1`;
-  }
-  return `${configured}/compatible-mode/v1`;
+  return baseUrl;
 }
 
 function readQwenMtFailure(
@@ -260,7 +201,7 @@ function readQwenMtFailure(
 
 function formatQwenMtThrownError(error: unknown): ProviderResult {
   if (error instanceof Error) {
-    if (/DASHSCOPE_API_KEY/.test(error.message)) {
+    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL)/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {

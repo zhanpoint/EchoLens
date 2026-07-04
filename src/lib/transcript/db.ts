@@ -6,6 +6,7 @@ import type { TranscriptSegment } from "@/types/douyin";
 type StoredTranscriptRow = {
   content: string;
   model: string | null;
+  postprocess_version: string | null;
   segments_json: string | null;
 };
 type StoredAsrTaskRow = {
@@ -31,7 +32,7 @@ type GlobalWithTranscriptDb = typeof globalThis & {
   __echolensTranscriptDbMigrated?: number;
 };
 
-const TRANSCRIPT_SCHEMA_VERSION = 4;
+const TRANSCRIPT_SCHEMA_VERSION = 5;
 const globalForTranscriptDb = globalThis as GlobalWithTranscriptDb;
 
 export type StoredAsrTaskStatus = "running" | "succeeded" | "failed";
@@ -69,7 +70,7 @@ export function readStoredTranscript(input: {
 }): Extract<ProviderResult, { ok: true }> | null {
   const row = getTranscriptDb()
     .prepare(
-      `SELECT content, model, segments_json
+      `SELECT content, model, postprocess_version, segments_json
        FROM transcript_results
        WHERE user_id = ? AND cache_key = ?
        LIMIT 1`,
@@ -85,6 +86,7 @@ export function readStoredTranscript(input: {
     asrModel: row.model ?? undefined,
     content: row.content,
     emotions: parseEmotions(row.segments_json),
+    postprocessVersion: row.postprocess_version ?? undefined,
     transcriptSegments: parseSegments(row.segments_json),
   };
 }
@@ -93,6 +95,7 @@ export function upsertStoredTranscript(input: {
   cacheKey: string;
   content: string;
   model: string;
+  postprocessVersion?: string;
   source: string;
   transcriptSegments?: TranscriptSegment[];
   userId: string;
@@ -103,12 +106,13 @@ export function upsertStoredTranscript(input: {
     .prepare(
       `INSERT INTO transcript_results (
          id, user_id, work_key, cache_key, source, model,
-         content, segments_json, created_at, updated_at
+         content, segments_json, postprocess_version, created_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, cache_key) DO UPDATE SET
          content = excluded.content,
          segments_json = excluded.segments_json,
+         postprocess_version = excluded.postprocess_version,
          source = excluded.source,
          model = excluded.model,
          updated_at = excluded.updated_at`,
@@ -122,6 +126,7 @@ export function upsertStoredTranscript(input: {
       input.model,
       input.content,
       JSON.stringify(input.transcriptSegments ?? []),
+      input.postprocessVersion ?? null,
       now,
       now,
     );
@@ -318,6 +323,7 @@ function migrate(db: Database.Database): void {
       model TEXT NOT NULL,
       content TEXT NOT NULL,
       segments_json TEXT,
+      postprocess_version TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE(user_id, cache_key)
@@ -375,6 +381,7 @@ function migrate(db: Database.Database): void {
   `);
   ensureColumn(db, "transcript_asr_tasks", "model", "TEXT");
   ensureColumn(db, "transcript_asr_tasks", "audio_duration_seconds", "REAL NOT NULL DEFAULT 0");
+  ensureColumn(db, "transcript_results", "postprocess_version", "TEXT");
 }
 
 function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {

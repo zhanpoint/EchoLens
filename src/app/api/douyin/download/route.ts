@@ -4,16 +4,18 @@ import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
+import { buildWorkCacheKey, buildWorkMediaCacheKey, selectMediaAssetUrls } from "@/lib/douyin/assets";
 import { collectWorkMetadata } from "@/lib/douyin/detail";
-import { buildDouyinWorkUrl, canDownloadAsset, isSupportedMediaUrl } from "@/lib/douyin/download";
-import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
+import { buildDouyinWorkUrl, isSupportedMediaUrl } from "@/lib/douyin/download";
 import {
+  CompletedMediaCacheRequiredError,
   downloadRemoteMediaToCachedFile,
   prepareMediaCacheForWork,
-  prepareTranscribableWavAudio,
+  prepareTranscribableWavAudioFromCachedMedia,
+  streamRemoteMediaToCachedFile,
 } from "@/lib/media/audio";
+import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
 import { upsertAsrAudioCache } from "@/lib/transcript/db";
-import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import { DOUYIN_KINDS, MEDIA_ASSET_KINDS, type MediaAssetKind } from "@/types/douyin";
 
 export const runtime = "nodejs";
@@ -49,27 +51,17 @@ export async function GET(request: Request) {
 
   const { id, kind, asset, cacheRunId } = parsed.data;
   const isPreview = url.searchParams.get("preview") === "1";
-  if (!canDownloadAsset(kind, asset)) {
-    return NextResponse.json({ error: "当前作品类型不支持该下载资源。" }, { status: 400 });
-  }
 
-  await prepareMediaCacheForWork(user.id, buildWorkCacheKey({ id, kind }), cacheRunId);
+  const work = { id, kind };
+  const workKey = buildWorkCacheKey(work);
+  await prepareMediaCacheForWork(user.id, workKey, cacheRunId);
 
-  const finalUrl = buildDouyinWorkUrl(kind, id);
-  const metadata = await collectWorkMetadata({ id, kind, finalUrl });
-  const assetUrls = selectAssetUrls(asset, metadata);
-
-  if (assetUrls.length === 0) {
-    return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
-  }
-  if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
-    return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
-  }
-
-  try {
-    if (asset === "originalAudio") {
-      const workKey = buildWorkCacheKey({ id, kind });
-      const audio = await prepareTranscribableWavAudio(user.id, assetUrls, undefined, { signal: request.signal });
+  if (asset === "originalAudio") {
+    try {
+      const videoCacheKey = buildWorkMediaCacheKey(work, "video");
+      const audio = await prepareTranscribableWavAudioFromCachedMedia(user.id, videoCacheKey, undefined, {
+        signal: request.signal,
+      });
       const asrAudio = await uploadAsrAudioFile({
         filePath: audio.filePath,
         userId: user.id,
@@ -88,9 +80,50 @@ export async function GET(request: Request) {
         inline: isPreview,
         range: requestRange,
       });
+    } catch (error) {
+      return downloadErrorResponse(error);
+    }
+  }
+
+  const finalUrl = buildDouyinWorkUrl(kind, id);
+  const metadata = await collectWorkMetadata({ id, kind, finalUrl });
+  const assetUrls = selectMediaAssetUrls(asset, metadata);
+
+  if (assetUrls.length === 0) {
+    return NextResponse.json({ error: "没有采集到可下载资源。" }, { status: 404 });
+  }
+  if (assetUrls.some((assetUrl) => !isSupportedMediaUrl(assetUrl))) {
+    return NextResponse.json({ error: "资源地址不是有效的 HTTPS 媒体地址。" }, { status: 400 });
+  }
+
+  try {
+    if (asset === "video") {
+      const media = await streamRemoteMediaToCachedFile(user.id, assetUrls, {
+        cacheKey: buildWorkMediaCacheKey(work, asset),
+        signal: request.signal,
+      });
+      const contentType = media.contentType ?? defaultContentType(asset);
+      if (media.kind === "cached") {
+        return await fileResponse(media.filePath, {
+          contentType,
+          filename: buildFilename(id, asset, contentType),
+          inline: isPreview,
+          range: requestRange,
+        });
+      }
+
+      return streamingMediaResponse(media.stream, {
+        contentLength: media.contentLength,
+        contentType,
+        filename: buildFilename(id, asset, contentType),
+        inline: isPreview,
+      });
     }
 
-    const media = await downloadRemoteMediaToCachedFile(user.id, assetUrls, { signal: request.signal });
+    const media = await downloadRemoteMediaToCachedFile(user.id, assetUrls, {
+      cacheKey: buildWorkMediaCacheKey(work, asset),
+      signal: request.signal,
+    });
     const contentType = media.contentType ?? defaultContentType(asset);
     return await fileResponse(media.filePath, {
       contentType,
@@ -103,8 +136,26 @@ export async function GET(request: Request) {
   }
 }
 
-function buildWorkCacheKey(work: { id: string; kind: string }): string {
-  return `${work.kind}:${work.id}`;
+function streamingMediaResponse(
+  stream: ReadableStream<Uint8Array>,
+  options: {
+    contentLength?: number;
+    contentType: string;
+    filename: string;
+    inline: boolean;
+  },
+): Response {
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "content-type": options.contentType,
+    "content-disposition": `${options.inline ? "inline" : "attachment"}; filename="${options.filename}"`,
+    "x-accel-buffering": "no",
+  });
+  if (options.contentLength) {
+    headers.set("content-length", String(options.contentLength));
+  }
+
+  return new Response(stream, { headers });
 }
 
 async function fileResponse(
@@ -157,17 +208,6 @@ function parseSingleRange(value: string | null, size: number): { start: number; 
   }
 
   return { start, end: Math.min(end, size - 1) };
-}
-
-function selectAssetUrls(
-  asset: MediaAssetKind,
-  metadata: DouyinWorkMetadata,
-): string[] {
-  return {
-    cover: metadata.coverUrls ?? [],
-    video: metadata.videoUrls ?? [],
-    originalAudio: metadata.videoUrls ?? [],
-  }[asset];
 }
 
 function buildFilename(
@@ -223,6 +263,10 @@ function formatDownloadError(error: unknown): string {
 }
 
 function downloadErrorResponse(error: unknown): NextResponse {
+  if (error instanceof CompletedMediaCacheRequiredError) {
+    return NextResponse.json({ error: error.message }, { status: 409 });
+  }
+
   const message = formatDownloadError(error);
   return NextResponse.json(
     { error: message },

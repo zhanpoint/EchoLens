@@ -71,9 +71,17 @@ export async function loginUser(input: {
   password: string;
 }): Promise<AuthUser> {
   assertLegalAccepted(input.acceptedLegal);
-  const user = findUserByIdentifier(input.identifier.trim());
-  if (!user || !(await verifyPassword(input.password, user.password_hash))) {
-    throw new AuthError("账号或密码错误。", 401, "INVALID_CREDENTIALS");
+  const identifier = input.identifier.trim();
+  const user = findUserByIdentifier(identifier);
+  if (!user) {
+    throw new AuthError(
+      identifier.includes("@") ? "该邮箱尚未注册，请先注册账号。" : "该用户名不存在，请检查后重试。",
+      401,
+      "ACCOUNT_NOT_FOUND",
+    );
+  }
+  if (!(await verifyPassword(input.password, user.password_hash))) {
+    throw new AuthError("密码错误，请重新输入，或使用“忘记密码”重置。", 401, "INVALID_PASSWORD");
   }
   return toAuthUser(user);
 }

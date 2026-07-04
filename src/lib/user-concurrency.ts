@@ -11,7 +11,6 @@ type Lock = {
 const locks = new Map<string, Lock>();
 type UserRoute =
   | "douyin:download"
-  | "douyin:extract"
   | "douyin:resolve"
   | "douyin:summarize"
   | "douyin:translate"

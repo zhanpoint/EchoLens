@@ -1,12 +1,3 @@
-export type MediaResources = {
-  imageUrls: string[];
-  videoUrls?: string[];
-};
-
-export type CollectedContent = MediaResources & {
-  articleText?: string;
-};
-
 export function cleanText(value: string | undefined): string | undefined {
   const cleaned = value
     ?.replace(/\r/g, "\n")

@@ -40,7 +40,7 @@ describe("user route concurrency", () => {
     let release!: () => void;
     const first = withUserRouteConcurrency(
       "user-1",
-      "douyin:extract",
+      "douyin:transcribe",
       () => new Promise<Response>((resolve) => {
         release = () => resolve(new Response("ok"));
       }),
@@ -61,7 +61,7 @@ describe("user route concurrency", () => {
     let release!: () => void;
     const first = withUserRouteConcurrency(
       "user-1",
-      "douyin:extract",
+      "douyin:transcribe",
       () => new Promise<Response>((resolve) => {
         release = () => resolve(new Response("ok"));
       }),
@@ -69,7 +69,7 @@ describe("user route concurrency", () => {
 
     const second = await withUserRouteConcurrency(
       "user-2",
-      "douyin:extract",
+      "douyin:transcribe",
       async () => new Response("ok"),
     );
 

@@ -8,17 +8,18 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { estimateMediaProcessingDurationSeconds } from "../lib/douyin/cache-estimate";
-import { buildMediaDownloadPath, canDownloadAsset, isSupportedMediaUrl } from "../lib/douyin/download";
+import { buildMediaDownloadPath, isSupportedMediaUrl } from "../lib/douyin/download";
 import {
   downloadRemoteMediaToCachedFile,
   downloadRemoteMediaToFile,
   prepareMediaCacheForWork,
-  prepareTranscribableWavAudio,
+  prepareTranscribableWavAudioFromCachedMedia,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
+  streamRemoteMediaToCachedFile,
 } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
-import { EXTRACTION_FEATURES, FEATURES_BY_KIND, getFeatureLabel } from "../types/douyin";
+import { getFeatureLabel } from "../types/douyin";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -68,14 +69,12 @@ describe("douyin url utilities", () => {
       kind: "video",
       id: "7649250336875613449",
     });
-    expect(classifyDouyinUrl("https://www.douyin.com/note/7648217723239319537")).toMatchObject({
-      kind: "note",
-      id: "7648217723239319537",
-    });
-    expect(classifyDouyinUrl("https://www.douyin.com/article/7649253442124320052")).toMatchObject({
-      kind: "article",
-      id: "7649253442124320052",
-    });
+  });
+
+  it("rejects unsupported final url types", () => {
+    expect(() => classifyDouyinUrl("https://www.douyin.com/music/7648217723239319537")).toThrow(
+      "请粘贴抖音视频作品链接。",
+    );
   });
 
   it("classifies official iesdouyin share intermediates as canonical works", () => {
@@ -122,12 +121,8 @@ describe("douyin url utilities", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps feature availability strict per work type", () => {
-    expect(FEATURES_BY_KIND.video).toEqual([]);
-    expect(FEATURES_BY_KIND.note).toEqual(["imageContent"]);
-    expect(FEATURES_BY_KIND.article).toEqual(["articleText"]);
+  it("labels transcript results", () => {
     expect(getFeatureLabel("audioTranscript")).toBe("转录文本");
-    expect(FEATURES_BY_KIND.video.length).toBeLessThanOrEqual(EXTRACTION_FEATURES.length);
   });
 
   it("builds a douyin author url from sec_uid and work id", () => {
@@ -196,7 +191,6 @@ describe("douyin url utilities", () => {
       authorName: "零点未来",
       authorUrl:
         "https://www.douyin.com/user/MS4wLjABAAAA-author?from_tab_name=main&vid=7638145958106205455",
-      imageUrls: [],
     });
   });
 
@@ -330,49 +324,6 @@ describe("douyin url utilities", () => {
     ).toMatchObject({
       coverUrls: ["https://example.com/video-cover.jpeg"],
     });
-
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            images: [
-              {
-                url_list: ["https://example.com/note-first-image.webp"],
-              },
-            ],
-          },
-        },
-        "7643144296615218021",
-        "note",
-      ),
-    ).toMatchObject({
-      coverUrls: ["https://example.com/note-first-image.webp"],
-    });
-  });
-
-  it("parses article markdown text from douyin detail payloads", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            caption: "公开描述",
-            preview_title: "标题",
-            article_info: {
-              article_content: JSON.stringify({
-                markdown:
-                  "第一段正文\\n\\n![图片描述](https://example.com/a.jpeg width=1080 height=603)\\n\\n**二级标题**\\n\\n第二段正文",
-              }),
-            },
-          },
-        },
-        "7649253442124320052",
-      ),
-    ).toMatchObject({
-      caption: "公开描述",
-      title: "标题",
-      articleText: "第一段正文\n二级标题\n第二段正文",
-      imageUrls: [],
-    });
   });
 
   it("uses full caption instead of truncated desc text", () => {
@@ -406,98 +357,6 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       caption: "足坛顶级情商！奥利塞教科书式的赛场分寸感 #奥利塞 #姆巴佩 #法国队 #世界杯",
-    });
-  });
-
-  it("reads note caption from the detail share text field", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            caption: "",
-            share_info: {
-              share_desc_info: "#在抖音，记录美好生活#第一行图文文案\n第二行图文文案\n#标签",
-            },
-          },
-        },
-        "7648217723239319537",
-        "note",
-      ),
-    ).toMatchObject({
-      caption: "第一行图文文案\n第二行图文文案\n#标签",
-    });
-  });
-
-  it("does not use note share text as video caption", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            caption: "",
-            share_info: {
-              share_desc_info: "#在抖音，记录美好生活#不应该用于视频",
-            },
-          },
-        },
-        "7646726820692547263",
-        "video",
-      ),
-    ).toMatchObject({
-      caption: undefined,
-    });
-  });
-
-  it("collects one primary image url for every note image", () => {
-    const images = Array.from({ length: 6 }, (_, index) => ({
-      url_list: [
-        `https://example.com/image-${index + 1}-main.webp`,
-        `https://example.com/image-${index + 1}-backup.webp`,
-        `https://example.com/image-${index + 1}-third.webp`,
-      ],
-      download_url_list: [
-        `https://example.com/image-${index + 1}-watermark.webp`,
-      ],
-    }));
-
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            images,
-          },
-        },
-        "7643144296615218021",
-        "note",
-      ),
-    ).toMatchObject({
-      imageUrls: [
-        "https://example.com/image-1-main.webp",
-        "https://example.com/image-2-main.webp",
-        "https://example.com/image-3-main.webp",
-        "https://example.com/image-4-main.webp",
-        "https://example.com/image-5-main.webp",
-        "https://example.com/image-6-main.webp",
-      ],
-    });
-  });
-
-  it("does not collect image urls for non-note work types", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            images: [
-              {
-                url_list: ["https://example.com/cover-or-inline-image.webp"],
-              },
-            ],
-          },
-        },
-        "7646726820692547263",
-        "video",
-      ),
-    ).toMatchObject({
-      imageUrls: [],
     });
   });
 
@@ -608,9 +467,6 @@ describe("douyin url utilities", () => {
     expect(buildMediaDownloadPath(work, "originalAudio", { cacheRunId: "run-1" })).toBe(
       "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio&cacheRunId=run-1",
     );
-    expect(canDownloadAsset("note", "cover")).toBe(true);
-    expect(canDownloadAsset("note", "originalAudio")).toBe(false);
-    expect(canDownloadAsset("article", "video")).toBe(false);
     expect(isSupportedMediaUrl("https://lf3-cdn-tos.douyinstatic.com/obj/example.mp4")).toBe(true);
     expect(isSupportedMediaUrl("https://example-unknown-cdn.com/media.m4a")).toBe(true);
     expect(isSupportedMediaUrl("http://example.com/unsafe.mp4")).toBe(false);
@@ -628,7 +484,7 @@ describe("audio transcription preparation", () => {
     expect(resolveFfmpegPath()).toBe("/usr/local/bin/ffmpeg");
   });
 
-  it("downloads remote media before passing a local file to ffmpeg", async () => {
+  it("extracts audio from a completed cached media file", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const wavPath = path.join(tempDir, "tone.wav");
 
@@ -666,22 +522,23 @@ describe("audio transcription preparation", () => {
         const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
         const userA = "user-a";
         const userB = "user-b";
+        const mediaCacheKey = "video:7644929016692636809:video";
         await prepareMediaCacheForWork(userA, "video:7644929016692636809");
-        const audio = await prepareTranscribableWavAudio(userA, mediaUrl);
+        const cachedMedia = await downloadRemoteMediaToCachedFile(userA, mediaUrl, { cacheKey: mediaCacheKey });
+        const audio = await prepareTranscribableWavAudioFromCachedMedia(userA, mediaCacheKey);
         const audioCachePath = path.join(
           os.tmpdir(),
           "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userA, [mediaUrl]])).digest("hex")}.wav`,
+          `${createHash("sha256").update(JSON.stringify([userA, "stable", mediaCacheKey])).digest("hex")}.wav`,
         );
         const otherUserAudioCachePath = path.join(
           os.tmpdir(),
           "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userB, [mediaUrl]])).digest("hex")}.wav`,
+          `${createHash("sha256").update(JSON.stringify([userB, "stable", mediaCacheKey])).digest("hex")}.wav`,
         );
         const audioMtime = (await fs.stat(audioCachePath)).mtimeMs;
         await prepareMediaCacheForWork(userA, "video:7644929016692636809");
-        await prepareTranscribableWavAudio(userA, mediaUrl);
-        const cachedMedia = await downloadRemoteMediaToCachedFile(userA, mediaUrl);
+        await prepareTranscribableWavAudioFromCachedMedia(userA, mediaCacheKey);
         const wavHeader = await readWavHeader(audio.filePath);
 
         expect(referer).toBe("https://www.douyin.com/");
@@ -698,7 +555,8 @@ describe("audio transcription preparation", () => {
         expect(requestCount).toBe(1);
 
         await prepareMediaCacheForWork(userB, "video:7644929016692636809");
-        await prepareTranscribableWavAudio(userB, mediaUrl);
+        await downloadRemoteMediaToCachedFile(userB, mediaUrl, { cacheKey: mediaCacheKey });
+        await prepareTranscribableWavAudioFromCachedMedia(userB, mediaCacheKey);
         expect(requestCount).toBe(2);
 
         await prepareMediaCacheForWork(userA, "video:7644929016692636810");
@@ -807,6 +665,73 @@ describe("audio transcription preparation", () => {
       }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("streams uncached remote media before the full cache file is complete", async () => {
+    const firstChunk = Buffer.from("first-video-chunk:");
+    const secondChunk = Buffer.from("second-video-chunk");
+    const source = Buffer.concat([firstChunk, secondChunk]);
+    let requestCount = 0;
+    let releaseSecondChunk!: () => void;
+    const waitForSecondChunk = new Promise<void>((resolve) => {
+      releaseSecondChunk = resolve;
+    });
+    const server = createServer((request, response) => {
+      requestCount += 1;
+      response.writeHead(200, {
+        "content-length": String(source.byteLength),
+        "content-type": "video/mp4",
+      });
+      response.write(firstChunk);
+      void waitForSecondChunk.then(() => response.end(secondChunk));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    try {
+      const { port } = server.address() as AddressInfo;
+      const userId = `stream-user-${Date.now()}`;
+      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
+      const cachePath = path.join(
+        os.tmpdir(),
+        "echolens-media-cache",
+        `${createHash("sha256").update(JSON.stringify([userId, [mediaUrl]])).digest("hex")}.media`,
+      );
+      await fs.rm(cachePath, { force: true });
+
+      await prepareMediaCacheForWork(userId, "video:streaming-cache", "run-1");
+      const streamResult = await Promise.race([
+        streamRemoteMediaToCachedFile(userId, mediaUrl),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+      ]);
+
+      expect(streamResult).not.toBe("timeout");
+      if (streamResult === "timeout") {
+        throw new Error("stream did not start before the upstream response completed");
+      }
+      if (streamResult.kind !== "stream") {
+        throw new Error("expected uncached media to return a stream");
+      }
+      expect(streamResult.contentLength).toBe(source.byteLength);
+
+      releaseSecondChunk();
+      await expect(new Response(streamResult.stream).arrayBuffer()).resolves.toEqual(
+        source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength),
+      );
+      await expect(fs.readFile(cachePath)).resolves.toEqual(source);
+
+      const cachedResult = await streamRemoteMediaToCachedFile(userId, mediaUrl);
+      expect(cachedResult.kind).toBe("cached");
+      expect(requestCount).toBe(1);
+    } finally {
+      releaseSecondChunk();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
     }
   });
 

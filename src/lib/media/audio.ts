@@ -26,6 +26,13 @@ export type CachedRemoteMedia = {
   contentType?: string;
   filePath: string;
 };
+export type RemoteMediaCacheStream = {
+  contentLength?: number;
+  contentType?: string;
+  kind: "stream";
+  stream: ReadableStream<Uint8Array>;
+};
+export type RemoteMediaCacheRead = (CachedRemoteMedia & { kind: "cached" }) | RemoteMediaCacheStream;
 export type AudioTranscriptionLimits = {
   durationLimitMessage?: string;
   maxBytes: number;
@@ -39,6 +46,7 @@ export type TranscribableWavAudio = {
 };
 
 export class AudioTranscriptionLimitError extends Error {}
+export class CompletedMediaCacheRequiredError extends Error {}
 class RangeResumeUnsupportedError extends Error {}
 
 type CachedRemoteMediaEntry = CachedRemoteMedia & {
@@ -60,6 +68,9 @@ type UserMediaCache = {
 };
 type AbortableOptions = {
   signal?: AbortSignal;
+};
+type MediaCacheOptions = AbortableOptions & {
+  cacheKey?: string;
 };
 
 const userMediaCaches = new Map<string, UserMediaCache>();
@@ -100,36 +111,36 @@ export async function prepareMediaCacheForWork(userId: string, workKey: string, 
 
 async function extractAudioToCachedWav(
   userId: string,
-  source: RemoteMediaSource,
+  mediaCacheKey: string,
   options: AbortableOptions = {},
 ): Promise<CachedAudioEntry> {
   const cache = await readUserMediaCache(userId);
-  const urls = normalizeRemoteMediaSource(source);
+  const normalizedMediaCacheKey = mediaCacheKey.trim();
   const signal = linkedAbortSignal(cache.taskController.signal, options.signal);
   throwIfAborted(signal);
-  if (urls.length === 0) {
-    throw new Error("媒体资源地址无效。");
+  if (!normalizedMediaCacheKey) {
+    throw new Error("媒体缓存标识无效。");
   }
 
-  const mediaCacheKey = buildRemoteMediaCacheKey(userId, urls);
-  const cached = cache.extractedAudio.get(mediaCacheKey);
+  const storageKey = buildStableRemoteMediaCacheKey(userId, normalizedMediaCacheKey);
+  const cached = cache.extractedAudio.get(storageKey);
   if (cached && (await readFileSize(cached.filePath)) > 0) {
     cached.lastAccessedAt = Date.now();
     return cached;
   }
-  cache.extractedAudio.delete(mediaCacheKey);
+  cache.extractedAudio.delete(storageKey);
 
-  const inflight = cache.extractedAudioTasks.get(mediaCacheKey);
+  const inflight = cache.extractedAudioTasks.get(storageKey);
   if (inflight) {
     return inflight;
   }
 
-  const task = cacheExtractedAudioFile(userId, mediaCacheKey, urls, cache, signal).finally(() => {
-    if (cache.extractedAudioTasks.get(mediaCacheKey) === task) {
-      cache.extractedAudioTasks.delete(mediaCacheKey);
+  const task = cacheExtractedAudioFile(storageKey, cache, signal).finally(() => {
+    if (cache.extractedAudioTasks.get(storageKey) === task) {
+      cache.extractedAudioTasks.delete(storageKey);
     }
   });
-  cache.extractedAudioTasks.set(mediaCacheKey, task);
+  cache.extractedAudioTasks.set(storageKey, task);
   return task;
 }
 
@@ -221,7 +232,7 @@ function exponentialDelay(attempt: number, baseDelayMs: number, maxDelayMs: numb
 export async function downloadRemoteMediaToCachedFile(
   userId: string,
   source: RemoteMediaSource,
-  options: AbortableOptions = {},
+  options: MediaCacheOptions = {},
 ): Promise<CachedRemoteMedia> {
   const cache = await readUserMediaCache(userId);
   const urls = normalizeRemoteMediaSource(source);
@@ -231,13 +242,11 @@ export async function downloadRemoteMediaToCachedFile(
     throw new Error("媒体资源地址无效。");
   }
 
-  const cacheKey = buildRemoteMediaCacheKey(userId, urls);
-  const cached = cache.remoteMedia.get(cacheKey);
-  if (cached && (await readFileSize(cached.filePath)) > 0) {
-    cached.lastAccessedAt = Date.now();
+  const cacheKey = buildRemoteMediaCacheKey(userId, urls, options.cacheKey);
+  const cached = await readCompletedRemoteMediaCache(cache, cacheKey);
+  if (cached) {
     return cached;
   }
-  cache.remoteMedia.delete(cacheKey);
 
   const inflight = cache.remoteMediaTasks.get(cacheKey);
   if (inflight) {
@@ -251,6 +260,34 @@ export async function downloadRemoteMediaToCachedFile(
   });
   cache.remoteMediaTasks.set(cacheKey, task);
   return task;
+}
+
+export async function streamRemoteMediaToCachedFile(
+  userId: string,
+  source: RemoteMediaSource,
+  options: MediaCacheOptions = {},
+): Promise<RemoteMediaCacheRead> {
+  const cache = await readUserMediaCache(userId);
+  const urls = normalizeRemoteMediaSource(source);
+  const signal = linkedAbortSignal(cache.taskController.signal, options.signal);
+  throwIfAborted(signal);
+  if (urls.length === 0) {
+    throw new Error("媒体资源地址无效。");
+  }
+
+  const cacheKey = buildRemoteMediaCacheKey(userId, urls, options.cacheKey);
+  const cached = await readCompletedRemoteMediaCache(cache, cacheKey);
+  if (cached) {
+    return { ...cached, kind: "cached" };
+  }
+
+  const inflight = cache.remoteMediaTasks.get(cacheKey);
+  if (inflight) {
+    const entry = await inflight;
+    return { ...entry, kind: "cached" };
+  }
+
+  return createCachingRemoteMediaStream(cacheKey, urls, cache, signal);
 }
 
 async function downloadMediaRange(
@@ -267,9 +304,7 @@ async function downloadMediaRange(
     const response = await fetch(url, {
       signal: fetchSignal,
       headers: {
-        accept: "video/mp4,audio/*,*/*;q=0.8",
-        referer: DOUYIN_REFERER,
-        "user-agent": DOUYIN_USER_AGENT,
+        ...mediaDownloadHeaders(),
         ...(offset > 0 ? { range: `bytes=${offset}-` } : {}),
       },
     });
@@ -302,6 +337,81 @@ async function downloadMediaRange(
   }
 }
 
+async function openRemoteMediaReadStream(
+  source: RemoteMediaSource,
+  signal: AbortSignal,
+): Promise<OpenedRemoteMediaStream> {
+  let lastError: unknown;
+  const urls = normalizeRemoteMediaSource(source);
+  throwIfAborted(signal);
+  if (urls.length === 0) {
+    throw new Error("媒体资源地址无效。");
+  }
+
+  for (let urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
+    throwIfAborted(signal);
+
+    for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await openMediaReadStream(urls[urlIndex], signal);
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableMediaDownloadError(lastError)) {
+          break;
+        }
+      }
+
+      if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
+        await delay(exponentialDelay(attempt, MEDIA_DOWNLOAD_RETRY_BASE_DELAY_MS, 5_000), signal);
+      }
+    }
+  }
+
+  if (lastError instanceof Error && lastError.name === "AbortError") {
+    throw lastError;
+  }
+  throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
+}
+
+type OpenedRemoteMediaStream = {
+  close: () => void;
+  response: Response;
+  sourceSignal: AbortSignal;
+  timeoutSignal: AbortSignal;
+};
+
+async function openMediaReadStream(url: string, signal: AbortSignal): Promise<OpenedRemoteMediaStream> {
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
+  const fetchSignal = linkedAbortSignal(timeoutController.signal, signal);
+  const close = () => clearTimeout(timeout);
+
+  try {
+    const response = await fetch(url, {
+      signal: fetchSignal,
+      headers: mediaDownloadHeaders(),
+    });
+
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return {
+      close,
+      response,
+      sourceSignal: signal,
+      timeoutSignal: timeoutController.signal,
+    };
+  } catch (error) {
+    close();
+    if (error instanceof Error && error.name === "AbortError") {
+      throw signal.aborted ? abortError() : new Error("媒体资源下载超时，请稍后重试或改用更短的视频。");
+    }
+    throw error;
+  }
+}
+
 function readTotalSize(response: Response, offset: number): number | null {
   const contentRange = response.headers.get("content-range");
   const totalFromRange = contentRange?.match(/\/(\d+)$/)?.[1];
@@ -312,6 +422,11 @@ function readTotalSize(response: Response, offset: number): number | null {
 
   const contentLength = Number(response.headers.get("content-length"));
   return Number.isFinite(contentLength) && contentLength > 0 ? offset + contentLength : null;
+}
+
+function readContentLength(response: Response): number | undefined {
+  const contentLength = Number(response.headers.get("content-length"));
+  return Number.isFinite(contentLength) && contentLength > 0 ? contentLength : undefined;
 }
 
 async function readFileSize(filePath: string): Promise<number> {
@@ -379,14 +494,205 @@ async function cacheRemoteMediaFile(
   }
 }
 
-async function cacheExtractedAudioFile(
-  userId: string,
+async function createCachingRemoteMediaStream(
   cacheKey: string,
   urls: string[],
   cache: UserMediaCache,
   signal: AbortSignal,
+): Promise<RemoteMediaCacheStream> {
+  const cacheDir = path.join(os.tmpdir(), "echolens-media-cache");
+  const filePath = path.join(cacheDir, `${cacheKey}.media`);
+  const partialPath = path.join(cacheDir, `${cacheKey}.part`);
+  await fs.mkdir(cacheDir, { recursive: true });
+  await fs.rm(partialPath, { force: true });
+
+  const opened = await openRemoteMediaReadStream(urls, signal);
+  const contentType = opened.response.headers.get("content-type") ?? undefined;
+  let resolveTask!: (entry: CachedRemoteMediaEntry) => void;
+  let rejectTask!: (error: unknown) => void;
+  const task = new Promise<CachedRemoteMediaEntry>((resolve, reject) => {
+    resolveTask = resolve;
+    rejectTask = reject;
+  }).finally(() => {
+    if (cache.remoteMediaTasks.get(cacheKey) === task) {
+      cache.remoteMediaTasks.delete(cacheKey);
+    }
+  });
+  task.catch(() => undefined);
+  cache.remoteMediaTasks.set(cacheKey, task);
+
+  return {
+    contentLength: readContentLength(opened.response),
+    contentType,
+    kind: "stream",
+    stream: cacheAndForwardRemoteMediaStream({
+      cache,
+      cacheKey,
+      contentType,
+      filePath,
+      opened,
+      partialPath,
+      rejectTask,
+      resolveTask,
+    }),
+  };
+}
+
+function cacheAndForwardRemoteMediaStream(options: {
+  cache: UserMediaCache;
+  cacheKey: string;
+  contentType?: string;
+  filePath: string;
+  opened: OpenedRemoteMediaStream;
+  partialPath: string;
+  rejectTask: (error: unknown) => void;
+  resolveTask: (entry: CachedRemoteMediaEntry) => void;
+}): ReadableStream<Uint8Array> {
+  const reader = options.opened.response.body?.getReader();
+  if (!reader) {
+    throw new Error("媒体资源响应无内容。");
+  }
+
+  let abortListener: (() => void) | null = null;
+  let file: Awaited<ReturnType<typeof fs.open>> | null = null;
+  let settled = false;
+
+  const cleanupPartial = async () => {
+    await file?.close().catch(() => undefined);
+    file = null;
+    await fs.rm(options.partialPath, { force: true }).catch(() => undefined);
+  };
+  const fail = async (error: unknown) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    options.opened.close();
+    if (abortListener) {
+      options.opened.sourceSignal.removeEventListener("abort", abortListener);
+    }
+    await reader.cancel(error).catch(() => undefined);
+    await cleanupPartial();
+    options.rejectTask(normalizeStreamingMediaError(error, options.opened));
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      abortListener = () => {
+        const error = abortError();
+        controller.error(error);
+        void fail(error);
+      };
+
+      if (options.opened.sourceSignal.aborted) {
+        abortListener();
+        return;
+      }
+
+      options.opened.sourceSignal.addEventListener("abort", abortListener, { once: true });
+      try {
+        file = await fs.open(options.partialPath, "w");
+      } catch (error) {
+        controller.error(error);
+        await fail(error);
+      }
+    },
+
+    async pull(controller) {
+      try {
+        throwIfAborted(options.opened.sourceSignal);
+        const chunk = await reader.read();
+        if (chunk.done) {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          options.opened.close();
+          if (abortListener) {
+            options.opened.sourceSignal.removeEventListener("abort", abortListener);
+          }
+          await file?.close();
+          file = null;
+          await fs.rm(options.filePath, { force: true });
+          await fs.rename(options.partialPath, options.filePath);
+
+          const entry = {
+            contentType: options.contentType,
+            filePath: options.filePath,
+            lastAccessedAt: Date.now(),
+          };
+          options.cache.remoteMedia.set(options.cacheKey, entry);
+          options.resolveTask(entry);
+          controller.close();
+          return;
+        }
+
+        await file?.write(chunk.value);
+        controller.enqueue(chunk.value);
+      } catch (error) {
+        const normalized = normalizeStreamingMediaError(error, options.opened);
+        controller.error(normalized);
+        await fail(normalized);
+      }
+    },
+
+    async cancel(reason) {
+      await fail(reason instanceof Error ? reason : abortError());
+    },
+  });
+}
+
+function normalizeStreamingMediaError(error: unknown, opened: OpenedRemoteMediaStream): unknown {
+  if (error instanceof Error && error.name === "AbortError") {
+    if (opened.sourceSignal.aborted) {
+      return abortError();
+    }
+    if (opened.timeoutSignal.aborted) {
+      return new Error("媒体资源下载超时，请稍后重试或改用更短的视频。");
+    }
+  }
+
+  return error;
+}
+
+async function readCompletedRemoteMediaCache(
+  cache: UserMediaCache,
+  cacheKey: string,
+): Promise<CachedRemoteMediaEntry | null> {
+  const cached = cache.remoteMedia.get(cacheKey);
+  if (cached && (await readFileSize(cached.filePath)) > 0) {
+    cached.lastAccessedAt = Date.now();
+    return cached;
+  }
+
+  cache.remoteMedia.delete(cacheKey);
+  return null;
+}
+
+async function readRequiredCompletedRemoteMediaCache(
+  cache: UserMediaCache,
+  cacheKey: string,
+): Promise<CachedRemoteMediaEntry> {
+  const cached = await readCompletedRemoteMediaCache(cache, cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const inflight = cache.remoteMediaTasks.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  throw new CompletedMediaCacheRequiredError("完整视频缓存未就绪，请先完成视频缓存后再转录。");
+}
+
+async function cacheExtractedAudioFile(
+  cacheKey: string,
+  cache: UserMediaCache,
+  signal: AbortSignal,
 ): Promise<CachedAudioEntry> {
-  const media = await downloadRemoteMediaToCachedFile(userId, urls, { signal });
+  const media = await readRequiredCompletedRemoteMediaCache(cache, cacheKey);
+  throwIfAborted(signal);
   const cacheDir = path.join(os.tmpdir(), "echolens-audio-cache");
   const filePath = path.join(cacheDir, `${cacheKey}.wav`);
   const partialPath = path.join(cacheDir, `${cacheKey}.wav.part`);
@@ -425,16 +731,16 @@ async function cacheExtractedAudioFile(
   return entry;
 }
 
-export async function prepareTranscribableWavAudio(
+export async function prepareTranscribableWavAudioFromCachedMedia(
   userId: string,
-  source: RemoteMediaSource,
+  mediaCacheKey: string,
   limits: AudioTranscriptionLimits = {
     maxBytes: MAX_TRANSCRIBE_AUDIO_BYTES,
     maxDurationSeconds: MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS,
   },
   options: AbortableOptions = {},
 ): Promise<TranscribableWavAudio> {
-  const audio = await extractAudioToCachedWav(userId, source, options);
+  const audio = await extractAudioToCachedWav(userId, mediaCacheKey, options);
   throwIfAborted(options.signal);
   const size = await readFileSize(audio.filePath);
   if (size > limits.maxBytes) {
@@ -580,8 +886,22 @@ async function deleteUserMediaCache(userId: string, cache: UserMediaCache): Prom
   userMediaCaches.delete(userId);
 }
 
-function buildRemoteMediaCacheKey(userId: string, urls: string[]): string {
-  return createHash("sha256").update(JSON.stringify([userId, urls])).digest("hex");
+function buildRemoteMediaCacheKey(userId: string, urls: string[], cacheKey?: string): string {
+  return cacheKey
+    ? buildStableRemoteMediaCacheKey(userId, cacheKey)
+    : createHash("sha256").update(JSON.stringify([userId, urls])).digest("hex");
+}
+
+function buildStableRemoteMediaCacheKey(userId: string, cacheKey: string): string {
+  return createHash("sha256").update(JSON.stringify([userId, "stable", cacheKey])).digest("hex");
+}
+
+function mediaDownloadHeaders(): Record<string, string> {
+  return {
+    accept: "video/mp4,audio/*,*/*;q=0.8",
+    referer: DOUYIN_REFERER,
+    "user-agent": DOUYIN_USER_AGENT,
+  };
 }
 
 function runFfmpeg(ffmpegPath: string, args: string[], signal?: AbortSignal): Promise<void> {

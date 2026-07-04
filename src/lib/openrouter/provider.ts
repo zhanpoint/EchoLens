@@ -1,14 +1,25 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
+import { buildSummaryPromptContent } from "@/lib/ai/prompts";
 import { fetchWithRetry } from "@/lib/http/retry";
-
-type ChatContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+import { readSseJsonStream } from "@/lib/http/sse";
 
 type OpenRouterError = {
   code?: number;
   message?: string;
   metadata?: Record<string, unknown>;
+};
+
+type OpenRouterChatPayload = {
+  choices?: Array<{
+    delta?: { content?: unknown };
+    message?: { content?: unknown };
+  }>;
+  error?: OpenRouterError;
+};
+
+type OpenRouterConfig = {
+  apiKey: string;
+  baseUrl: string;
 };
 
 const OPENROUTER_REQUEST_TIMEOUT_MS = 60_000;
@@ -28,99 +39,159 @@ export async function summarizeTranscript(
   }
 
   return callOpenRouter(
-    [
-      {
-        type: "text",
-        text: [
-          instruction,
-          "",
-          "只基于下面的转写文本总结，不要补充文本中没有的信息。",
-          "输出中文，结构清晰，保留关键实体、数字、结论和行动建议。",
-          "",
-          "转写文本：",
-          text,
-        ].join("\n"),
-      },
-    ],
+    buildSummaryPromptContent(text, instruction),
     {
       model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
     },
   );
 }
 
-export async function identifyImageContent(imageUrls: string[]): Promise<ProviderResult> {
-  if (imageUrls.length === 0) {
-    return { ok: false, code: "unavailable", detail: "没有采集到可识别的图片资源。" };
+export async function streamSummarizeTranscript(input: {
+  onDelta: (delta: string) => void;
+  prompt: string;
+  transcript: string;
+}): Promise<ProviderResult> {
+  const text = input.transcript.trim();
+  const instruction = input.prompt.trim();
+  if (!text) {
+    return { ok: false, code: "unavailable", detail: "没有可总结的转写文本。" };
+  }
+  if (!instruction) {
+    return { ok: false, code: "unavailable", detail: "请选择或填写总结提示词。" };
   }
 
-  return callOpenRouter([
-    {
-      type: "text",
-      text:
-        [
-          "只识别下面按顺序给出的图文笔记图片。",
-          "必须按固定格式输出：第1张图片、空行、该图片文字；第2张图片、空行、该图片文字。",
-          "每张图片都要单独成段，即使没有可见文字也输出“未识别到文字”。",
-          "不要识别或补充未提供的图片，不要编造看不清的内容。",
-        ].join("\n"),
-    },
-    ...imageUrls.flatMap(
-      (url, index): ChatContentPart[] => [
-        {
-          type: "text",
-          text: `第${index + 1}张图片`,
-        },
-        {
-          type: "image_url",
-          image_url: { url },
-        },
-      ],
-    ),
-  ]);
+  try {
+    const config = readOpenRouterConfig();
+    const response = await callOpenRouterChatCompletions(
+      config,
+      buildSummaryPromptContent(text, instruction),
+      {
+        model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
+        stream: true,
+      },
+    )
+      .catch((error: unknown) => {
+        throw new Error(formatOpenRouterNetworkError(error));
+      });
 
+    if (!response.ok) {
+      const payload = await readOpenRouterJsonResponse(response);
+      return readOpenRouterFailure(response, payload) ?? {
+        ok: false,
+        code: "error",
+        detail: formatOpenRouterError(response.status, undefined),
+      };
+    }
+    if (!response.body) {
+      return { ok: false, code: "unavailable", detail: "OpenRouter 没有返回流式内容。" };
+    }
+
+    let output = "";
+    for await (const payload of readSseJsonStream<OpenRouterChatPayload>(response.body)) {
+      if (payload.error) {
+        return {
+          ok: false,
+          code: "error",
+          detail: formatOpenRouterError(response.status, payload.error),
+        };
+      }
+
+      const delta = payload.choices?.[0]?.delta?.content;
+      if (typeof delta === "string" && delta) {
+        output += delta;
+        input.onDelta(delta);
+      }
+    }
+
+    if (!output.trim()) {
+      return { ok: false, code: "unavailable", detail: "模型没有返回可用文本。" };
+    }
+
+    return { ok: true, content: output.trim() };
+  } catch (error) {
+    return formatOpenRouterThrownError(error);
+  }
 }
 
 async function callOpenRouter(
-  content: ChatContentPart[],
-  options?: { model?: string },
+  content: string,
+  options: { model: string },
 ): Promise<ProviderResult> {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (!apiKey) {
-    return { ok: false, code: "not_configured", detail: "OPENROUTER_API_KEY 未配置。" };
+  let config: OpenRouterConfig;
+  try {
+    config = readOpenRouterConfig();
+  } catch (error) {
+    return formatOpenRouterThrownError(error);
   }
 
-  const baseUrl = (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/$/, "");
-  const model = options?.model || process.env.OPENROUTER_MODEL || "xiaomi/mimo-v2.5";
-  const response = await fetchWithRetry(`${baseUrl}/chat/completions`, {
+  const response = await callOpenRouterChatCompletions(config, content, {
+    model: options.model,
+  })
+    .catch((error: unknown) => {
+      throw new Error(formatOpenRouterNetworkError(error));
+    });
+
+  const payload = await readOpenRouterJsonResponse(response);
+  const failure = readOpenRouterFailure(response, payload);
+  if (failure) {
+    return failure;
+  }
+
+  const contentText = payload?.choices?.[0]?.message?.content;
+  if (typeof contentText !== "string" || !contentText.trim()) {
+    return { ok: false, code: "unavailable", detail: "模型没有返回可用文本。" };
+  }
+
+  return { ok: true, content: contentText.trim() };
+}
+
+async function callOpenRouterChatCompletions(
+  config: OpenRouterConfig,
+  content: string,
+  options: { model: string; stream?: boolean },
+): Promise<Response> {
+  return await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${apiKey}`,
+      authorization: `Bearer ${config.apiKey}`,
       "content-type": "application/json",
       "http-referer": "https://echolens.local",
       "x-title": "EchoLens",
     },
     body: JSON.stringify({
-      model,
+      model: options.model,
       messages: [
         {
           role: "user",
           content,
         },
       ],
+      ...(options.stream ? { stream: true } : {}),
     }),
     retry: { timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS },
-  })
-    .catch((error: unknown) => {
-      throw new Error(formatOpenRouterNetworkError(error));
-    });
+  });
+}
 
-  const payload = (await response.json().catch(() => null)) as
-    | {
-        choices?: Array<{ message?: { content?: unknown } }>;
-        error?: OpenRouterError;
-      }
-    | null;
+function readOpenRouterConfig(): OpenRouterConfig {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("OPENROUTER_API_KEY 未配置。");
+  }
 
+  return {
+    apiKey,
+    baseUrl: (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/$/, ""),
+  };
+}
+
+async function readOpenRouterJsonResponse(response: Response): Promise<OpenRouterChatPayload | null> {
+  return (await response.json().catch(() => null)) as OpenRouterChatPayload | null;
+}
+
+function readOpenRouterFailure(
+  response: Response,
+  payload: OpenRouterChatPayload | null,
+): ProviderResult | null {
   if (payload?.error) {
     return {
       ok: false,
@@ -137,12 +208,21 @@ async function callOpenRouter(
     };
   }
 
-  const contentText = payload?.choices?.[0]?.message?.content;
-  if (typeof contentText !== "string" || !contentText.trim()) {
-    return { ok: false, code: "unavailable", detail: "模型没有返回可用文本。" };
+  return null;
+}
+
+function formatOpenRouterThrownError(error: unknown): ProviderResult {
+  if (error instanceof Error) {
+    if (/OPENROUTER_API_KEY/.test(error.message)) {
+      return { ok: false, code: "not_configured", detail: error.message };
+    }
+    if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {
+      return { ok: false, code: "unavailable", detail: formatOpenRouterNetworkError(error) };
+    }
+    return { ok: false, code: "error", detail: error.message };
   }
 
-  return { ok: true, content: contentText.trim() };
+  return { ok: false, code: "error", detail: "OpenRouter 请求失败。" };
 }
 
 function formatOpenRouterNetworkError(error: unknown): string {

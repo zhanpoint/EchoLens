@@ -1,15 +1,10 @@
-export const DOUYIN_KINDS = ["video", "note", "article"] as const;
+export const DOUYIN_KINDS = ["video"] as const;
 export const MEDIA_ASSET_KINDS = ["cover", "video", "originalAudio"] as const;
-export const EXTRACTION_FEATURES = [
-  "imageContent",
-  "articleText",
-] as const;
 export const TRANSCRIPT_FEATURE = "audioTranscript" as const;
 
 export type DouyinKind = (typeof DOUYIN_KINDS)[number];
-export type ExtractionFeature = (typeof EXTRACTION_FEATURES)[number];
 export type TranscriptFeature = typeof TRANSCRIPT_FEATURE;
-export type ResultFeature = ExtractionFeature | TranscriptFeature;
+export type ResultFeature = TranscriptFeature;
 export type ExtractionStatus =
   | "success"
   | "unavailable"
@@ -49,21 +44,8 @@ export type ExtractionResult = {
   transcriptSegments?: TranscriptSegment[];
 };
 
-export type DouyinProcessResponse = {
-  work: ResolvedDouyinWork;
-  results: ExtractionResult[];
-};
-
-export const FEATURES_BY_KIND: Record<DouyinKind, ExtractionFeature[]> = {
-  video: [],
-  note: ["imageContent"],
-  article: ["articleText"],
-};
-
 export const FEATURE_LABELS: Record<ResultFeature, string> = {
   audioTranscript: "转录文本",
-  imageContent: "图片文字",
-  articleText: "文章内容",
 };
 
 export function getFeatureLabel(feature: ResultFeature): string {

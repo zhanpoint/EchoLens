@@ -5,9 +5,6 @@ import type { ResolvedDouyinWork } from "../../types/douyin";
 
 type DouyinDetailPayload = {
   aweme_detail?: {
-    article_info?: {
-      article_content?: unknown;
-    };
     author?: {
       nickname?: unknown;
       sec_uid?: unknown;
@@ -15,14 +12,10 @@ type DouyinDetailPayload = {
     };
     caption?: unknown;
     desc?: unknown;
-    images?: unknown;
     item_title?: unknown;
     itemTitle?: unknown;
     preview_title?: unknown;
     previewTitle?: unknown;
-    share_info?: {
-      share_desc_info?: unknown;
-    };
     video?: unknown;
   };
 };
@@ -52,12 +45,10 @@ const METADATA_REQUEST_TIMEOUT_MS = 12_000;
 export type DouyinWorkMetadata = {
   authorName?: string;
   authorUrl?: string;
-  articleText?: string;
   caption?: string;
   coverUrls?: string[];
   durationSeconds?: number;
   title?: string;
-  imageUrls?: string[];
   videoUrls?: string[];
 };
 
@@ -113,19 +104,17 @@ export function parseWorkMetadata(
 
   const author = detail.author;
   const secUid = readString(author?.sec_uid) ?? readString(author?.secUid);
-  const coverUrls = readCoverUrls(detail, kind);
+  const coverUrls = readCoverUrls(detail);
   const videoUrls = kind === "video" ? readVideoUrls(detail.video) : [];
   const durationSeconds = kind === "video" ? readVideoDurationSeconds(detail) : undefined;
 
   return {
     authorName: cleanText(readString(author?.nickname)),
     authorUrl: buildAuthorUrl(secUid, workId),
-    articleText: readArticleText(detail.article_info?.article_content),
-    caption: readCaption(detail, kind),
+    caption: readCaption(detail),
     coverUrls,
     durationSeconds,
     title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
-    imageUrls: kind === "note" ? readImageUrls(detail.images) : [],
     videoUrls,
   };
 }
@@ -300,30 +289,24 @@ function readAwemeDetail(payload: unknown): DouyinDetailPayload["aweme_detail"] 
 function hasMetadata(metadata: DouyinWorkMetadata): boolean {
   return Boolean(
     metadata.authorName ||
-    metadata.articleText ||
     metadata.caption ||
     metadata.title ||
     metadata.coverUrls?.length ||
-    metadata.videoUrls?.length ||
-    metadata.imageUrls?.length,
+    metadata.videoUrls?.length,
   );
 }
 
 export function selectResolvedTitle(
-  kind: DouyinKind,
+  _kind: DouyinKind,
   metadata: DouyinWorkMetadata,
 ): string | undefined {
-  return kind === "article"
-    ? metadata.title ?? metadata.caption
-    : metadata.caption ?? metadata.title;
+  return metadata.caption ?? metadata.title;
 }
 
 function hasPrimaryContent(metadata: DouyinWorkMetadata): boolean {
   return Boolean(
-    metadata.articleText ||
     metadata.coverUrls?.length ||
-    metadata.videoUrls?.length ||
-    metadata.imageUrls?.length,
+    metadata.videoUrls?.length,
   );
 }
 
@@ -332,18 +315,15 @@ function mergeMetadata(
   next: DouyinWorkMetadata,
 ): DouyinWorkMetadata {
   const coverUrls = uniqueMediaReferences([...(current.coverUrls ?? []), ...(next.coverUrls ?? [])]);
-  const imageUrls = uniqueMediaReferences([...(current.imageUrls ?? []), ...(next.imageUrls ?? [])]);
   const videoUrls = uniqueMediaReferences([...(current.videoUrls ?? []), ...(next.videoUrls ?? [])]);
 
   return {
     authorName: current.authorName ?? next.authorName,
     authorUrl: current.authorUrl ?? next.authorUrl,
-    articleText: current.articleText ?? next.articleText,
     caption: current.caption ?? next.caption,
     coverUrls,
     durationSeconds: current.durationSeconds ?? next.durationSeconds,
     title: current.title ?? next.title,
-    imageUrls,
     videoUrls,
   };
 }
@@ -380,19 +360,9 @@ function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function readArticleText(value: unknown): string | undefined {
-  const article = parseArticleContent(value);
-  return cleanText(stripArticleMarkdown(article?.markdown ?? article?.long_article_abstract));
-}
-
 function readCaption(
   detail: NonNullable<DouyinDetailPayload["aweme_detail"]>,
-  kind: DouyinKind | undefined,
 ): string | undefined {
-  if (kind === "note") {
-    return cleanText(stripSharePrefix(readString(detail.share_info?.share_desc_info)));
-  }
-
   return readBestCaption([
     readString(detail.caption),
     readString(detail.desc),
@@ -417,83 +387,14 @@ function isOutdatedClientNotice(value: string): boolean {
   return value.includes("版本过低") && value.includes("升级后可展示全部信息");
 }
 
-function parseArticleContent(value: unknown): { markdown?: string; long_article_abstract?: string } | null {
-  if (!value) {
-    return null;
-  }
-
-  if (typeof value === "string") {
-    try {
-      return parseArticleContent(JSON.parse(value));
-    } catch {
-      return null;
-    }
-  }
-
-  if (typeof value !== "object") {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  return {
-    markdown: readString(record.markdown),
-    long_article_abstract: readString(record.long_article_abstract),
-  };
-}
-
-function stripArticleMarkdown(value: string | undefined): string | undefined {
-  return value
-    ?.replace(/\\n/g, "\n")
-    ?.replace(/!\[[^\]]*]\([^)]*\)/g, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/?[^>]+>/g, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/\[[^\]]+]\([^)]*\)/g, "")
-    .replace(/[ \t]+\n/g, "\n");
-}
-
-function stripSharePrefix(value: string | undefined): string | undefined {
-  return value?.replace(/^#在抖音，记录美好生活#/u, "").trim();
-}
-
-function readImageUrls(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return uniqueMediaReferences(
-    value.flatMap((item) => {
-      if (!item || typeof item !== "object") {
-        return [];
-      }
-
-      return readPrimaryImageUrl(item as Record<string, unknown>) ?? [];
-    }),
-  );
-}
-
-function readPrimaryImageUrl(record: Record<string, unknown>): string | undefined {
-  return (
-    readUrlList(record.url_list ?? record.urlList)[0] ??
-    readUrlList(record.download_url_list ?? record.downloadUrlList)[0]
-  );
-}
-
 function readCoverUrls(
   detail: NonNullable<DouyinDetailPayload["aweme_detail"]>,
-  kind: DouyinKind | undefined,
 ): string[] {
   const video = detail.video && typeof detail.video === "object"
     ? detail.video as Record<string, unknown>
     : null;
 
-  return uniqueMediaReferences(
-    [
-      ...readCoverUrlsFromVideo(video),
-      ...(kind === "note" ? readImageUrls(detail.images) : []),
-    ],
-  );
+  return readCoverUrlsFromVideo(video);
 }
 
 function readCoverUrlsFromVideo(video: Record<string, unknown> | null): string[] {
