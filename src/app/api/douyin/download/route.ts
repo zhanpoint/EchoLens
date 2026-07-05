@@ -12,7 +12,6 @@ import {
   downloadRemoteMediaToCachedFile,
   prepareMediaCacheForWork,
   prepareTranscribableWavAudioFromCachedMedia,
-  streamRemoteMediaToCachedFile,
 } from "@/lib/media/audio";
 import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
 import { upsertAsrAudioCache } from "@/lib/transcript/db";
@@ -59,9 +58,7 @@ export async function GET(request: Request) {
   if (asset === "originalAudio") {
     try {
       const videoCacheKey = buildWorkMediaCacheKey(work, "video");
-      const audio = await prepareTranscribableWavAudioFromCachedMedia(user.id, videoCacheKey, undefined, {
-        signal: request.signal,
-      });
+      const audio = await prepareTranscribableWavAudioFromCachedMedia(user.id, videoCacheKey);
       const asrAudio = await uploadAsrAudioFile({
         filePath: audio.filePath,
         userId: user.id,
@@ -98,31 +95,20 @@ export async function GET(request: Request) {
 
   try {
     if (asset === "video") {
-      const media = await streamRemoteMediaToCachedFile(user.id, assetUrls, {
+      const media = await downloadRemoteMediaToCachedFile(user.id, assetUrls, {
         cacheKey: buildWorkMediaCacheKey(work, asset),
-        signal: request.signal,
       });
       const contentType = media.contentType ?? defaultContentType(asset);
-      if (media.kind === "cached") {
-        return await fileResponse(media.filePath, {
-          contentType,
-          filename: buildFilename(id, asset, contentType),
-          inline: isPreview,
-          range: requestRange,
-        });
-      }
-
-      return streamingMediaResponse(media.stream, {
-        contentLength: media.contentLength,
+      return await fileResponse(media.filePath, {
         contentType,
         filename: buildFilename(id, asset, contentType),
         inline: isPreview,
+        range: requestRange,
       });
     }
 
     const media = await downloadRemoteMediaToCachedFile(user.id, assetUrls, {
       cacheKey: buildWorkMediaCacheKey(work, asset),
-      signal: request.signal,
     });
     const contentType = media.contentType ?? defaultContentType(asset);
     return await fileResponse(media.filePath, {
@@ -134,28 +120,6 @@ export async function GET(request: Request) {
   } catch (error) {
     return downloadErrorResponse(error);
   }
-}
-
-function streamingMediaResponse(
-  stream: ReadableStream<Uint8Array>,
-  options: {
-    contentLength?: number;
-    contentType: string;
-    filename: string;
-    inline: boolean;
-  },
-): Response {
-  const headers = new Headers({
-    "cache-control": "no-store",
-    "content-type": options.contentType,
-    "content-disposition": `${options.inline ? "inline" : "attachment"}; filename="${options.filename}"`,
-    "x-accel-buffering": "no",
-  });
-  if (options.contentLength) {
-    headers.set("content-length", String(options.contentLength));
-  }
-
-  return new Response(stream, { headers });
 }
 
 async function fileResponse(

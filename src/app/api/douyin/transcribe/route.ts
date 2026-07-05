@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
+  cancelDashScopeAsrJob,
   DailyAsrQuotaExceededError,
   getDashScopeAsrModelForProfile,
   refreshDashScopeAsrJobWithOptions,
@@ -12,7 +13,7 @@ import {
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
 import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
-import { readAsrAudioCache } from "@/lib/transcript/db";
+import { readAsrAudioCache, upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 import {
   DOUYIN_KINDS,
@@ -47,9 +48,15 @@ const WorkSchema = z.object({
   title: z.string().optional(),
 }).strict();
 
+const HistoryWorkSchema = WorkSchema.extend({
+  historyRecordId: z.string().min(1).max(128),
+}).strict();
+
 const TranscribeSchema = z.object({
   audioObjectKey: z.string().min(1).max(512),
   audioUrl: z.string().url().max(4096),
+  clientJobId: z.string().min(1).max(128).optional(),
+  historyRecordId: z.string().min(1).max(128).optional(),
   diarizationEnabled: z.boolean().optional(),
   enableItn: z.boolean().optional(),
   model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE]).optional(),
@@ -66,7 +73,13 @@ type TranscribeStreamEvent =
   | { type: "running"; jobId: string; work?: z.infer<typeof WorkSchema> }
   | { type: "postprocess_start"; work?: z.infer<typeof WorkSchema> }
   | { type: "delta"; value: string }
-  | { type: "done"; results: ExtractionResult[]; status: "succeeded"; work?: z.infer<typeof WorkSchema> }
+  | {
+      type: "done";
+      historyRecord?: TranscriptHistoryRecord;
+      results: ExtractionResult[];
+      status: "succeeded";
+      work?: z.infer<typeof WorkSchema>;
+    }
   | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; work?: z.infer<typeof WorkSchema> };
 
 export async function POST(request: Request) {
@@ -111,12 +124,22 @@ export async function POST(request: Request) {
               enabled: true,
               onDelta,
             },
+            ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
+            ...(parsed.data.historyRecordId ? {
+              historyContext: {
+                historyRecordId: parsed.data.historyRecordId,
+                work,
+              },
+            } : {}),
+            signal: request.signal,
           },
         ),
         {
           fallbackAsrModel: asrOptions.model,
           work,
+          userId: user.id,
         },
+        request.signal,
       );
     } catch (error) {
       return NextResponse.json(
@@ -149,22 +172,58 @@ export async function GET(request: Request) {
         enabled: true,
         onDelta,
       },
+      signal: request.signal,
     }),
-    {},
+    {
+      userId: user.id,
+    },
+    request.signal,
   );
+}
+
+export async function DELETE(request: Request) {
+  const user = requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
+  const url = new URL(request.url);
+  const parsed = ReadJobSchema.safeParse({
+    jobId: url.searchParams.get("jobId"),
+  });
+  if (!parsed.success) {
+    return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
+  }
+
+  const canceled = await cancelDashScopeAsrJob(user.id, parsed.data.jobId);
+  return NextResponse.json({ canceled });
 }
 
 function streamTranscribeOperation(
   run: (input: { onDelta: (delta: string) => void }) => Promise<DashScopeAsrJobResult | null>,
   options: {
     fallbackAsrModel?: DashScopeAsrModel;
+    userId?: string;
     work?: z.infer<typeof WorkSchema>;
   },
+  signal?: AbortSignal,
 ): Response {
   const encoder = new TextEncoder();
+  let closed = false;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      const close = () => {
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
+      };
+      const abort = () => close();
+      signal?.addEventListener("abort", abort, { once: true });
       const send = (event: TranscribeStreamEvent) => {
+        if (closed || signal?.aborted) {
+          return;
+        }
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       };
 
@@ -179,6 +238,9 @@ function streamTranscribeOperation(
             send({ type: "delta", value: delta });
           },
         });
+        if (signal?.aborted) {
+          return;
+        }
 
         if (!result) {
           send({ type: "error", error: "转录任务不存在或已过期。", work: options.work });
@@ -198,13 +260,27 @@ function streamTranscribeOperation(
           return;
         }
 
+        const resultItem = transcriptionResult(result.result, options.fallbackAsrModel);
+        const historyContext = parseHistoryContext(result.historyContext);
+        const historyRecord = resultItem.content && historyContext && options.userId
+          ? saveTranscriptHistory({
+              result: resultItem,
+              userId: options.userId,
+              work: historyContext,
+            })
+          : undefined;
+
         send({
           type: "done",
-          results: [transcriptionResult(result.result, options.fallbackAsrModel)],
+          historyRecord,
+          results: [resultItem],
           status: "succeeded",
-          work: options.work,
+          work: options.work ?? historyContext,
         });
       } catch (error) {
+        if (signal?.aborted) {
+          return;
+        }
         if (error instanceof DailyAsrQuotaExceededError) {
           const retryAfter = Math.max(1, Math.ceil((error.resetAt - Date.now()) / 1000));
           send({
@@ -223,7 +299,8 @@ function streamTranscribeOperation(
           work: options.work,
         });
       } finally {
-        controller.close();
+        signal?.removeEventListener("abort", abort);
+        close();
       }
     },
   });
@@ -234,6 +311,43 @@ function streamTranscribeOperation(
       "content-type": "text/event-stream; charset=utf-8",
       "x-accel-buffering": "no",
     },
+  });
+}
+
+function parseHistoryContext(value: unknown): z.infer<typeof HistoryWorkSchema> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const context = value as { historyRecordId?: unknown; work?: unknown };
+  const parsed = HistoryWorkSchema.safeParse({
+    ...(context.work && typeof context.work === "object" ? context.work as Record<string, unknown> : {}),
+    historyRecordId: context.historyRecordId,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
+function saveTranscriptHistory(input: {
+  result: ExtractionResult;
+  userId: string;
+  work: z.infer<typeof HistoryWorkSchema>;
+}): TranscriptHistoryRecord | undefined {
+  if (!input.result.content) {
+    return undefined;
+  }
+
+  return upsertTranscriptHistoryRecord({
+    authorName: input.work.authorName,
+    durationSeconds: input.work.durationSeconds,
+    finalUrl: input.work.finalUrl,
+    id: input.work.historyRecordId,
+    inputUrl: input.work.inputUrl,
+    originalTitle: input.work.title,
+    transcriptContent: input.result.content,
+    transcriptSegments: input.result.transcriptSegments,
+    userId: input.userId,
+    workId: input.work.id,
+    workKey: buildWorkCacheKey(input.work),
+    workKind: input.work.kind,
   });
 }
 

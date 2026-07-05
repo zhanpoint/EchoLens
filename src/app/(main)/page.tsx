@@ -26,10 +26,11 @@ import {
   Plus,
   RefreshCw,
   Save,
-  ScanText,
   Search,
   Settings,
+  PanelLeft,
   Sparkles,
+  Square,
   Trash2,
   UserRound,
   Volume2,
@@ -54,6 +55,7 @@ import {
 import { createPortal } from "react-dom";
 import {
   TRANSCRIPT_FEATURE,
+  getFeatureLabel,
   type DouyinKind,
   type ExtractionResult,
   type MediaAssetKind,
@@ -73,12 +75,7 @@ type ApiError = {
   retryAfter?: number;
 };
 
-type ApiPayload = ApiError | { results: ExtractionResult[]; status: "failed" | "succeeded"; work?: ResolvedDouyinWork } | { translation?: string } | { work?: ResolvedDouyinWork };
-type TranscribeApiPayload =
-  | ApiError
-  | { jobId: string; status: "running"; work?: ResolvedDouyinWork }
-  | { results: ExtractionResult[]; status: "failed" | "succeeded"; work?: ResolvedDouyinWork };
-type TranslationPayload = ApiError;
+type ApiPayload = ApiError | Record<string, unknown>;
 type SegmentTranslation = {
   error?: string;
   isLoading: boolean;
@@ -131,17 +128,23 @@ type TranslationStreamEvent =
   | { type: "error"; error: string; code?: string };
 type SummaryStreamEvent =
   | { type: "delta"; value: string }
-  | { type: "done"; value: string }
+  | { summary?: TranscriptHistorySummary; type: "done"; value: string }
   | { type: "error"; error: string; code?: string };
 type TranscribeStreamEvent =
   | { type: "running"; jobId: string; work?: ResolvedDouyinWork }
   | { type: "postprocess_start"; work?: ResolvedDouyinWork }
   | { type: "delta"; value: string }
-  | { type: "done"; results: ExtractionResult[]; status: "succeeded"; work?: ResolvedDouyinWork }
+  | { historyRecord?: TranscriptHistoryRecord; type: "done"; results: ExtractionResult[]; status: "succeeded"; work?: ResolvedDouyinWork }
   | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; work?: ResolvedDouyinWork };
 type TranscribeStreamOutcome =
   | { type: "done" }
   | { type: "running"; jobId: string };
+type LiveTranscribeSession = {
+  historyRecordId: string;
+  jobId: string;
+  persisted: boolean;
+  workKey: string;
+};
 type CurrentUser = {
   email: string;
   id: string;
@@ -155,6 +158,35 @@ type CachedMediaAsset = {
   isLoading: boolean;
   url?: string;
   workKey: string;
+};
+
+type TranscriptHistoryRecord = {
+  authorName?: string;
+  createdAt: number;
+  displayTitle: string;
+  durationSeconds?: number;
+  finalUrl: string;
+  id: string;
+  inputUrl: string;
+  originalTitle: string;
+  transcriptContent: string;
+  transcriptSegments?: TranscriptSegment[];
+  updatedAt: number;
+  userId?: string;
+  workId: string;
+  workKey: string;
+  workKind: DouyinKind;
+};
+type TranscriptHistorySummary = {
+  content: string;
+  createdAt: number;
+  id: string;
+  promptId: string;
+  promptTitle: string;
+};
+type TranscriptHistoryDetail = {
+  record: TranscriptHistoryRecord;
+  summaries: TranscriptHistorySummary[];
 };
 
 type ClipboardDouyinInput = {
@@ -212,6 +244,38 @@ function isUnauthenticatedApiResponse(response: Response, payload: unknown): boo
     response.status === 401 &&
     Boolean(payload && typeof payload === "object" && "code" in payload && payload.code === "UNAUTHENTICATED")
   );
+}
+
+function getApiError(payload: unknown): ApiError | undefined {
+  if (!payload || typeof payload !== "object" || !("error" in payload)) {
+    return undefined;
+  }
+  const error = (payload as { error?: unknown }).error;
+  if (typeof error !== "string") {
+    return undefined;
+  }
+  const code = (payload as { code?: unknown }).code;
+  const retryAfter = (payload as { retryAfter?: unknown }).retryAfter;
+  return {
+    error,
+    ...(typeof code === "string" ? { code } : {}),
+    ...(typeof retryAfter === "number" ? { retryAfter } : {}),
+  };
+}
+
+function isResolvedWorkPayload(payload: unknown): payload is { work: ResolvedDouyinWork } {
+  if (!payload || typeof payload !== "object" || !("work" in payload)) {
+    return false;
+  }
+  const workValue = (payload as { work?: unknown }).work;
+  if (!workValue || typeof workValue !== "object") {
+    return false;
+  }
+  const work = workValue as Partial<ResolvedDouyinWork>;
+  return typeof work.finalUrl === "string" &&
+    typeof work.id === "string" &&
+    typeof work.inputUrl === "string" &&
+    (work.kind === "video" || work.kind === "note");
 }
 
 function getAvatarInitial(user: CurrentUser): string {
@@ -321,7 +385,7 @@ async function saveUserSetting(category: "transcript" | "translation", value: un
 
   if (!response.ok) {
     const payload = await readApiPayload(response, "设置保存失败。");
-    throw new Error("error" in payload ? payload.error : "设置保存失败。");
+    throw new Error(getApiError(payload)?.error || "设置保存失败。");
   }
 }
 
@@ -409,11 +473,11 @@ async function streamTranslationContent(input: {
     }),
   });
   if (!response.ok || !response.body) {
-    const payload = (await readApiPayload(response, "翻译失败。")) as TranslationPayload;
+    const payload = await readApiPayload(response, "翻译失败。");
     if (isUnauthenticatedApiResponse(response, payload)) {
       throw new AuthRequiredError();
     }
-    throw new Error("error" in payload ? payload.error : "翻译失败。");
+    throw new Error(getApiError(payload)?.error || "翻译失败。");
   }
 
   for await (const event of readJsonEventStream<TranslationStreamEvent>(response.body)) {
@@ -430,15 +494,24 @@ async function streamTranslationContent(input: {
 }
 
 async function streamSummaryContent(input: {
+  historyRecordId?: string;
   onDelta: (delta: string) => void;
-  onDone: (text: string) => void;
+  onDone: (text: string, summary?: TranscriptHistorySummary) => void;
   prompt: string;
+  promptId: string;
+  promptTitle: string;
   text: string;
 }): Promise<void> {
   const response = await fetch("/api/douyin/summarize", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: input.prompt, text: input.text }),
+    body: JSON.stringify({
+      historyRecordId: input.historyRecordId,
+      prompt: input.prompt,
+      promptId: input.promptId,
+      promptTitle: input.promptTitle,
+      text: input.text,
+    }),
   });
 
   if (!response.ok || !response.body) {
@@ -446,17 +519,86 @@ async function streamSummaryContent(input: {
     if (isUnauthenticatedApiResponse(response, payload)) {
       throw new AuthRequiredError();
     }
-    throw new Error("error" in payload ? payload.error : "AI处理失败。");
+    throw new Error(getApiError(payload)?.error || "AI处理失败。");
   }
 
   for await (const event of readJsonEventStream<SummaryStreamEvent>(response.body)) {
     if (event.type === "delta") {
       input.onDelta(event.value);
     } else if (event.type === "done") {
-      input.onDone(event.value);
+      input.onDone(event.value, event.summary);
     } else if (event.type === "error") {
       throw new Error(event.error);
     }
+  }
+}
+
+async function fetchTranscriptHistoryList(query = ""): Promise<TranscriptHistoryRecord[]> {
+  const params = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+  const response = await fetch(`/api/transcript-history${params}`, { cache: "no-store" });
+  const payload = await readApiPayload(response, "转录历史加载失败。") as ApiError | { records: TranscriptHistoryRecord[] };
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "转录历史加载失败。");
+  }
+  return "records" in payload ? payload.records : [];
+}
+
+async function fetchTranscriptHistoryDetail(id: string): Promise<TranscriptHistoryDetail> {
+  const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, { cache: "no-store" });
+  const payload = await readApiPayload(response, "转录历史加载失败。") as ApiError | TranscriptHistoryDetail;
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "转录历史加载失败。");
+  }
+  return payload as TranscriptHistoryDetail;
+}
+
+async function renameTranscriptHistory(id: string, displayTitle: string): Promise<TranscriptHistoryRecord> {
+  const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, {
+    body: JSON.stringify({ displayTitle }),
+    headers: { "content-type": "application/json" },
+    method: "PATCH",
+  });
+  const payload = await readApiPayload(response, "历史记录名称保存失败。") as ApiError | { record: TranscriptHistoryRecord };
+  if (!response.ok) {
+    throw new Error(getApiError(payload)?.error || "历史记录名称保存失败。");
+  }
+  return "record" in payload ? payload.record : Promise.reject(new Error("历史记录名称保存失败。"));
+}
+
+async function updateTranscriptHistoryTranscript(input: {
+  id: string;
+  transcriptContent: string;
+  transcriptSegments: TranscriptSegment[];
+}): Promise<TranscriptHistoryRecord> {
+  const response = await fetch(`/api/transcript-history/${encodeURIComponent(input.id)}`, {
+    body: JSON.stringify({
+      transcriptContent: input.transcriptContent,
+      transcriptSegments: input.transcriptSegments,
+    }),
+    headers: { "content-type": "application/json" },
+    method: "PATCH",
+  });
+  const payload = await readApiPayload(response, "转录文本保存失败。") as ApiError | { record: TranscriptHistoryRecord };
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "转录文本保存失败。");
+  }
+  return "record" in payload ? payload.record : Promise.reject(new Error("转录文本保存失败。"));
+}
+
+async function deleteTranscriptHistory(id: string): Promise<void> {
+  const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) {
+    const payload = await readApiPayload(response, "历史记录删除失败。") as ApiError;
+    throw new Error(payload.error || "历史记录删除失败。");
   }
 }
 
@@ -604,6 +746,7 @@ const TRANSCRIBE_POLL_TIMEOUT_MS = 10 * 60_000;
 const ASSET_CACHE_RETRY_ATTEMPTS = 3;
 const ASSET_CACHE_RETRY_BASE_DELAY_MS = 800;
 const AUTO_RESOLVE_DELAY_MS = 350;
+const RESULT_PANEL_BODY_CLASS = "content-scroll h-[min(65dvh,36rem)] min-h-[20rem] overflow-auto sm:h-[36rem]";
 const DEFAULT_TRANSLATION_CONFIG: TranslationConfig = {
   domains: "",
   targetLang: "",
@@ -655,12 +798,63 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, ms);
+    const abort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function createClientJobId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createHistoryRecordId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `history-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function historyRecordToResult(record: TranscriptHistoryRecord): ExtractionResult {
+  return {
+    feature: TRANSCRIPT_FEATURE,
+    label: getFeatureLabel(TRANSCRIPT_FEATURE),
+    status: "success",
+    source: "dashscope",
+    content: record.transcriptContent,
+    transcriptSegments: record.transcriptSegments,
+  };
+}
+
+function getWorkKey(work: Pick<ResolvedDouyinWork, "id" | "kind">): string {
+  return `${work.kind}:${work.id}`;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [input, setInput] = useState("");
   const [work, setWork] = useState<ResolvedDouyinWork | null>(null);
   const [results, setResults] = useState<ExtractionResult[]>([]);
+  const [liveTranscribeSession, setLiveTranscribeSession] = useState<LiveTranscribeSession | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [historyDetail, setHistoryDetail] = useState<TranscriptHistoryDetail | null>(null);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyList, setHistoryList] = useState<TranscriptHistoryRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [historySidebarOpen, setHistorySidebarOpen] = useState(true);
+  const [liveHistorySummariesByRecordId, setLiveHistorySummariesByRecordId] = useState<Record<string, TranscriptHistorySummary[]>>({});
   const [hasAcceptedUsage, setHasAcceptedUsage] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -673,13 +867,13 @@ export default function HomePage() {
   const [signedFilterWords, setSignedFilterWords] = useState("");
   const [emptyFilterWords, setEmptyFilterWords] = useState("");
   const [systemReservedFilter, setSystemReservedFilter] = useState(true);
-  const [pendingTranscribeJobId, setPendingTranscribeJobId] = useState("");
   const [transcribeStatusMessage, setTranscribeStatusMessage] = useState("");
   const [lastResolvedInput, setLastResolvedInput] = useState("");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const isReadingClipboardRef = useRef(false);
   const resolveRequestIdRef = useRef(0);
+  const transcribeAbortControllerRef = useRef<AbortController | null>(null);
   const transcribeRequestIdRef = useRef(0);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const redirectToLogin = useCallback(() => {
@@ -688,12 +882,14 @@ export default function HomePage() {
     router.push(`/login?next=${encodeURIComponent(next || "/")}`);
   }, [router]);
   const cachedAssets = useWorkAssetCache(work, redirectToLogin);
+  const isHistoryMode = Boolean(historyDetail);
 
   const normalizedInput = input.trim();
-  const isInputDirty = Boolean(work && normalizedInput !== lastResolvedInput);
+  const isInputDirty = Boolean(!isHistoryMode && work && normalizedInput !== lastResolvedInput);
   const activeKind = hasAcceptedUsage && work && !isInputDirty ? work.kind : null;
   const displayWork = activeKind ? work : null;
-  const activeWorkKey = displayWork ? `${displayWork.kind}:${displayWork.id}` : "";
+  const activeWorkKey = displayWork ? getWorkKey(displayWork) : "";
+  const activeLiveSession = liveTranscribeSession?.workKey === activeWorkKey ? liveTranscribeSession : null;
   const originalAudioCache = activeKind === "video" && cachedAssets.originalAudio?.workKey === activeWorkKey
     ? cachedAssets.originalAudio
     : undefined;
@@ -708,12 +904,18 @@ export default function HomePage() {
     ? originalAudioCache.error
     : "";
   const visibleResults = useMemo(
-    () => results.filter((result) => result.feature === TRANSCRIPT_FEATURE),
-    [results],
+    () => {
+      const sourceResults = historyDetail ? [historyRecordToResult(historyDetail.record)] : results;
+      return sourceResults.filter((result) => result.feature === TRANSCRIPT_FEATURE);
+    },
+    [historyDetail, results],
   );
+  const hasVisibleResults = visibleResults.length > 0;
+  const showTranscribeStage = Boolean(!isHistoryMode && activeKind && !hasVisibleResults);
   const canTranscribe = Boolean(
     hasAcceptedUsage &&
     work?.kind === "video" &&
+    !isHistoryMode &&
     !isInputDirty &&
     isOriginalAudioReady &&
     !isTranscribing,
@@ -739,16 +941,17 @@ export default function HomePage() {
     : undefined;
   const canStartTranscribe = canTranscribe &&
     (!speakerDiarizationEnabled || !supportsAsrEnhancementOptions || hasValidSpeakerCount);
-  const hasPendingTranscribeJob = Boolean(pendingTranscribeJobId);
-  const transcribeActionLabel = hasPendingTranscribeJob ? "获取结果" : "转录文本";
+  const hasPendingTranscribeJob = Boolean(activeLiveSession?.jobId);
+  const transcribeActionLabel = isTranscribing ? "正在转录" : hasPendingTranscribeJob ? "获取结果" : "转录文本";
   const canRunTranscribeAction = hasPendingTranscribeJob
     ? Boolean(
         hasAcceptedUsage &&
         work?.kind === "video" &&
-        !isInputDirty &&
-        !isTranscribing,
+        !isHistoryMode &&
+        !isInputDirty
       )
     : canStartTranscribe;
+  const canUseTranscribeAction = isTranscribing || canRunTranscribeAction;
 
   const ensureAuthenticated = useCallback((): boolean => {
     if (currentUser !== null) {
@@ -759,10 +962,142 @@ export default function HomePage() {
     return false;
   }, [currentUser, redirectToLogin]);
 
+  const loadHistoryList = useCallback(async (query = historySearchQuery) => {
+    if (!currentUser) {
+      setHistoryList([]);
+      return;
+    }
+
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      setHistoryList(await fetchTranscriptHistoryList(query));
+    } catch (loadError) {
+      if (isAuthRequiredError(loadError)) {
+        redirectToLogin();
+        return;
+      }
+      setHistoryError(readUserFacingError(loadError, "转录历史加载失败。"));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [currentUser, historySearchQuery, redirectToLogin]);
+
+  async function openHistoryRecord(id: string) {
+    if (!ensureAuthenticated()) {
+      return;
+    }
+
+    setHistoryError("");
+    try {
+      const detail = await fetchTranscriptHistoryDetail(id);
+      setHistoryDetail(detail);
+      setResults([]);
+      setError(null);
+      setHistoryDrawerOpen(false);
+    } catch (loadError) {
+      setHistoryError(readUserFacingError(loadError, "转录历史加载失败。"));
+    }
+  }
+
+  function startNewLiveSession() {
+    setHistoryDetail(null);
+    setLiveTranscribeSession(null);
+    setHistoryDrawerOpen(false);
+    setError(null);
+    setInput("");
+    setLastResolvedInput("");
+    setResults([]);
+    setTranscribeStatusMessage("");
+    setWork(null);
+  }
+
+  async function renameHistoryRecord(id: string, displayTitle: string) {
+    const nextRecord = await renameTranscriptHistory(id, displayTitle);
+    setHistoryList((current) => current.map((record) => record.id === id ? nextRecord : record));
+    setHistoryDetail((current) =>
+      current?.record.id === id ? { ...current, record: nextRecord } : current
+    );
+  }
+
+  async function removeHistoryRecord(id: string) {
+    await deleteTranscriptHistory(id);
+    setHistoryList((current) => current.filter((record) => record.id !== id));
+    if (historyDetail?.record.id === id) {
+      startNewLiveSession();
+    }
+  }
+
+  function addHistorySummary(recordId: string, summary: TranscriptHistorySummary | undefined) {
+    if (!summary) {
+      return;
+    }
+    setHistoryDetail((current) => current
+      ? {
+          ...current,
+          summaries: current.record.id === recordId
+            ? [summary, ...current.summaries.filter((item) => item.id !== summary.id)]
+            : current.summaries,
+        }
+      : current
+    );
+    setLiveHistorySummariesByRecordId((current) => ({
+      ...current,
+      [recordId]: [summary, ...(current[recordId] ?? []).filter((item) => item.id !== summary.id)],
+    }));
+  }
+
+  async function updateHistoryTranscript(input: {
+    recordId: string;
+    transcriptContent: string;
+    transcriptSegments: TranscriptSegment[];
+  }): Promise<TranscriptHistoryRecord> {
+    const nextRecord = await updateTranscriptHistoryTranscript({
+      id: input.recordId,
+      transcriptContent: input.transcriptContent,
+      transcriptSegments: input.transcriptSegments,
+    });
+
+    upsertHistoryListItem(nextRecord);
+    setHistoryDetail((current) =>
+      current?.record.id === nextRecord.id ? { ...current, record: nextRecord } : current
+    );
+    setResults((current) =>
+      current.map((result) =>
+        result.feature === TRANSCRIPT_FEATURE
+          ? {
+              ...result,
+              content: nextRecord.transcriptContent,
+              transcriptSegments: nextRecord.transcriptSegments,
+            }
+          : result
+      )
+    );
+    return nextRecord;
+  }
+
+  function upsertHistoryListItem(record: TranscriptHistoryRecord) {
+    setHistoryList((current) => [
+      record,
+      ...current.filter((item) => item.id !== record.id),
+    ].sort((first, second) => second.updatedAt - first.updatedAt));
+  }
+
   function updateSpecialWordFilterEnabled(checked: boolean) {
     setSpecialWordFilterEnabled(checked);
     setSpecialWordFilterPanelOpen(checked);
   }
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void loadHistoryList(historySearchQuery);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [currentUser, historySearchQuery, loadHistoryList]);
 
   function updateAsrModel(model: AsrModelId) {
     setAsrModel(model);
@@ -859,12 +1194,16 @@ export default function HomePage() {
         throw new AuthRequiredError();
       }
 
-      if (!response.ok || !("work" in payload) || !payload.work) {
-        throwApiError("error" in payload ? payload : undefined, "识别链接失败。");
+      if (!response.ok || !isResolvedWorkPayload(payload)) {
+        throwApiError(getApiError(payload), "识别链接失败。");
       }
 
       if (requestId !== resolveRequestIdRef.current) {
         return;
+      }
+      const resolvedWorkKey = getWorkKey(payload.work);
+      if (resolvedWorkKey !== activeWorkKey) {
+        setLiveTranscribeSession(null);
       }
       setLastResolvedInput(valueToResolve);
       setWork(payload.work);
@@ -890,7 +1229,7 @@ export default function HomePage() {
         setIsResolving(false);
       }
     }
-  }, [ensureAuthenticated, redirectToLogin]);
+  }, [activeWorkKey, ensureAuthenticated, redirectToLogin]);
 
   useEffect(() => {
     let isActive = true;
@@ -940,6 +1279,10 @@ export default function HomePage() {
   }, [hasAcceptedUsage, lastResolvedInput, normalizedInput, resolveInput]);
 
   async function transcribe() {
+    if (isTranscribing) {
+      await cancelTranscribe();
+      return;
+    }
     if (!work || isInputDirty || isTranscribing) {
       return;
     }
@@ -949,42 +1292,55 @@ export default function HomePage() {
 
     const requestId = transcribeRequestIdRef.current + 1;
     transcribeRequestIdRef.current = requestId;
+    const controller = new AbortController();
+    const sessionWorkKey = activeWorkKey;
+    const clientJobId = activeLiveSession?.jobId || createClientJobId();
+    const historyRecordId = activeLiveSession?.historyRecordId || createHistoryRecordId();
+    const nextLiveSession = { historyRecordId, jobId: clientJobId, persisted: false, workKey: sessionWorkKey };
+    transcribeAbortControllerRef.current = controller;
     setIsTranscribing(true);
     setError(null);
     setTranscribeStatusMessage("");
 
     try {
-      if (hasPendingTranscribeJob) {
-        await pollPendingTranscribeResult(pendingTranscribeJobId, requestId);
+      if (activeLiveSession?.jobId) {
+        await pollPendingTranscribeResult(activeLiveSession.jobId, requestId, controller.signal);
         return;
       }
 
-      if (!canStartTranscribe || !originalAudioCache?.asrAudioUrl || !originalAudioCache.asrAudioObjectKey) {
+      if (!canStartTranscribe || !sessionWorkKey || !originalAudioCache?.asrAudioUrl || !originalAudioCache.asrAudioObjectKey) {
         return;
       }
 
-      setTranscribeStatusMessage("正在提交转录任务...");
+      setLiveTranscribeSession(nextLiveSession);
+      setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
       const response = await fetch("/api/douyin/transcribe", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           audioObjectKey: originalAudioCache.asrAudioObjectKey,
           audioUrl: originalAudioCache.asrAudioUrl,
+          clientJobId,
           diarizationEnabled: supportsAsrEnhancementOptions && speakerDiarizationEnabled,
           ...(supportsQwenAsrOptions && qwenAsrItnEnabled ? { enableItn: true } : {}),
+          historyRecordId,
           model: asrModel,
           specialWordFilter,
           speakerCount: effectiveSpeakerCount,
           work,
         }),
+        signal: controller.signal,
       });
       const outcome = await consumeTranscribeResponse(response, "转录失败。");
       if (outcome.type === "running") {
-        setTranscribeStatusMessage("转录任务已提交，正在等待识别结果...");
+        setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
         setResults([]);
-        await pollPendingTranscribeResult(outcome.jobId, requestId);
+        await pollPendingTranscribeResult(outcome.jobId, requestId, controller.signal);
       }
     } catch (transcribeError) {
+      if (isAbortError(transcribeError)) {
+        return;
+      }
       if (isAuthRequiredError(transcribeError)) {
         redirectToLogin();
         return;
@@ -992,8 +1348,31 @@ export default function HomePage() {
       setTranscribeStatusMessage("");
       setError(readUserFacingError(transcribeError, "转录失败。"));
     } finally {
+      if (transcribeAbortControllerRef.current === controller) {
+        transcribeAbortControllerRef.current = null;
+      }
       setIsTranscribing(false);
     }
+  }
+
+  async function cancelTranscribe() {
+    const jobId = activeLiveSession?.jobId ?? "";
+    transcribeRequestIdRef.current += 1;
+    transcribeAbortControllerRef.current?.abort();
+    transcribeAbortControllerRef.current = null;
+    setLiveTranscribeSession(null);
+    setTranscribeStatusMessage("");
+    setIsTranscribing(false);
+    setError(null);
+
+    if (!jobId) {
+      return;
+    }
+
+    await fetch(`/api/douyin/transcribe?jobId=${encodeURIComponent(jobId)}`, {
+      cache: "no-store",
+      method: "DELETE",
+    }).catch(() => undefined);
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -1016,13 +1395,17 @@ export default function HomePage() {
     }
   }
 
-  async function pollPendingTranscribeResult(jobId: string, requestId: number) {
+  async function pollPendingTranscribeResult(
+    jobId: string,
+    requestId: number,
+    signal: AbortSignal,
+  ) {
     let elapsedMs = 0;
     let delayMs = TRANSCRIBE_POLL_INITIAL_DELAY_MS;
-    setPendingTranscribeJobId(jobId);
+    setLiveTranscribeSession((current) => current ? { ...current, jobId } : current);
 
-    while (requestId === transcribeRequestIdRef.current) {
-      const settled = await fetchPendingTranscribeResult(jobId);
+    while (requestId === transcribeRequestIdRef.current && !signal.aborted) {
+      const settled = await fetchPendingTranscribeResult(jobId, signal);
       if (settled) {
         return;
       }
@@ -1032,19 +1415,23 @@ export default function HomePage() {
         return;
       }
 
-      await sleep(delayMs);
+      await abortableSleep(delayMs, signal);
       elapsedMs += delayMs;
       delayMs = Math.min(TRANSCRIBE_POLL_MAX_DELAY_MS, Math.round(delayMs * 1.35));
     }
   }
 
-  async function fetchPendingTranscribeResult(jobId: string): Promise<boolean> {
+  async function fetchPendingTranscribeResult(
+    jobId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     if (!jobId) {
       return false;
     }
 
     const response = await fetch(`/api/douyin/transcribe?jobId=${encodeURIComponent(jobId)}`, {
       cache: "no-store",
+      signal,
     });
     const outcome = await consumeTranscribeResponse(response, "转录结果获取失败。");
     return outcome.type === "done";
@@ -1053,11 +1440,11 @@ export default function HomePage() {
   async function consumeTranscribeResponse(response: Response, fallback: string): Promise<TranscribeStreamOutcome> {
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.includes("text/event-stream") || !response.body) {
-      const payload = await readApiPayload(response, fallback) as TranscribeApiPayload;
+      const payload = await readApiPayload(response, fallback) as ApiError;
       if (isUnauthenticatedApiResponse(response, payload)) {
         throw new AuthRequiredError();
       }
-      return applyTranscribePayload(response, payload, fallback);
+      throw new Error(payload.error || fallback);
     }
 
     for await (const event of readJsonEventStream<TranscribeStreamEvent>(response.body)) {
@@ -1069,7 +1456,12 @@ export default function HomePage() {
           setLastResolvedInput(normalizedInput);
           setWork((current) => mergeResolvedWork(current, eventWork));
         }
-        setPendingTranscribeJobId(event.jobId);
+        const eventWorkKey = eventWork ? getWorkKey(eventWork) : activeWorkKey;
+        setLiveTranscribeSession((current) =>
+          current
+            ? { ...current, jobId: event.jobId }
+            : { historyRecordId: createHistoryRecordId(), jobId: event.jobId, persisted: false, workKey: eventWorkKey }
+        );
         setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
         return { type: "running", jobId: event.jobId };
       } else if (event.type === "done") {
@@ -1077,8 +1469,19 @@ export default function HomePage() {
         if (eventWork) {
           setWork((current) => mergeResolvedWork(current, eventWork));
         }
+        let persistedSession: LiveTranscribeSession | null = null;
+        if (event.historyRecord) {
+          const record = event.historyRecord;
+          upsertHistoryListItem(record);
+          const historyWorkKey = getWorkKey({
+            id: record.workId,
+            kind: record.workKind,
+          });
+          persistedSession = { historyRecordId: record.id, jobId: "", persisted: true, workKey: historyWorkKey };
+        }
+        void loadHistoryList("");
         setLastResolvedInput(normalizedInput);
-        setPendingTranscribeJobId("");
+        setLiveTranscribeSession((current) => persistedSession ?? (current ? { ...current, jobId: "" } : current));
         setTranscribeStatusMessage("");
         setResults(orderResults(event.results, [TRANSCRIPT_FEATURE]));
         return { type: "done" };
@@ -1089,48 +1492,14 @@ export default function HomePage() {
 
     throw new Error(fallback);
   }
-
-  function applyTranscribePayload(
-    response: Response,
-    payload: TranscribeApiPayload,
-    fallback: string,
-  ): TranscribeStreamOutcome {
-    const transcribedWork = "work" in payload ? payload.work : undefined;
-    if (!response.ok) {
-      throw new Error("error" in payload ? payload.error : fallback);
-    }
-
-    if ("results" in payload) {
-      if (transcribedWork) {
-        setWork((current) => mergeResolvedWork(current, transcribedWork));
-      }
-      setLastResolvedInput(normalizedInput);
-      setPendingTranscribeJobId("");
-      setTranscribeStatusMessage("");
-      setResults(orderResults(payload.results, [TRANSCRIPT_FEATURE]));
-      return { type: "done" };
-    }
-
-    if ("jobId" in payload) {
-      if (transcribedWork) {
-        setWork((current) => mergeResolvedWork(current, transcribedWork));
-      }
-      setLastResolvedInput(normalizedInput);
-      setPendingTranscribeJobId(payload.jobId);
-      setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
-      return { type: "running", jobId: payload.jobId };
-    }
-
-    throw new Error("error" in payload ? payload.error : fallback);
-  }
-
   function updateInput(value: string) {
     const nextValue = value.trim();
     if (!nextValue || nextValue !== lastResolvedInput) {
       resolveRequestIdRef.current += 1;
       transcribeRequestIdRef.current += 1;
-      setPendingTranscribeJobId("");
+      setLiveTranscribeSession(null);
       setTranscribeStatusMessage("");
+      setHistoryDetail(null);
       setWork(null);
       setResults([]);
       setLastResolvedInput("");
@@ -1145,8 +1514,9 @@ export default function HomePage() {
   function clearInput() {
     resolveRequestIdRef.current += 1;
     transcribeRequestIdRef.current += 1;
-    setPendingTranscribeJobId("");
+    setLiveTranscribeSession(null);
     setTranscribeStatusMessage("");
+    setHistoryDetail(null);
     setInput("");
     setWork(null);
     setResults([]);
@@ -1162,8 +1532,38 @@ export default function HomePage() {
   }
 
   return (
-    <main className="app-shell min-h-[100dvh] overflow-x-hidden bg-background text-foreground">
-      <div className="relative z-10 mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-5 px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 sm:px-5 sm:py-7 md:gap-7 md:py-10">
+    <main className="app-shell h-[100dvh] overflow-hidden bg-background text-foreground">
+      <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
+        <TranscriptHistorySidebar
+          activeId={historyDetail?.record.id}
+          error={historyError}
+          isDrawerOpen={historyDrawerOpen}
+          isOpen={historySidebarOpen}
+          isLoading={historyLoading}
+          onCloseDrawer={() => setHistoryDrawerOpen(false)}
+          onDelete={(id) => void removeHistoryRecord(id)}
+          onNew={startNewLiveSession}
+          onOpen={(id) => void openHistoryRecord(id)}
+          onRename={(id, displayTitle) => void renameHistoryRecord(id, displayTitle)}
+          onSearch={setHistorySearchQuery}
+          onToggle={() => setHistorySidebarOpen((open) => !open)}
+          query={historySearchQuery}
+          records={historyList}
+        />
+        <div
+          className={cn(
+            "content-scroll flex h-full min-w-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 sm:px-5 md:gap-7 md:py-10",
+            historySidebarOpen ? "md:max-w-6xl" : "md:max-w-none",
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => setHistoryDrawerOpen(true)}
+            className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08] md:hidden"
+          >
+            <PanelLeft className="size-4" aria-hidden="true" />
+            转录历史
+          </button>
         <div className="relative min-h-12 pr-12 sm:pr-36">
           <div className="flex min-w-0 items-center justify-start gap-3">
             <Image
@@ -1251,6 +1651,7 @@ export default function HomePage() {
           </div>
         </div>
 
+        {!isHistoryMode ? (
         <form onSubmit={submit} className="flex flex-col gap-2">
           <label className="order-1 flex min-w-0 cursor-pointer items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
             <span className="relative mt-0.5 shrink-0">
@@ -1318,24 +1719,24 @@ export default function HomePage() {
             <button
               type="submit"
               disabled={!hasAcceptedUsage || isResolving || !normalizedInput}
-              className="inline-flex h-12 w-full items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
+              className="inline-flex h-12 w-full items-center justify-center rounded-md border border-cyan/65 bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition duration-150 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:translate-y-0 disabled:border-transparent disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
             >
               {isResolving ? "检测中" : "智能检测"}
             </button>
           </div>
         </form>
+        ) : null}
 
+        {!isHistoryMode ? (
         <section
           className={cn(
-            "relative overflow-hidden rounded-lg border p-4 sm:p-5",
-            activeKind
-              ? "border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
-              : "empty-link-state border-cyan/35",
+            "work-flow-panel shrink-0 rounded-lg border border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
+            hasVisibleResults ? "min-h-[10.5rem] overflow-hidden p-4 sm:p-5" : "overflow-visible p-0",
           )}
         >
           {activeKind ? (
-            <div className="mb-4 pb-2">
-              <div className="flex flex-wrap items-start gap-x-5 gap-y-4 text-left text-sm xl:flex-nowrap">
+            <div className={cn("relative z-10", hasVisibleResults ? "" : "px-4 pt-4 sm:px-5 sm:pt-5")}>
+              <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-5 gap-y-4 text-left text-sm xl:flex-nowrap">
                 <dl className="contents">
                   <InfoRow className="w-24 shrink-0" label="作品类型" singleLine value={KIND_LABELS[activeKind]} />
                   <InfoRow
@@ -1353,49 +1754,46 @@ export default function HomePage() {
                     singleLine
                   />
                 </dl>
-                {displayWork ? <WorkDownloadActions cachedAssets={cachedAssets} work={displayWork} /> : null}
+                {displayWork ? (
+                  <WorkDownloadActions
+                    cachedAssets={cachedAssets}
+                    work={displayWork}
+                  />
+                ) : null}
               </div>
               <WorkTitleRow title={displayWork?.title} />
             </div>
-          ) : null}
-
-          {activeKind ? null : (
-            <div className="grid gap-3 md:grid-cols-3">
-              <div className="relative z-10 flex min-h-36 flex-col items-center justify-center gap-2 p-6 text-center md:col-span-3">
-                <div className="text-base font-semibold text-foreground">
-                  {isResolving ? "正在识别作品" : "等待作品链接"}
+          ) : (
+            <div className="relative z-10 px-4 py-8 sm:px-5">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="relative z-10 flex min-h-20 flex-col items-center justify-center gap-2 text-center md:col-span-3">
+                  <div className="text-base font-semibold text-foreground">
+                    {isResolving ? "正在识别作品" : "等待作品链接"}
+                  </div>
+                  <p className="mobile-readable max-w-md text-sm leading-6 text-muted-foreground">
+                    {isResolving ? "正在识别视频作品。" : "粘贴视频链接后，EchoLens 会自动准备转录流程。"}
+                  </p>
                 </div>
-                <p className="mobile-readable max-w-md text-sm leading-6 text-muted-foreground">
-                  {isResolving ? "正在识别视频作品。" : "粘贴视频链接后，EchoLens 会自动准备转录流程。"}
-                </p>
               </div>
             </div>
           )}
 
           {error ? (
-            <div className="mt-5 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-destructive">
+            <div className={cn(
+              "relative z-10 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-destructive",
+              hasVisibleResults ? "mt-5" : "mt-3 sm:px-5",
+            )}>
               <AlertCircle className="size-4 shrink-0" />
               <span>{error}</span>
             </div>
           ) : null}
 
-        </section>
-
-        <section
-          className="overflow-hidden rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
-        >
-          {visibleResults.length > 0 ? (
-            <div className="grid gap-5">
-              {visibleResults.map((result) => (
-                <ResultBlock key={result.feature} onAuthRequired={redirectToLogin} result={result} />
-              ))}
-            </div>
-          ) : (
-          <EmptyResults
-            actionBusy={isTranscribing}
-            actionDisabled={!canRunTranscribeAction}
-            actionLabel={transcribeActionLabel}
-            configSlot={
+          {showTranscribeStage ? (
+            <EmptyResults
+              actionBusy={isTranscribing}
+              actionDisabled={!canUseTranscribeAction}
+              actionLabel={transcribeActionLabel}
+              configSlot={
                 activeKind === "video" && supportsAsrEnhancementOptions && specialWordFilterEnabled && specialWordFilterPanelOpen ? (
                   <SpecialWordFilterPanel
                     disabled={isTranscribing}
@@ -1424,7 +1822,7 @@ export default function HomePage() {
                     {hasPendingTranscribeJob ? (
                       <p className="mt-2 text-center text-xs text-muted-foreground">
                         <LoadingText>
-                          {transcribeStatusMessage || "转录任务已提交，正在等待识别结果..."}
+                          {transcribeStatusMessage || "转录任务处理中，完成后会自动展示结果..."}
                         </LoadingText>
                       </p>
                     ) : null}
@@ -1464,10 +1862,39 @@ export default function HomePage() {
               }
               onAction={activeKind === "video" ? transcribe : undefined}
             />
-          )}
+          ) : null}
         </section>
+        ) : null}
+
+        {hasVisibleResults ? (
+          <section
+            className="rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
+          >
+            <div className="grid gap-5">
+              {visibleResults.map((result) => (
+                <ResultBlock
+                  history={historyDetail ? {
+                    onSummarySaved: addHistorySummary,
+                    onTranscriptSaved: updateHistoryTranscript,
+                    recordId: historyDetail.record.id,
+                    summaries: historyDetail.summaries,
+                  } : activeLiveSession?.persisted ? {
+                    onSummarySaved: addHistorySummary,
+                    onTranscriptSaved: updateHistoryTranscript,
+                    recordId: activeLiveSession.historyRecordId,
+                    summaries: liveHistorySummariesByRecordId[activeLiveSession.historyRecordId] ?? [],
+                  } : undefined}
+                  key={result.feature}
+                  onAuthRequired={redirectToLogin}
+                  result={result}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <LegalNoticeFooter />
+        </div>
       </div>
     </main>
   );
@@ -1478,6 +1905,231 @@ function LegalNoticeFooter() {
     <footer className="flex flex-wrap items-center justify-center gap-2 px-2 pb-1 text-xs text-muted-foreground sm:gap-x-4">
       <Link className="rounded-sm px-1.5 py-1 transition hover:text-cyan" href="/legal">法律声明</Link>
     </footer>
+  );
+}
+
+function TranscriptHistorySidebar({
+  activeId,
+  error,
+  isDrawerOpen,
+  isLoading,
+  isOpen,
+  onCloseDrawer,
+  onDelete,
+  onNew,
+  onOpen,
+  onRename,
+  onSearch,
+  onToggle,
+  query,
+  records,
+}: {
+  activeId?: string;
+  error: string;
+  isDrawerOpen: boolean;
+  isLoading: boolean;
+  isOpen: boolean;
+  onCloseDrawer: () => void;
+  onDelete: (id: string) => void;
+  onNew: () => void;
+  onOpen: (id: string) => void;
+  onRename: (id: string, displayTitle: string) => void;
+  onSearch: (query: string) => void;
+  onToggle: () => void;
+  query: string;
+  records: TranscriptHistoryRecord[];
+}) {
+  const content = (
+    <div className="flex h-full min-h-0 flex-col px-2 py-2">
+      <div className="mb-5 flex h-10 items-center justify-between px-1">
+        <span className="text-sm font-semibold text-foreground">转录历史</span>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="hidden size-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:inline-flex"
+          aria-label={isOpen ? "收起侧栏" : "展开侧栏"}
+          title={isOpen ? "收起侧栏" : "展开侧栏"}
+        >
+          <PanelLeft className="size-5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={onCloseDrawer}
+          className="inline-flex size-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:hidden"
+          aria-label="关闭转录历史"
+          title="关闭"
+        >
+          <X className="size-5" aria-hidden="true" />
+        </button>
+      </div>
+      <div className="grid gap-1">
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
+        >
+          <Plus className="size-5 shrink-0 text-cyan" aria-hidden="true" />
+          新建转录
+        </button>
+        <label className="flex h-10 items-center gap-3 rounded-md px-3 text-sm text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
+          <Search className="size-5 shrink-0 text-cyan" aria-hidden="true" />
+          <input
+            value={query}
+            onChange={(event) => onSearch(event.target.value)}
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+            placeholder="搜索历史"
+          />
+        </label>
+      </div>
+      <div className="mt-7 px-3 text-sm font-semibold text-foreground">最近</div>
+      <div className="content-scroll mt-2 min-h-0 flex-1 overflow-auto pb-3">
+        {error ? <div className="px-2 py-2 text-xs text-amber">{error}</div> : null}
+        {isLoading ? (
+          <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin text-cyan" />
+            加载中
+          </div>
+        ) : null}
+        {records.map((record) => (
+          <TranscriptHistoryItem
+            active={record.id === activeId}
+            key={`${record.id}:${record.displayTitle}`}
+            onDelete={() => onDelete(record.id)}
+            onOpen={() => onOpen(record.id)}
+            onRename={(displayTitle) => onRename(record.id, displayTitle)}
+            record={record}
+          />
+        ))}
+        {!isLoading && records.length === 0 ? (
+          <div className="px-2 py-10 text-center text-xs leading-5 text-muted-foreground">暂无转录历史</div>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <aside
+        className={cn(
+          "hidden h-full shrink-0 border-r border-white/10 bg-background/90 backdrop-blur md:block",
+          isOpen ? "w-60" : "w-14",
+        )}
+      >
+        {isOpen ? content : (
+          <div className="flex h-full w-full flex-col items-center gap-3 py-2">
+            <button
+              type="button"
+              onClick={onToggle}
+              className="inline-flex size-10 items-center justify-center rounded-md text-foreground transition hover:bg-white/10 hover:text-cyan"
+              aria-label="展开侧栏"
+              title="展开侧栏"
+            >
+              <PanelLeft className="size-5" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={onNew}
+              className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
+              aria-label="新建转录"
+              title="新建转录"
+            >
+              <Plus className="size-5" aria-hidden="true" />
+            </button>
+          </div>
+        )}
+      </aside>
+      {isDrawerOpen ? (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm md:hidden">
+          <aside className="h-full w-[min(21rem,88vw)] border-r border-white/12 bg-background shadow-2xl shadow-black/50">
+            {content}
+          </aside>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function TranscriptHistoryItem({
+  active,
+  onDelete,
+  onOpen,
+  onRename,
+  record,
+}: {
+  active: boolean;
+  onDelete: () => void;
+  onOpen: () => void;
+  onRename: (displayTitle: string) => void;
+  record: TranscriptHistoryRecord;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(record.displayTitle);
+
+  function save() {
+    const title = draft.trim();
+    if (!title) {
+      setDraft(record.displayTitle);
+      setEditing(false);
+      return;
+    }
+    if (title !== record.displayTitle) {
+      onRename(title);
+    }
+    setEditing(false);
+  }
+
+  return (
+    <div className={cn(
+      "group mb-1 rounded-md transition",
+      active ? "bg-cyan/[0.12] text-cyan" : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+    )}>
+      {editing ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            save();
+          }}
+          className="flex items-center gap-1 p-1"
+        >
+          <input
+            autoFocus
+            value={draft}
+            onBlur={save}
+            onChange={(event) => setDraft(event.target.value)}
+            className="h-8 min-w-0 flex-1 rounded bg-black/30 px-2 text-sm outline-none ring-1 ring-cyan/40"
+          />
+        </form>
+      ) : (
+        <div className="flex min-w-0 items-center gap-1 px-1 py-1">
+          <button
+            type="button"
+            onClick={onOpen}
+            className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-sm"
+            title={record.displayTitle}
+          >
+            {record.displayTitle}
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-cyan/[0.1] hover:text-cyan group-hover:opacity-100"
+            aria-label="修改历史名称"
+            title="修改名称"
+          >
+            <PencilLine className="size-3.5" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+            aria-label="删除历史记录"
+            title="删除"
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1500,37 +2152,34 @@ function EmptyResults({
   notice?: ReactNode;
   onAction?: () => void;
 }) {
+  const hasConfig = Boolean(configSlot);
+
   return (
-    <div className={cn("empty-result-stage", configSlot ? "min-h-80" : "min-h-60")}>
-      <div
-        className="relative z-10 flex h-11 w-28 items-center justify-center text-cyan/75"
-        aria-hidden="true"
-      >
-        <span className="h-px w-full bg-gradient-to-r from-transparent via-cyan/35 to-transparent" />
-        <ScanText className="absolute size-5 drop-shadow-[0_0_10px_rgb(34_211_238_/_0.18)]" />
+    <div className={cn("empty-result-stage", hasConfig && "empty-result-stage--expanded")}>
+      <div className="empty-result-main">
+        <p className="animated-gradient-text empty-result-message mobile-readable relative z-10 max-w-[34rem] text-center text-sm font-semibold leading-6">
+          使用Echolens，将任何抖音作品内容即时转化为有用的可视化笔记。
+        </p>
+        {notice ? <div className="relative z-10 w-full max-w-[34rem]">{notice}</div> : null}
       </div>
-      <p className="mobile-readable relative z-10 max-w-[34rem] text-center text-sm font-medium leading-6 text-foreground/85">
-        使用Echolens，将任何抖音作品内容即时转化为有用的可视化笔记。
-      </p>
-      {notice ? <div className="relative z-10 mt-3 w-full max-w-[34rem]">{notice}</div> : null}
-      <div className="absolute inset-x-4 bottom-4 z-20 grid gap-3">
+      <div className="empty-result-actions relative z-20 grid w-full gap-3">
         {configSlot ? <div className="min-w-0">{configSlot}</div> : null}
-        <div className="grid min-w-0 gap-3 sm:flex sm:flex-wrap sm:items-center">
-          <div className="min-w-0 sm:flex-1">{actionSlot}</div>
-          <div className="grid min-w-0 gap-2 sm:ml-auto sm:flex sm:shrink-0 sm:items-center sm:gap-3">
+        <div className="grid min-w-0 gap-3 md:flex md:flex-nowrap md:items-center md:justify-between">
+          <div className="min-w-0 md:flex-1">{actionSlot}</div>
+          <div className="grid min-w-0 gap-2 sm:flex sm:items-center sm:justify-end sm:gap-3 md:shrink-0">
             <div className="min-w-0">{modelSlot}</div>
             <button
               type="button"
               onClick={() => onAction?.()}
               disabled={actionDisabled || !onAction}
               className={cn(
-                "inline-flex h-9 w-full shrink-0 items-center justify-center gap-2 rounded-md px-4 text-sm font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed sm:w-auto",
+                "inline-flex h-9 w-full shrink-0 items-center justify-center gap-2 rounded-md border px-4 text-sm font-semibold transition duration-150 active:scale-[0.98] disabled:cursor-not-allowed sm:w-auto",
                 actionDisabled || !onAction
-                  ? "bg-white/[0.055] text-muted-foreground"
-                  : "bg-cyan text-black shadow-lg shadow-cyan/15 hover:brightness-110",
+                  ? "border-transparent bg-white/[0.055] text-muted-foreground"
+                  : "border-cyan/65 bg-cyan text-black shadow-lg shadow-cyan/15 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0",
               )}
             >
-              {actionBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+              {actionBusy ? <Square className="size-4 fill-current" aria-hidden="true" /> : null}
               {actionLabel}
             </button>
           </div>
@@ -1730,8 +2379,19 @@ function AsrModelSelect({
       const viewportPadding = 8;
       const gap = 8;
       const width = Math.min(ASR_MODEL_PANEL_WIDTH, window.innerWidth - viewportPadding * 2);
-      const left = Math.max(viewportPadding, buttonRect.left - width - gap);
-      const top = Math.max(viewportPadding, buttonRect.top - gap - panelRect.height);
+      const bottomSpace = window.innerHeight - buttonRect.bottom;
+      const topSpace = buttonRect.top;
+      const opensBelow = bottomSpace >= panelRect.height + gap || bottomSpace >= topSpace;
+      const preferredLeft = buttonRect.right - width;
+      const left = Math.min(
+        window.innerWidth - viewportPadding - width,
+        Math.max(viewportPadding, preferredLeft),
+      );
+      const preferredTop = opensBelow ? buttonRect.bottom + gap : buttonRect.top - gap - panelRect.height;
+      const top = Math.min(
+        window.innerHeight - viewportPadding - panelRect.height,
+        Math.max(viewportPadding, preferredTop),
+      );
 
       panel.style.left = `${left}px`;
       panel.style.top = `${top}px`;
@@ -1967,7 +2627,7 @@ function WorkTitleRow({ title }: { title: string | undefined }) {
   }
 
   return (
-    <div className="mt-4 min-w-0 text-left">
+    <div className="mt-4 min-w-0 border-t border-white/10 pt-3 text-left">
       <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">标题</div>
       <div className="min-w-0 break-words text-sm font-semibold leading-6 text-foreground">
         <span>
@@ -2355,15 +3015,18 @@ function WorkDownloadActions({
           </div>
         );
       })}
-      {preview && previewCached?.url ? (
-        <AssetPreviewDialog
-          action={preview}
-          previewUrl={previewCached.url}
-          downloadName={previewCached?.downloadName}
-          downloadUrl={previewCached.url}
-          onClose={() => setPreview(null)}
-        />
-      ) : null}
+      {preview && previewCached?.url && typeof document !== "undefined"
+        ? createPortal(
+            <AssetPreviewDialog
+              action={preview}
+              previewUrl={previewCached.url}
+              downloadName={previewCached?.downloadName}
+              downloadUrl={previewCached.url}
+              onClose={() => setPreview(null)}
+            />,
+            document.body,
+          )
+        : null}
     </>
   );
 }
@@ -2509,6 +3172,17 @@ function AssetPreviewDialog({
   const [copied, setCopied] = useState(false);
   const canCopyCover = action.asset === "cover";
 
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
   async function copyCover() {
     const absoluteDownloadUrl = new URL(downloadUrl, window.location.origin).toString();
     try {
@@ -2527,7 +3201,12 @@ function AssetPreviewDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
+    <div
+      className="fixed inset-0 z-[140] flex items-end justify-center overflow-hidden bg-[#020409] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:items-center sm:px-4 sm:py-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label={action.previewLabel}
+    >
       <div className="max-h-[calc(100dvh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2 font-semibold">
@@ -2751,7 +3430,7 @@ function AudioPreview({ url }: { url: string }) {
   }
 
   return (
-    <div className="relative rounded-md border border-cyan/15 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-3 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] sm:p-4">
+    <div className="relative rounded-md bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-3 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] sm:p-4">
       {error || !loaded ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-black/45 backdrop-blur-[2px]">
           <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
@@ -2777,32 +3456,34 @@ function AudioPreview({ url }: { url: string }) {
           setError("音频资源加载失败。");
         }}
       />
-      <div className={cn("grid min-h-14 grid-cols-[auto_1fr_auto] items-center gap-3 transition-opacity duration-200 sm:flex", loaded && !error ? "opacity-100" : "opacity-0")}>
-        <button
-          type="button"
-          onClick={() => void togglePlayback()}
-          disabled={!loaded || Boolean(error)}
-          className="inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-cyan/25 bg-cyan/10 text-cyan transition hover:bg-cyan/15 hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
-          aria-label={playing ? "暂停音频" : "播放音频"}
-          title={playing ? "暂停" : "播放"}
-        >
-          {playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
-        </button>
-        <span className="col-start-2 row-start-1 w-11 shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
-        <input
-          type="range"
-          min="0"
-          max={duration || 0}
-          step="0.01"
-          value={duration ? Math.min(currentTime, duration) : 0}
-          onChange={(event) => seek(event.currentTarget.value)}
-          disabled={!loaded || !duration}
-          className="audio-progress col-span-3 row-start-2 h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-1 sm:row-auto"
-          aria-label="音频播放进度"
-        />
-        <span className="col-start-3 row-start-1 w-11 shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
-        <div className="col-span-3 row-start-3 flex min-w-0 items-center justify-end gap-2 sm:col-span-1 sm:row-auto sm:w-32">
-          <Volume2 className="hidden size-4 shrink-0 text-muted-foreground sm:block" aria-hidden="true" />
+      <div className={cn("grid min-h-14 gap-3 transition-opacity duration-200 md:grid-cols-[minmax(0,1fr)_12rem] md:items-center", loaded && !error ? "opacity-100" : "opacity-0")}>
+        <div className="grid min-w-0 grid-cols-[auto_auto_minmax(8rem,1fr)_auto] items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void togglePlayback()}
+            disabled={!loaded || Boolean(error)}
+            className="inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-cyan/10 text-cyan transition hover:bg-cyan/15 hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label={playing ? "暂停音频" : "播放音频"}
+            title={playing ? "暂停" : "播放"}
+          >
+            {playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
+          </button>
+          <span className="shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
+          <input
+            type="range"
+            min="0"
+            max={duration || 0}
+            step="0.01"
+            value={duration ? Math.min(currentTime, duration) : 0}
+            onChange={(event) => seek(event.currentTarget.value)}
+            disabled={!loaded || !duration}
+            className="audio-progress h-2 min-w-0 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label="音频播放进度"
+          />
+          <span className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
+        </div>
+        <div className="grid min-w-0 grid-cols-[auto_minmax(5rem,1fr)_2.5rem] items-center gap-2 md:min-w-48">
+          <Volume2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <input
             type="range"
             min="0"
@@ -2811,10 +3492,10 @@ function AudioPreview({ url }: { url: string }) {
             value={gain}
             onChange={(event) => changeGain(event.currentTarget.value)}
             disabled={!loaded || Boolean(error)}
-            className="audio-progress h-2 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 sm:w-24 sm:flex-none"
+            className="audio-progress h-2 min-w-0 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
             aria-label="音频增益"
           />
-          <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+          <span className="shrink-0 text-right text-xs tabular-nums text-muted-foreground">
             {Math.round(gain * 100)}%
           </span>
         </div>
@@ -2862,16 +3543,18 @@ function mergeResolvedWork(
 }
 
 function ResultBlock({
+  history,
   onAuthRequired,
   result,
 }: {
+  history?: TranscriptPanelHistory;
   onAuthRequired: () => void;
   result: ExtractionResult;
 }) {
   return (
     <article>
       {result.content ? (
-        <TranscriptResultPanel key={result.feature} onAuthRequired={onAuthRequired} result={result} />
+        <TranscriptResultPanel history={history} key={result.feature} onAuthRequired={onAuthRequired} result={result} />
       ) : (
         <p className="flex min-h-24 items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
           {result.detail ?? "没有返回内容。"}
@@ -2881,10 +3564,23 @@ function ResultBlock({
   );
 }
 
+type TranscriptPanelHistory = {
+  onSummarySaved: (recordId: string, summary: TranscriptHistorySummary | undefined) => void;
+  onTranscriptSaved: (input: {
+    recordId: string;
+    transcriptContent: string;
+    transcriptSegments: TranscriptSegment[];
+  }) => Promise<TranscriptHistoryRecord>;
+  recordId: string;
+  summaries: TranscriptHistorySummary[];
+};
+
 function TranscriptResultPanel({
+  history,
   onAuthRequired,
   result,
 }: {
+  history?: TranscriptPanelHistory;
   onAuthRequired: () => void;
   result: ExtractionResult;
 }) {
@@ -2921,10 +3617,13 @@ function TranscriptResultPanel({
   const [draftSegments, setDraftSegments] = useState<TranscriptSegment[]>([]);
   const [draftSubtitleCues, setDraftSubtitleCues] = useState<SubtitleCue[]>([]);
   const [isEditingContent, setIsEditingContent] = useState(false);
+  const [isSavingContent, setIsSavingContent] = useState(false);
+  const [contentSaveError, setContentSaveError] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
   const [summaryMenuOpen, setSummaryMenuOpen] = useState(false);
+  const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -2935,8 +3634,10 @@ function TranscriptResultPanel({
   const [segmentSpeakerOverrides, setSegmentSpeakerOverrides] = useState<Record<string, string | undefined>>({});
   const [speakerEditorTarget, setSpeakerEditorTarget] = useState<SpeakerEditorTarget | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const summaryHistoryRef = useRef<HTMLDivElement | null>(null);
   const summaryMenuRef = useRef<HTMLDivElement | null>(null);
   const summaryScrollRef = useRef<HTMLDivElement | null>(null);
+  const latestHistorySummary = history?.summaries[0];
 
   useEffect(() => {
     if (isEditingContent || normalizedResult.content === undefined) {
@@ -2946,6 +3647,12 @@ function TranscriptResultPanel({
     setEditedSegments(null);
     setEditedSubtitleCues(null);
   }, [isEditingContent, normalizedResult.content]);
+
+  useEffect(() => {
+    setSummary(latestHistorySummary?.content ?? "");
+    setSummaryError("");
+    setSummaryHistoryOpen(false);
+  }, [latestHistorySummary?.content, latestHistorySummary?.id]);
 
   const usesOriginalSegments = content === (normalizedResult.content ?? initialContent);
   const segments = normalizeTranscriptSegments(content, editedSegments ?? (usesOriginalSegments ? normalizedResult.transcriptSegments : undefined));
@@ -3083,17 +3790,22 @@ function TranscriptResultPanel({
   }, [activeSearchQuery, activeSearchSegmentIndex, selectedSearchMatchIndex]);
 
   useEffect(() => {
-    if (!copyMenuOpen && !downloadMenuOpen && !summaryMenuOpen && !translationOptionsOpen && !translationSettingsOpen) {
+    if (!copyMenuOpen && !downloadMenuOpen && !summaryMenuOpen && !summaryHistoryOpen && !translationOptionsOpen && !translationSettingsOpen) {
       return;
     }
 
     function closeActionMenu(event: PointerEvent) {
-      if (actionMenuRef.current?.contains(event.target as Node) || summaryMenuRef.current?.contains(event.target as Node)) {
+      if (
+        actionMenuRef.current?.contains(event.target as Node) ||
+        summaryMenuRef.current?.contains(event.target as Node) ||
+        summaryHistoryRef.current?.contains(event.target as Node)
+      ) {
         return;
       }
       setCopyMenuOpen(false);
       setDownloadMenuOpen(false);
       setSummaryMenuOpen(false);
+      setSummaryHistoryOpen(false);
       setTranslationOptionsOpen(false);
       setTranslationSettingsOpen(false);
       setTranslationTargetRequest(null);
@@ -3101,7 +3813,7 @@ function TranscriptResultPanel({
 
     document.addEventListener("pointerdown", closeActionMenu);
     return () => document.removeEventListener("pointerdown", closeActionMenu);
-  }, [copyMenuOpen, downloadMenuOpen, summaryMenuOpen, translationOptionsOpen, translationSettingsOpen]);
+  }, [copyMenuOpen, downloadMenuOpen, summaryHistoryOpen, summaryMenuOpen, translationOptionsOpen, translationSettingsOpen]);
 
   async function copyAll() {
     const text = isSubtitleMode
@@ -3339,13 +4051,21 @@ function TranscriptResultPanel({
     setSummaryError("");
     setIsSummarizing(true);
 
-    try {
-      await streamSummaryContent({
-        text: content,
-        prompt: prompt.prompt,
-        onDelta: (delta) => setSummary((current) => current + delta),
-        onDone: (text) => setSummary(text),
-      });
+      try {
+        await streamSummaryContent({
+          historyRecordId: history?.recordId,
+          text: content,
+          prompt: prompt.prompt,
+          promptId: prompt.id,
+          promptTitle: prompt.title,
+          onDelta: (delta) => setSummary((current) => current + delta),
+          onDone: (text, savedSummary) => {
+            setSummary(text);
+            if (history) {
+              history.onSummarySaved(history.recordId, savedSummary);
+            }
+          },
+        });
     } catch (error) {
       if (isAuthRequiredError(error)) {
         onAuthRequired();
@@ -3376,6 +4096,7 @@ function TranscriptResultPanel({
   }
 
   function startEditingContent() {
+    setContentSaveError("");
     if (isSubtitleMode) {
       setDraftSubtitleCues(subtitleCues.map((cue) => ({ ...cue })));
     } else {
@@ -3384,7 +4105,7 @@ function TranscriptResultPanel({
     setIsEditingContent(true);
   }
 
-  function saveContent() {
+  async function saveContent() {
     if (isSubtitleMode) {
       const nextCues = draftSubtitleCues.map((cue) => ({
         ...cue,
@@ -3394,6 +4115,7 @@ function TranscriptResultPanel({
       setDraftSubtitleCues([]);
       setIsEditingContent(false);
       setSubtitleTranslations({});
+      setContentSaveError("");
       setTranslationError(null);
       return;
     }
@@ -3402,21 +4124,48 @@ function TranscriptResultPanel({
       ...segment,
       text: segment.text.trim(),
     }));
-    setEditedSegments(nextSegments);
-    setContent(nextSegments.map((segment) => segment.text).join("\n"));
+    const nextContent = nextSegments.map((segment) => segment.text).join("\n");
+    setContentSaveError("");
+    if (history) {
+      setIsSavingContent(true);
+      try {
+        const savedRecord = await history.onTranscriptSaved({
+          recordId: history.recordId,
+          transcriptContent: nextContent,
+          transcriptSegments: nextSegments,
+        });
+        setEditedSegments(savedRecord.transcriptSegments ?? nextSegments);
+        setContent(savedRecord.transcriptContent);
+      } catch (error) {
+        if (isAuthRequiredError(error)) {
+          onAuthRequired();
+          return;
+        }
+        setContentSaveError(readUserFacingError(error, "转录文本保存失败。"));
+        return;
+      } finally {
+        setIsSavingContent(false);
+      }
+    } else {
+      setEditedSegments(nextSegments);
+      setContent(nextContent);
+    }
     setDraftSegments([]);
     setIsEditingContent(false);
     setSegmentTranslations({});
     setEditedSubtitleCues(null);
     setSubtitleTranslations({});
     setTranslationError(null);
-    resetSummary();
+    if (!history) {
+      resetSummary();
+    }
   }
 
   function cancelEditingContent() {
     setDraftSegments([]);
     setDraftSubtitleCues([]);
     setIsEditingContent(false);
+    setContentSaveError("");
   }
 
   function updateDraftSegment(index: number, text: string) {
@@ -3503,8 +4252,8 @@ function TranscriptResultPanel({
 
   return (
     <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.82fr)]">
-      <section className="flex min-w-0 flex-col overflow-hidden">
-        <div className="grid min-h-[4.25rem] grid-cols-1 items-center gap-2 border-b border-white/10 px-3 py-2 md:grid-cols-[auto_minmax(13rem,1fr)_auto]">
+      <section className="flex min-w-0 flex-col">
+        <div className="grid min-h-[4.25rem] grid-cols-1 items-center gap-2 border-b border-white/10 px-3 py-2 md:grid-cols-[auto_minmax(8rem,1fr)_max-content]">
           <div className="flex min-w-0 items-center gap-2">
             <TranscriptViewToggle mode={viewMode} onChange={changeViewMode} />
           </div>
@@ -3521,27 +4270,35 @@ function TranscriptResultPanel({
               updateSearchQuery={updateSearchQuery}
             />
           </div>
-          <div ref={actionMenuRef} className="flex min-w-0 flex-wrap items-center justify-start gap-1 md:justify-end">
+          <div ref={actionMenuRef} className="flex min-w-max shrink-0 flex-nowrap items-center justify-start gap-1 md:justify-end">
             <div className="flex h-8 items-center gap-0.5">
               {isEditingContent ? (
                 <>
                   <button
                     type="button"
-                    onClick={saveContent}
-                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.96]"
+                    onClick={() => void saveContent()}
+                    disabled={isSavingContent}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.94] disabled:cursor-wait disabled:opacity-60"
+                    aria-label="保存编辑"
                     title="保存编辑"
                   >
-                    <Save className="size-3.5" aria-hidden="true" />
+                    {isSavingContent ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Save className="size-3.5" aria-hidden="true" />
+                    )}
                     保存
                   </button>
-                  <span className="mx-1 h-5 w-px bg-cyan/35" aria-hidden="true" />
                   <button
                     type="button"
                     onClick={cancelEditingContent}
-                    className="inline-flex h-8 items-center justify-center rounded-md px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.96]"
-                    title="取消编辑"
+                    disabled={isSavingContent}
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-semibold text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.94]"
+                    aria-label="取消"
+                    title="取消"
                   >
-                    取消编辑
+                    <X className="size-3.5" aria-hidden="true" />
+                    取消
                   </button>
                 </>
               ) : (
@@ -3670,7 +4427,7 @@ function TranscriptResultPanel({
         </div>
         <div
           ref={activeSearchContainerRef}
-          className="content-scroll max-h-[65dvh] flex-1 space-y-1.5 overflow-auto p-2.5 text-sm leading-6 text-foreground/90 sm:max-h-[36rem]"
+          className={cn(RESULT_PANEL_BODY_CLASS, "space-y-1.5 p-2.5 text-sm leading-6 text-foreground/90")}
         >
           {isSubtitleMode ? (
             visibleSubtitleCues.map((cue, index) => {
@@ -3722,13 +4479,16 @@ function TranscriptResultPanel({
               </div>
             );
           })}
+          {contentSaveError ? (
+            <div className="px-2.5 py-1 text-xs font-medium text-amber">{contentSaveError}</div>
+          ) : null}
           {!isEditingContent && translationError ? (
             <div className="px-2.5 py-1 text-xs font-medium text-amber">{translationError}</div>
           ) : null}
         </div>
       </section>
 
-      <section className="flex min-w-0 flex-col overflow-hidden rounded-md border border-cyan/20">
+      <section className="flex min-w-0 flex-col rounded-md border border-cyan/20">
           <div className={cn(
             "flex min-h-[4.25rem] items-center justify-end gap-2 px-3 py-2",
             hasSummaryOutput ? "border-b border-white/10" : "",
@@ -3780,20 +4540,44 @@ function TranscriptResultPanel({
                   <RefreshCw className="size-4" aria-hidden="true" />
                 </button>
               ) : null}
+              {history?.summaries.length ? (
+                <div ref={summaryHistoryRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setSummaryHistoryOpen((open) => !open)}
+                    className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.94]"
+                    aria-expanded={summaryHistoryOpen}
+                    aria-label="查看历史总结"
+                    title="历史总结"
+                  >
+                    <ChevronDown className={cn("size-4 transition", summaryHistoryOpen ? "rotate-180" : "")} aria-hidden="true" />
+                  </button>
+                  {summaryHistoryOpen ? (
+                    <SummaryHistoryMenu
+                      summaries={history.summaries}
+                      onSelect={(item) => {
+                        setSummary(item.content);
+                        setSummaryError("");
+                        setSummaryHistoryOpen(false);
+                      }}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
           <div
             ref={summaryScrollRef}
-            className={cn("content-scroll max-h-[65dvh] flex-1 overflow-auto sm:max-h-[36rem]", hasSummaryOutput ? "p-3" : "")}
+            className={cn(RESULT_PANEL_BODY_CLASS, hasSummaryOutput ? "p-3" : "")}
           >
             {hasSummaryOutput ? (
               isSummarizing && !summary ? (
-                <div className="flex h-full min-h-52 items-center justify-center gap-2 text-sm leading-7 text-muted-foreground">
+                <div className="flex min-h-[20rem] items-center justify-center gap-2 text-sm leading-7 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin text-cyan" />
                   <LoadingText>正在生成</LoadingText>
                 </div>
               ) : (
-                <div className="relative min-h-52 p-4 text-sm leading-7 text-foreground/90">
+                <div className="relative min-h-[20rem] p-4 text-sm leading-7 text-foreground/90">
                   {summaryError ? (
                     <div className="flex h-40 items-center justify-center gap-2 text-amber">
                       <AlertCircle className="size-4" />
@@ -3821,7 +4605,7 @@ function TranscriptResultPanel({
                 </div>
               )
             ) : (
-              <LightRays className="min-h-52 sm:min-h-[36rem]" />
+              <LightRays className="min-h-[20rem]" />
             )}
           </div>
         </section>
@@ -4569,6 +5353,35 @@ function SummaryPromptMenu({
             <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
             <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
               {prompt.description}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SummaryHistoryMenu({
+  onSelect,
+  summaries,
+}: {
+  onSelect: (summary: TranscriptHistorySummary) => void;
+  summaries: TranscriptHistorySummary[];
+}) {
+  return (
+    <div className="mobile-popover w-64 overflow-hidden rounded-md border border-white/12 bg-[#171a27] shadow-2xl shadow-black/40">
+      <div className="border-b border-white/10 px-3 py-2 text-sm font-semibold text-foreground">历史总结</div>
+      <div className="content-scroll max-h-72 overflow-auto py-1">
+        {summaries.map((summary) => (
+          <button
+            key={summary.id}
+            type="button"
+            onClick={() => onSelect(summary)}
+            className="block w-full px-3 py-2 text-left transition hover:bg-cyan/[0.07]"
+          >
+            <div className="truncate text-sm font-semibold text-foreground">{summary.promptTitle}</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {new Date(summary.createdAt).toLocaleString()}
             </div>
           </button>
         ))}
@@ -5367,6 +6180,11 @@ function scrollSearchMatchIntoContainer(
   matchElement: HTMLDivElement | null,
 ): void {
   if (!container || !matchElement) {
+    return;
+  }
+
+  if (container.scrollHeight <= container.clientHeight + 1) {
+    matchElement.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
     return;
   }
 

@@ -42,6 +42,7 @@ export async function streamQwenTranscriptPostprocess(input: {
   content: string;
   onDelta: (delta: string) => void;
   segments?: TranscriptSegment[];
+  signal?: AbortSignal;
 }): Promise<ProviderResult> {
   const promptSegments = buildPromptSegments(input.content, input.segments);
   if (promptSegments.length === 0) {
@@ -53,7 +54,7 @@ export async function streamQwenTranscriptPostprocess(input: {
     const prompt = buildTranscriptPostprocessPrompt(promptSegments);
     assertPostprocessPayloadWithinLimit(prompt);
 
-    const response = await callQwenTranscriptPostprocess(config, prompt);
+    const response = await callQwenTranscriptPostprocess(config, prompt, input.signal);
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as DashScopeChatCompletionPayload | null;
       return readPostprocessFailure(response, payload) ?? {
@@ -68,6 +69,7 @@ export async function streamQwenTranscriptPostprocess(input: {
 
     let output = "";
     for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body)) {
+      throwIfAborted(input.signal);
       if (payload.error) {
         return {
           ok: false,
@@ -92,6 +94,7 @@ export async function streamQwenTranscriptPostprocess(input: {
 async function callQwenTranscriptPostprocess(
   config: DashScopeTranscriptPostprocessConfig,
   prompt: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   return await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
     method: "POST",
@@ -116,6 +119,7 @@ async function callQwenTranscriptPostprocess(
       attempts: 2,
       timeoutMs: POSTPROCESS_REQUEST_TIMEOUT_MS,
     },
+    signal,
   });
 }
 
@@ -275,6 +279,9 @@ function readPostprocessFailure(
 }
 
 function formatPostprocessThrownError(error: unknown): ProviderResult {
+  if (isAbortError(error)) {
+    return { ok: false, code: "error", detail: "转录任务已放弃。" };
+  }
   if (error instanceof Error) {
     if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL)/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
@@ -286,6 +293,16 @@ function formatPostprocessThrownError(error: unknown): ProviderResult {
   }
 
   return { ok: false, code: "error", detail: "Qwen 转录后处理失败。" };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
 }
 
 function formatPostprocessError(

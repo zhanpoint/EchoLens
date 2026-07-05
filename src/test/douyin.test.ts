@@ -16,7 +16,6 @@ import {
   prepareTranscribableWavAudioFromCachedMedia,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
-  streamRemoteMediaToCachedFile,
 } from "../lib/media/audio";
 import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
 import { getFeatureLabel } from "../types/douyin";
@@ -668,73 +667,6 @@ describe("audio transcription preparation", () => {
     }
   });
 
-  it("streams uncached remote media before the full cache file is complete", async () => {
-    const firstChunk = Buffer.from("first-video-chunk:");
-    const secondChunk = Buffer.from("second-video-chunk");
-    const source = Buffer.concat([firstChunk, secondChunk]);
-    let requestCount = 0;
-    let releaseSecondChunk!: () => void;
-    const waitForSecondChunk = new Promise<void>((resolve) => {
-      releaseSecondChunk = resolve;
-    });
-    const server = createServer((request, response) => {
-      requestCount += 1;
-      response.writeHead(200, {
-        "content-length": String(source.byteLength),
-        "content-type": "video/mp4",
-      });
-      response.write(firstChunk);
-      void waitForSecondChunk.then(() => response.end(secondChunk));
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
-
-    try {
-      const { port } = server.address() as AddressInfo;
-      const userId = `stream-user-${Date.now()}`;
-      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
-      const cachePath = path.join(
-        os.tmpdir(),
-        "echolens-media-cache",
-        `${createHash("sha256").update(JSON.stringify([userId, [mediaUrl]])).digest("hex")}.media`,
-      );
-      await fs.rm(cachePath, { force: true });
-
-      await prepareMediaCacheForWork(userId, "video:streaming-cache", "run-1");
-      const streamResult = await Promise.race([
-        streamRemoteMediaToCachedFile(userId, mediaUrl),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
-      ]);
-
-      expect(streamResult).not.toBe("timeout");
-      if (streamResult === "timeout") {
-        throw new Error("stream did not start before the upstream response completed");
-      }
-      if (streamResult.kind !== "stream") {
-        throw new Error("expected uncached media to return a stream");
-      }
-      expect(streamResult.contentLength).toBe(source.byteLength);
-
-      releaseSecondChunk();
-      await expect(new Response(streamResult.stream).arrayBuffer()).resolves.toEqual(
-        source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength),
-      );
-      await expect(fs.readFile(cachePath)).resolves.toEqual(source);
-
-      const cachedResult = await streamRemoteMediaToCachedFile(userId, mediaUrl);
-      expect(cachedResult.kind).toBe("cached");
-      expect(requestCount).toBe(1);
-    } finally {
-      releaseSecondChunk();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  });
-
   it("falls back to the next media url when the primary CDN url fails", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
     const outputPath = path.join(tempDir, "media.bin");
@@ -781,10 +713,14 @@ describe("audio transcription preparation", () => {
     }
   });
 
-  it("aborts an in-flight media cache task when a new cache run starts", async () => {
+  it("reuses an in-flight media cache task when the same work starts a new cache run", async () => {
+    const firstChunk = Buffer.from("partial-");
+    const secondChunk = Buffer.from("complete");
+    const source = Buffer.concat([firstChunk, secondChunk]);
     let closeFirstResponse: (() => void) | undefined;
     let resolveFirstRequestSeen!: () => void;
     let resolveFirstConnectionClosed!: () => void;
+    let requestCount = 0;
 
     const firstRequestSeen = new Promise<void>((resolve) => {
       resolveFirstRequestSeen = resolve;
@@ -793,14 +729,15 @@ describe("audio transcription preparation", () => {
       resolveFirstConnectionClosed = resolve;
     });
     const server = createServer((request, response) => {
+      requestCount += 1;
       resolveFirstRequestSeen();
       response.writeHead(200, {
-        "content-length": "1024",
+        "content-length": String(source.byteLength),
         "content-type": "video/mp4",
       });
-      response.write(Buffer.from("partial"));
+      response.write(firstChunk);
       request.on("close", resolveFirstConnectionClosed);
-      closeFirstResponse = () => response.end();
+      closeFirstResponse = () => response.end(secondChunk);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -810,13 +747,19 @@ describe("audio transcription preparation", () => {
 
     try {
       const { port } = server.address() as AddressInfo;
-      const userId = "abort-user";
-      await prepareMediaCacheForWork(userId, "video:abort-test", "run-1");
-      const first = downloadRemoteMediaToCachedFile(userId, `http://127.0.0.1:${port}/video.mp4`);
+      const userId = "same-work-run-user";
+      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
+      await prepareMediaCacheForWork(userId, "video:same-work-run", "run-1");
+      const first = downloadRemoteMediaToCachedFile(userId, mediaUrl);
       await firstRequestSeen;
-      await prepareMediaCacheForWork(userId, "video:abort-test", "run-2");
+      await prepareMediaCacheForWork(userId, "video:same-work-run", "run-2");
+      const second = downloadRemoteMediaToCachedFile(userId, mediaUrl);
+      closeFirstResponse?.();
 
-      await expect(first).rejects.toMatchObject({ name: "AbortError" });
+      const [firstCached, secondCached] = await Promise.all([first, second]);
+      expect(secondCached.filePath).toBe(firstCached.filePath);
+      expect(requestCount).toBe(1);
+      await expect(fs.readFile(firstCached.filePath)).resolves.toEqual(source);
       await firstConnectionClosed;
     } finally {
       closeFirstResponse?.();

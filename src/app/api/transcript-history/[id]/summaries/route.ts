@@ -2,21 +2,32 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/openrouter/provider";
-import { insertTranscriptHistorySummary, readTranscriptHistoryRecord, type TranscriptHistorySummary } from "@/lib/transcript/db";
+import {
+  insertTranscriptHistorySummary,
+  readTranscriptHistoryRecord,
+  type TranscriptHistorySummary,
+} from "@/lib/transcript/db";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const SummarySchema = z.object({
-  historyRecordId: z.string().min(1).max(128).optional(),
   prompt: z.string().min(1).max(2000),
-  promptId: z.string().min(1).max(128).optional(),
-  promptTitle: z.string().min(1).max(120).optional(),
-  text: z.string().min(1).max(200_000),
-});
+  promptId: z.string().min(1).max(128),
+  promptTitle: z.string().min(1).max(120),
+}).strict();
 
-export async function POST(request: Request) {
+type RouteContext = {
+  params: Promise<{ id: string }>;
+};
+
+type SummaryEvent =
+  | { type: "delta"; value: string }
+  | { summary: TranscriptHistorySummary; type: "done"; value: string }
+  | { type: "error"; error: string; code?: string };
+
+export async function POST(request: Request, context: RouteContext) {
   const user = requireUser(request);
   if (user instanceof NextResponse) {
     return user;
@@ -27,40 +38,29 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "总结参数无效。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
-    let transcript = parsed.data.text;
-    if (parsed.data.historyRecordId) {
-      const record = readTranscriptHistoryRecord({
-        id: parsed.data.historyRecordId,
-        userId: user.id,
-      });
-      if (!record) {
-        return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
-      }
-      transcript = record.transcriptContent;
-    }
+  const { id } = await context.params;
+  const record = readTranscriptHistoryRecord({ id, userId: user.id });
+  if (!record) {
+    return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
+  }
 
-    return streamSummary({
-      historyRecordId: parsed.data.historyRecordId,
+  return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
+    return streamHistorySummary({
+      historyRecordId: id,
       prompt: parsed.data.prompt,
       promptId: parsed.data.promptId,
       promptTitle: parsed.data.promptTitle,
-      transcript,
+      transcript: record.transcriptContent,
       userId: user.id,
     });
   });
 }
 
-type SummaryEvent =
-  | { type: "delta"; value: string }
-  | { summary?: TranscriptHistorySummary; type: "done"; value: string }
-  | { type: "error"; error: string; code?: string };
-
-function streamSummary(input: {
-  historyRecordId?: string;
+function streamHistorySummary(input: {
+  historyRecordId: string;
   prompt: string;
-  promptId?: string;
-  promptTitle?: string;
+  promptId: string;
+  promptTitle: string;
   transcript: string;
   userId: string;
 }): Response {
@@ -77,16 +77,14 @@ function streamSummary(input: {
         });
 
         if (result.ok) {
-          const summary = input.historyRecordId && input.promptId && input.promptTitle
-            ? insertTranscriptHistorySummary({
-                content: result.content,
-                historyRecordId: input.historyRecordId,
-                id: createHistorySummaryId(),
-                promptId: input.promptId,
-                promptTitle: input.promptTitle,
-                userId: input.userId,
-              })
-            : undefined;
+          const summary = insertTranscriptHistorySummary({
+            content: result.content,
+            historyRecordId: input.historyRecordId,
+            id: createHistorySummaryId(),
+            promptId: input.promptId,
+            promptTitle: input.promptTitle,
+            userId: input.userId,
+          });
           send({ summary, type: "done", value: result.content });
         } else {
           send({ type: "error", error: result.detail, code: result.code });

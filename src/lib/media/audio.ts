@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -26,13 +26,6 @@ export type CachedRemoteMedia = {
   contentType?: string;
   filePath: string;
 };
-export type RemoteMediaCacheStream = {
-  contentLength?: number;
-  contentType?: string;
-  kind: "stream";
-  stream: ReadableStream<Uint8Array>;
-};
-export type RemoteMediaCacheRead = (CachedRemoteMedia & { kind: "cached" }) | RemoteMediaCacheStream;
 export type AudioTranscriptionLimits = {
   durationLimitMessage?: string;
   maxBytes: number;
@@ -90,18 +83,26 @@ export async function prepareMediaCacheForWork(userId: string, workKey: string, 
   const nextWorkKey = workKey.trim();
   const hasRunId = cacheRunId !== undefined;
   const nextRunId = cacheRunId?.trim() || null;
-  if (!nextWorkKey || (cache.activeWorkKey === nextWorkKey && (!hasRunId || cache.activeCacheRunId === nextRunId))) {
+  if (!nextWorkKey) {
+    return;
+  }
+  if (cache.activeWorkKey === nextWorkKey) {
+    if (hasRunId) {
+      cache.activeCacheRunId = nextRunId;
+    }
     return;
   }
 
   const isDifferentWork = cache.activeWorkKey !== null && cache.activeWorkKey !== nextWorkKey;
-  cache.taskController.abort();
-  cache.taskController = new AbortController();
+  if (isDifferentWork) {
+    cache.taskController.abort();
+    cache.taskController = new AbortController();
+  }
   cache.activeWorkKey = nextWorkKey;
   cache.activeCacheRunId = nextRunId;
-  cache.remoteMediaTasks.clear();
-  cache.extractedAudioTasks.clear();
   if (isDifferentWork) {
+    cache.remoteMediaTasks.clear();
+    cache.extractedAudioTasks.clear();
     await Promise.all([
       clearCachedFiles(cache.remoteMedia),
       clearCachedFiles(cache.extractedAudio),
@@ -262,34 +263,6 @@ export async function downloadRemoteMediaToCachedFile(
   return task;
 }
 
-export async function streamRemoteMediaToCachedFile(
-  userId: string,
-  source: RemoteMediaSource,
-  options: MediaCacheOptions = {},
-): Promise<RemoteMediaCacheRead> {
-  const cache = await readUserMediaCache(userId);
-  const urls = normalizeRemoteMediaSource(source);
-  const signal = linkedAbortSignal(cache.taskController.signal, options.signal);
-  throwIfAborted(signal);
-  if (urls.length === 0) {
-    throw new Error("媒体资源地址无效。");
-  }
-
-  const cacheKey = buildRemoteMediaCacheKey(userId, urls, options.cacheKey);
-  const cached = await readCompletedRemoteMediaCache(cache, cacheKey);
-  if (cached) {
-    return { ...cached, kind: "cached" };
-  }
-
-  const inflight = cache.remoteMediaTasks.get(cacheKey);
-  if (inflight) {
-    const entry = await inflight;
-    return { ...entry, kind: "cached" };
-  }
-
-  return createCachingRemoteMediaStream(cacheKey, urls, cache, signal);
-}
-
 async function downloadMediaRange(
   url: string,
   outputPath: string,
@@ -337,81 +310,6 @@ async function downloadMediaRange(
   }
 }
 
-async function openRemoteMediaReadStream(
-  source: RemoteMediaSource,
-  signal: AbortSignal,
-): Promise<OpenedRemoteMediaStream> {
-  let lastError: unknown;
-  const urls = normalizeRemoteMediaSource(source);
-  throwIfAborted(signal);
-  if (urls.length === 0) {
-    throw new Error("媒体资源地址无效。");
-  }
-
-  for (let urlIndex = 0; urlIndex < urls.length; urlIndex += 1) {
-    throwIfAborted(signal);
-
-    for (let attempt = 1; attempt <= MEDIA_DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
-      try {
-        return await openMediaReadStream(urls[urlIndex], signal);
-      } catch (error) {
-        lastError = error;
-        if (!isRetryableMediaDownloadError(lastError)) {
-          break;
-        }
-      }
-
-      if (attempt < MEDIA_DOWNLOAD_MAX_ATTEMPTS) {
-        await delay(exponentialDelay(attempt, MEDIA_DOWNLOAD_RETRY_BASE_DELAY_MS, 5_000), signal);
-      }
-    }
-  }
-
-  if (lastError instanceof Error && lastError.name === "AbortError") {
-    throw lastError;
-  }
-  throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
-}
-
-type OpenedRemoteMediaStream = {
-  close: () => void;
-  response: Response;
-  sourceSignal: AbortSignal;
-  timeoutSignal: AbortSignal;
-};
-
-async function openMediaReadStream(url: string, signal: AbortSignal): Promise<OpenedRemoteMediaStream> {
-  const timeoutController = new AbortController();
-  const timeout = setTimeout(() => timeoutController.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
-  const fetchSignal = linkedAbortSignal(timeoutController.signal, signal);
-  const close = () => clearTimeout(timeout);
-
-  try {
-    const response = await fetch(url, {
-      signal: fetchSignal,
-      headers: mediaDownloadHeaders(),
-    });
-
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    return {
-      close,
-      response,
-      sourceSignal: signal,
-      timeoutSignal: timeoutController.signal,
-    };
-  } catch (error) {
-    close();
-    if (error instanceof Error && error.name === "AbortError") {
-      throw signal.aborted ? abortError() : new Error("媒体资源下载超时，请稍后重试或改用更短的视频。");
-    }
-    throw error;
-  }
-}
-
 function readTotalSize(response: Response, offset: number): number | null {
   const contentRange = response.headers.get("content-range");
   const totalFromRange = contentRange?.match(/\/(\d+)$/)?.[1];
@@ -422,11 +320,6 @@ function readTotalSize(response: Response, offset: number): number | null {
 
   const contentLength = Number(response.headers.get("content-length"));
   return Number.isFinite(contentLength) && contentLength > 0 ? offset + contentLength : null;
-}
-
-function readContentLength(response: Response): number | undefined {
-  const contentLength = Number(response.headers.get("content-length"));
-  return Number.isFinite(contentLength) && contentLength > 0 ? contentLength : undefined;
 }
 
 async function readFileSize(filePath: string): Promise<number> {
@@ -471,9 +364,8 @@ async function cacheRemoteMediaFile(
 ): Promise<CachedRemoteMediaEntry> {
   const cacheDir = path.join(os.tmpdir(), "echolens-media-cache");
   const filePath = path.join(cacheDir, `${cacheKey}.media`);
-  const partialPath = path.join(cacheDir, `${cacheKey}.part`);
+  const partialPath = buildTaskPartialPath(filePath);
   await fs.mkdir(cacheDir, { recursive: true });
-  await fs.rm(partialPath, { force: true });
 
   try {
     const contentType = await downloadRemoteMediaToFile(urls, partialPath, { signal });
@@ -492,167 +384,6 @@ async function cacheRemoteMediaFile(
     await fs.rm(partialPath, { force: true });
     throw error;
   }
-}
-
-async function createCachingRemoteMediaStream(
-  cacheKey: string,
-  urls: string[],
-  cache: UserMediaCache,
-  signal: AbortSignal,
-): Promise<RemoteMediaCacheStream> {
-  const cacheDir = path.join(os.tmpdir(), "echolens-media-cache");
-  const filePath = path.join(cacheDir, `${cacheKey}.media`);
-  const partialPath = path.join(cacheDir, `${cacheKey}.part`);
-  await fs.mkdir(cacheDir, { recursive: true });
-  await fs.rm(partialPath, { force: true });
-
-  const opened = await openRemoteMediaReadStream(urls, signal);
-  const contentType = opened.response.headers.get("content-type") ?? undefined;
-  let resolveTask!: (entry: CachedRemoteMediaEntry) => void;
-  let rejectTask!: (error: unknown) => void;
-  const task = new Promise<CachedRemoteMediaEntry>((resolve, reject) => {
-    resolveTask = resolve;
-    rejectTask = reject;
-  }).finally(() => {
-    if (cache.remoteMediaTasks.get(cacheKey) === task) {
-      cache.remoteMediaTasks.delete(cacheKey);
-    }
-  });
-  task.catch(() => undefined);
-  cache.remoteMediaTasks.set(cacheKey, task);
-
-  return {
-    contentLength: readContentLength(opened.response),
-    contentType,
-    kind: "stream",
-    stream: cacheAndForwardRemoteMediaStream({
-      cache,
-      cacheKey,
-      contentType,
-      filePath,
-      opened,
-      partialPath,
-      rejectTask,
-      resolveTask,
-    }),
-  };
-}
-
-function cacheAndForwardRemoteMediaStream(options: {
-  cache: UserMediaCache;
-  cacheKey: string;
-  contentType?: string;
-  filePath: string;
-  opened: OpenedRemoteMediaStream;
-  partialPath: string;
-  rejectTask: (error: unknown) => void;
-  resolveTask: (entry: CachedRemoteMediaEntry) => void;
-}): ReadableStream<Uint8Array> {
-  const reader = options.opened.response.body?.getReader();
-  if (!reader) {
-    throw new Error("媒体资源响应无内容。");
-  }
-
-  let abortListener: (() => void) | null = null;
-  let file: Awaited<ReturnType<typeof fs.open>> | null = null;
-  let settled = false;
-
-  const cleanupPartial = async () => {
-    await file?.close().catch(() => undefined);
-    file = null;
-    await fs.rm(options.partialPath, { force: true }).catch(() => undefined);
-  };
-  const fail = async (error: unknown) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    options.opened.close();
-    if (abortListener) {
-      options.opened.sourceSignal.removeEventListener("abort", abortListener);
-    }
-    await reader.cancel(error).catch(() => undefined);
-    await cleanupPartial();
-    options.rejectTask(normalizeStreamingMediaError(error, options.opened));
-  };
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      abortListener = () => {
-        const error = abortError();
-        controller.error(error);
-        void fail(error);
-      };
-
-      if (options.opened.sourceSignal.aborted) {
-        abortListener();
-        return;
-      }
-
-      options.opened.sourceSignal.addEventListener("abort", abortListener, { once: true });
-      try {
-        file = await fs.open(options.partialPath, "w");
-      } catch (error) {
-        controller.error(error);
-        await fail(error);
-      }
-    },
-
-    async pull(controller) {
-      try {
-        throwIfAborted(options.opened.sourceSignal);
-        const chunk = await reader.read();
-        if (chunk.done) {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          options.opened.close();
-          if (abortListener) {
-            options.opened.sourceSignal.removeEventListener("abort", abortListener);
-          }
-          await file?.close();
-          file = null;
-          await fs.rm(options.filePath, { force: true });
-          await fs.rename(options.partialPath, options.filePath);
-
-          const entry = {
-            contentType: options.contentType,
-            filePath: options.filePath,
-            lastAccessedAt: Date.now(),
-          };
-          options.cache.remoteMedia.set(options.cacheKey, entry);
-          options.resolveTask(entry);
-          controller.close();
-          return;
-        }
-
-        await file?.write(chunk.value);
-        controller.enqueue(chunk.value);
-      } catch (error) {
-        const normalized = normalizeStreamingMediaError(error, options.opened);
-        controller.error(normalized);
-        await fail(normalized);
-      }
-    },
-
-    async cancel(reason) {
-      await fail(reason instanceof Error ? reason : abortError());
-    },
-  });
-}
-
-function normalizeStreamingMediaError(error: unknown, opened: OpenedRemoteMediaStream): unknown {
-  if (error instanceof Error && error.name === "AbortError") {
-    if (opened.sourceSignal.aborted) {
-      return abortError();
-    }
-    if (opened.timeoutSignal.aborted) {
-      return new Error("媒体资源下载超时，请稍后重试或改用更短的视频。");
-    }
-  }
-
-  return error;
 }
 
 async function readCompletedRemoteMediaCache(
@@ -695,9 +426,8 @@ async function cacheExtractedAudioFile(
   throwIfAborted(signal);
   const cacheDir = path.join(os.tmpdir(), "echolens-audio-cache");
   const filePath = path.join(cacheDir, `${cacheKey}.wav`);
-  const partialPath = path.join(cacheDir, `${cacheKey}.wav.part`);
+  const partialPath = buildTaskPartialPath(filePath);
   await fs.mkdir(cacheDir, { recursive: true });
-  await fs.rm(partialPath, { force: true });
 
   try {
     await runFfmpeg(resolveFfmpegPath(), [
@@ -894,6 +624,10 @@ function buildRemoteMediaCacheKey(userId: string, urls: string[], cacheKey?: str
 
 function buildStableRemoteMediaCacheKey(userId: string, cacheKey: string): string {
   return createHash("sha256").update(JSON.stringify([userId, "stable", cacheKey])).digest("hex");
+}
+
+function buildTaskPartialPath(filePath: string): string {
+  return `${filePath}.${process.pid}.${randomUUID()}.part`;
 }
 
 function mediaDownloadHeaders(): Record<string, string> {

@@ -605,23 +605,15 @@ body::-webkit-scrollbar-button {
   box-shadow: 0 0 0 4px rgb(34 211 238 / 0.16);
 }
 
-.empty-result-stage {
+.work-flow-panel {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1.25rem;
-  overflow: hidden;
-  padding: 2.5rem 1.5rem 5rem;
-  border-radius: inherit;
   isolation: isolate;
   background:
     linear-gradient(180deg, rgb(255 255 255 / 0.05), rgb(255 255 255 / 0.016)),
     linear-gradient(120deg, rgb(34 211 238 / 0.06), transparent 42%, rgb(245 158 11 / 0.05));
 }
 
-.empty-result-stage::before {
+.work-flow-panel::before {
   position: absolute;
   inset: 0;
   z-index: -1;
@@ -633,19 +625,90 @@ body::-webkit-scrollbar-button {
   opacity: 0.44;
 }
 
-.empty-link-state {
-  background:
-    linear-gradient(120deg, rgb(34 211 238 / 0.065), transparent 42%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.035), transparent);
+.empty-result-stage {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(4.5rem, 1fr) auto;
+  align-items: stretch;
+  justify-items: stretch;
+  gap: clamp(1rem, 2vw, 1.5rem);
+  width: 100%;
+  min-height: clamp(12rem, 28dvh, 15rem);
+  overflow: visible;
+  padding: clamp(0.875rem, 1.8vw, 1.25rem) clamp(1rem, 2.2vw, 1.5rem) clamp(0.875rem, 1.6vw, 1rem);
+  border-radius: inherit;
 }
 
-.empty-link-state::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: "";
+.empty-result-stage--expanded {
+  grid-template-rows: minmax(4.5rem, auto) auto;
+  min-height: clamp(16rem, 36dvh, 20rem);
+}
+
+.empty-result-main {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  align-content: center;
+  justify-items: center;
+  gap: 0.5rem;
+  transform: translateY(clamp(1.75rem, 4dvh, 2.75rem));
+}
+
+.animated-gradient-text {
+  --animated-gradient-text-bg-size: 300%;
+  color: transparent;
   background:
-    linear-gradient(rgb(255 255 255 / 0.04) 1px, transparent 1px);
-  background-size: 100% 28px;
-  opacity: 0.42;
+    linear-gradient(
+      90deg,
+      #ffaa40,
+      var(--cyan),
+      #9c40ff,
+      #ffaa40
+    )
+    0 50% / var(--animated-gradient-text-bg-size) 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: echolens-gradient-text 8s linear infinite;
+}
+
+.empty-result-message {
+  margin: 0;
+}
+
+.empty-result-actions {
+  width: 100%;
+  min-height: 2.75rem;
+}
+
+@media (max-height: 640px) {
+  .empty-result-stage {
+    grid-template-rows: auto auto;
+    min-height: 0;
+  }
+
+  .empty-result-main {
+    transform: none;
+  }
+}
+
+@keyframes echolens-gradient-text {
+  to {
+    background-position: var(--animated-gradient-text-bg-size) 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated-gradient-text {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .animated-gradient-text {
+    color: CanvasText;
+    background: none;
+    animation: none;
+    -webkit-text-fill-color: CanvasText;
+  }
 }

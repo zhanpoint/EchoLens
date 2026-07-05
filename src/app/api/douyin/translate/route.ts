@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import {
   streamQwenMtText,
+  translateQwenMtTextItems,
   type QwenMtTranslationOptions,
 } from "@/lib/dashscope/translation";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
@@ -69,6 +70,10 @@ function streamTranslations(
       try {
         for (const item of items) {
           send({ type: "segment_start", key: item.key });
+        }
+
+        if (items.length === 1) {
+          const item = items[0];
           const result = await streamQwenMtText({
             text: item.text,
             options,
@@ -79,6 +84,15 @@ function streamTranslations(
             send({ type: "segment_done", key: item.key, value: result.content });
           } else {
             send({ type: "segment_error", key: item.key, error: result.detail });
+          }
+        } else {
+          const results = await translateQwenMtTextItems({ items, options });
+          for (const result of results) {
+            if (result.ok) {
+              send({ type: "segment_done", key: result.key, value: result.content });
+            } else {
+              send({ type: "segment_error", key: result.key, error: result.detail });
+            }
           }
         }
 

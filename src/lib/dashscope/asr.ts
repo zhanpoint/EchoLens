@@ -2,12 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import { fetchWithRetry } from "@/lib/http/retry";
 import type { UploadedAsrAudio } from "@/lib/oss/asr-audio";
+import { streamQwenTranscriptPostprocess } from "@/lib/dashscope/transcript-postprocess";
 import {
-  TRANSCRIPT_POSTPROCESS_VERSION,
-  streamQwenTranscriptPostprocess,
-} from "@/lib/dashscope/transcript-postprocess";
-import {
-  insertAsrTask,
+  attachAsrTaskProviderTask,
+  isAsrJobCancellationRequested,
+  markAsrTaskCanceled,
   markAsrTaskFailed,
   markAsrTaskRunning,
   markAsrTaskSucceeded,
@@ -15,9 +14,9 @@ import {
   readAsrTask,
   readDailySucceededAsrDurationSeconds,
   readRunningAsrTask,
-  readStoredTranscript,
+  reserveAsrTask,
   type StoredAsrTask,
-  upsertStoredTranscript,
+  type StoredAsrHistoryContext,
 } from "@/lib/transcript/db";
 import { stripTrailingDouyinWatermarkFromTranscript } from "@/lib/transcript/normalize";
 import type { TranscriptSegment } from "@/types/douyin";
@@ -40,10 +39,13 @@ export type DashScopeAsrOptions = {
 };
 
 export type DashScopeAsrRuntimeOptions = {
+  clientJobId?: string;
+  historyContext?: StoredAsrHistoryContext;
   postprocess?: {
     enabled: boolean;
     onDelta?: (delta: string) => void;
   };
+  signal?: AbortSignal;
 };
 
 export type DashScopeSpecialWordFilter = {
@@ -65,8 +67,8 @@ type TranscriptPayload = {
   transcriptSegments?: TranscriptSegment[];
 };
 export type DashScopeAsrJobResult =
-  | { jobId: string; status: "running" }
-  | { result: ProviderResult; status: "failed" | "succeeded" };
+  | { historyContext?: StoredAsrHistoryContext; jobId: string; status: "running" }
+  | { historyContext?: StoredAsrHistoryContext; result: ProviderResult; status: "failed" | "succeeded" };
 
 const QWEN_FILETRANS_MODEL: DashScopeAsrModel = "qwen3-asr-flash-filetrans";
 const FUN_ASR_MODEL: DashScopeAsrModel = "fun-asr";
@@ -100,37 +102,43 @@ export async function submitDashScopeAsrJob(
     const normalizedOptions = normalizeDashScopeAsrOptions(options, config.model);
     const model = normalizedOptions.model;
     const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions);
-    const stored = readStoredTranscript({ cacheKey, userId });
-    if (stored) {
-      return await storedTranscriptJobResult({
-        cacheKey,
-        model,
-        runtimeOptions,
-        transcript: stored,
-        userId,
-        workKey,
-      });
-    }
-
     const runningTask = readRunningAsrTask({ cacheKey, userId });
     if (runningTask) {
-      return { status: "running", jobId: runningTask.id };
+      return { status: "running", historyContext: runningTask.historyContext, jobId: runningTask.id };
     }
 
-    assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
-    const taskId = await submitDashScopeAsrTask({ ...config, model }, audio.signedUrl, normalizedOptions);
-    const jobId = randomUUID();
-    insertAsrTask({
+    const jobId = runtimeOptions.clientJobId ?? randomUUID();
+    const historyContext = runtimeOptions.historyContext;
+    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
+      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
+    }
+    const taskInput = {
       audioDurationSeconds: audio.durationSeconds,
       cacheKey,
+      historyContext,
       id: jobId,
       model,
       objectKey: audio.objectKey,
-      taskId,
       userId,
       workKey,
-    });
-    return { status: "running", jobId };
+    };
+    assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
+    reserveAsrTask(taskInput);
+    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
+      markAsrTaskCanceled(jobId);
+      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
+    }
+    const taskId = await submitDashScopeAsrTask({ ...config, model }, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
+    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
+      markAsrTaskCanceled(jobId);
+      await cancelDashScopeAsrTask(taskId).catch(() => undefined);
+      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
+    }
+    if (!attachAsrTaskProviderTask({ id: jobId, taskId })) {
+      await cancelDashScopeAsrTask(taskId).catch(() => undefined);
+      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
+    }
+    return { status: "running", historyContext, jobId };
   } catch (error) {
     if (error instanceof DailyAsrQuotaExceededError) {
       throw error;
@@ -190,9 +198,9 @@ async function settleDashScopeAsrTask(
 ): Promise<DashScopeAsrJobResult> {
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
-    const transcript = stripTrailingDouyinWatermarkFromTranscript(await readDashScopeTranscript(taskPayload));
+    const transcript = stripTrailingDouyinWatermarkFromTranscript(await readDashScopeTranscript(taskPayload, runtimeOptions.signal));
     const model = parseDashScopeAsrModel(job.model) ?? DEFAULT_ASR_MODEL;
-    const result = await postprocessTranscriptForStorage({
+    const result = await postprocessTranscript({
       model,
       runtimeOptions,
       transcript: {
@@ -203,28 +211,20 @@ async function settleDashScopeAsrTask(
         transcriptSegments: transcript.transcriptSegments,
       },
     });
-    upsertStoredTranscript({
-      cacheKey: job.cacheKey,
-      content: result.ok ? result.content : transcript.content,
-      model,
-      postprocessVersion: result.ok ? result.postprocessVersion : undefined,
-      source: "dashscope",
-      transcriptSegments: result.ok ? result.transcriptSegments : transcript.transcriptSegments,
-      userId: job.userId,
-      workKey: job.workKey,
-    });
     markAsrTaskSucceeded(job.id);
-    return result.ok ? { status: "succeeded", result } : { status: "failed", result };
+    return result.ok
+      ? { status: "succeeded", historyContext: job.historyContext, result }
+      : { status: "failed", historyContext: job.historyContext, result };
   }
 
   if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
     const detail = formatDashScopeTaskFailure(status, taskPayload);
     markAsrTaskFailed(job.id, detail);
-    return { status: "failed", result: { ok: false, code: "error", detail } };
+    return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
   }
 
   markAsrTaskRunning(job.id);
-  return { status: "running", jobId: job.id };
+  return { status: "running", historyContext: job.historyContext, jobId: job.id };
 }
 
 export async function refreshDashScopeAsrJob(userId: string, jobId: string): Promise<DashScopeAsrJobResult | null> {
@@ -241,17 +241,34 @@ export async function refreshDashScopeAsrJobWithOptions(
     return null;
   }
   if (job.status !== "running") {
-    return await readStoredAsrTaskResult(job, runtimeOptions);
+    return readStoredAsrTaskResult(job);
   }
 
-  const payload = await queryDashScopeAsrTask(job.taskId);
+  const payload = await queryDashScopeAsrTask(job.taskId, runtimeOptions.signal);
   return await settleDashScopeAsrTask(job, payload, runtimeOptions);
+}
+
+export async function cancelDashScopeAsrJob(userId: string, jobId: string): Promise<boolean> {
+  const job = readAsrTask({ id: jobId, userId });
+  if (!job) {
+    return false;
+  }
+  if (job.status !== "running") {
+    return true;
+  }
+
+  markAsrTaskCanceled(job.id);
+  if (!job.taskId.startsWith("pending:")) {
+    await cancelDashScopeAsrTask(job.taskId).catch(() => undefined);
+  }
+  return true;
 }
 
 async function submitDashScopeAsrTask(
   config: DashScopeConfig,
   fileUrl: string,
   options: DashScopeAsrOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   const response = await dashScopeFetch(config, "/services/audio/asr/transcription", {
     method: "POST",
@@ -264,6 +281,7 @@ async function submitDashScopeAsrTask(
       input: buildDashScopeAsrInput(config.model, fileUrl),
       parameters: buildDashScopeAsrParameters(options, config.model),
     }),
+    signal,
   });
   const payload = await readJson(response);
   if (!response.ok) {
@@ -277,13 +295,14 @@ async function submitDashScopeAsrTask(
   return taskId;
 }
 
-async function queryDashScopeAsrTask(taskId: string): Promise<unknown> {
+async function queryDashScopeAsrTask(taskId: string, signal?: AbortSignal): Promise<unknown> {
   const config = readDashScopeConfig();
   const response = await dashScopeFetch(config, `/tasks/${encodeURIComponent(taskId)}`, {
     method: "GET",
     headers: {
       "content-type": "application/json",
     },
+    signal,
   });
   const payload = await readJson(response);
   if (!response.ok) {
@@ -293,6 +312,17 @@ async function queryDashScopeAsrTask(taskId: string): Promise<unknown> {
   return payload;
 }
 
+async function cancelDashScopeAsrTask(taskId: string): Promise<void> {
+  const config = readDashScopeConfig();
+  const response = await dashScopeFetch(config, `/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+  });
+  await response.body?.cancel();
+}
+
 function readTaskStatus(payload: unknown): string {
   return readStringPath(payload, ["output", "task_status"]) ||
     readStringPath(payload, ["data", "task_status"]) ||
@@ -300,7 +330,7 @@ function readTaskStatus(payload: unknown): string {
     "";
 }
 
-async function readDashScopeTranscript(taskPayload: unknown): Promise<TranscriptPayload> {
+async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSignal): Promise<TranscriptPayload> {
   const resultUrls = findTranscriptionUrls(taskPayload);
   if (resultUrls.length === 0) {
     const inlineTranscript = parseDashScopeTranscriptPayload(taskPayload);
@@ -318,6 +348,7 @@ async function readDashScopeTranscript(taskPayload: unknown): Promise<Transcript
         attempts: 2,
         timeoutMs: DASH_SCOPE_REQUEST_TIMEOUT_MS,
       },
+      signal,
     });
     const payload = await readJson(response);
     if (!response.ok) {
@@ -366,70 +397,34 @@ async function dashScopeFetch(
   }
 }
 
-async function readStoredAsrTaskResult(
-  job: StoredAsrTask,
-  runtimeOptions: DashScopeAsrRuntimeOptions,
-): Promise<DashScopeAsrJobResult> {
+function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
   if (job.status === "succeeded") {
-    const stored = readStoredTranscript({ cacheKey: job.cacheKey, userId: job.userId });
-    return stored
-      ? await storedTranscriptJobResult({
-          cacheKey: job.cacheKey,
-          model: parseDashScopeAsrModel(job.model) ?? DEFAULT_ASR_MODEL,
-          runtimeOptions,
-          transcript: stored,
-          userId: job.userId,
-          workKey: job.workKey,
-        })
-      : { status: "failed", result: { ok: false, code: "error", detail: "转录结果已过期，请重新提取。" } };
+    return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已完成，请重新发起转录。" } };
   }
   if (job.status === "failed") {
     return {
       status: "failed",
+      historyContext: job.historyContext,
       result: { ok: false, code: "error", detail: job.errorDetail ?? "转录文本失败。" },
     };
   }
-
-  return { status: "running", jobId: job.id };
-}
-
-async function storedTranscriptJobResult(input: {
-  cacheKey: string;
-  model: DashScopeAsrModel;
-  runtimeOptions: DashScopeAsrRuntimeOptions;
-  transcript: Extract<ProviderResult, { ok: true }>;
-  userId: string;
-  workKey: string;
-}): Promise<DashScopeAsrJobResult> {
-  const result = await postprocessTranscriptForStorage({
-    model: input.model,
-    runtimeOptions: input.runtimeOptions,
-    transcript: input.transcript,
-  });
-  if (result.ok) {
-    upsertStoredTranscript({
-      cacheKey: input.cacheKey,
-      content: result.content,
-      model: input.model,
-      postprocessVersion: result.postprocessVersion,
-      source: "dashscope",
-      transcriptSegments: result.transcriptSegments,
-      userId: input.userId,
-      workKey: input.workKey,
-    });
-    return { status: "succeeded", result };
+  if (job.status === "canceled") {
+    return {
+      status: "failed",
+      historyContext: job.historyContext,
+      result: { ok: false, code: "error", detail: job.errorDetail ?? "转录任务已放弃。" },
+    };
   }
 
-  return { status: "failed", result };
+  return { status: "running", historyContext: job.historyContext, jobId: job.id };
 }
 
-async function postprocessTranscriptForStorage(input: {
+async function postprocessTranscript(input: {
   model: DashScopeAsrModel;
   runtimeOptions: DashScopeAsrRuntimeOptions;
   transcript: Extract<ProviderResult, { ok: true }>;
 }): Promise<ProviderResult> {
-  if (!input.runtimeOptions.postprocess?.enabled ||
-    input.transcript.postprocessVersion === TRANSCRIPT_POSTPROCESS_VERSION) {
+  if (!input.runtimeOptions.postprocess?.enabled) {
     return {
       ...input.transcript,
       asrModel: input.transcript.asrModel ?? input.model,
@@ -440,6 +435,7 @@ async function postprocessTranscriptForStorage(input: {
     content: input.transcript.content,
     segments: input.transcript.transcriptSegments,
     onDelta: input.runtimeOptions.postprocess.onDelta ?? (() => undefined),
+    signal: input.runtimeOptions.signal,
   });
 
   return result.ok
