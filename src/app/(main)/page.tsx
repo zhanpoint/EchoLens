@@ -66,7 +66,6 @@ import {
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
 import { estimateMediaProcessingDurationSeconds } from "@/lib/douyin/cache-estimate";
 import { buildMediaDownloadPath } from "@/lib/douyin/download";
-import { stripTrailingDouyinWatermarkFromTranscript } from "@/lib/transcript/normalize";
 import { cn } from "@/lib/utils";
 
 type ApiError = {
@@ -130,12 +129,24 @@ type SummaryStreamEvent =
   | { type: "delta"; value: string }
   | { summary?: TranscriptHistorySummary; type: "done"; value: string }
   | { type: "error"; error: string; code?: string };
+type CustomSummaryPrompt = SummaryPrompt & {
+  createdAt: number;
+  updatedAt: number;
+};
+type CustomSummaryPromptsPayload = ApiError | {
+  prompts: CustomSummaryPrompt[];
+};
+type CustomSummaryPromptPayload = ApiError | {
+  prompt: CustomSummaryPrompt;
+};
+type DeleteCustomSummaryPromptPayload = ApiError | {
+  ok: true;
+};
 type TranscribeStreamEvent =
-  | { type: "running"; jobId: string; work?: ResolvedDouyinWork }
+  | { type: "running"; jobId: string; status: "running"; work?: ResolvedDouyinWork }
   | { type: "postprocess_start"; work?: ResolvedDouyinWork }
-  | { type: "delta"; value: string }
-  | { historyRecord?: TranscriptHistoryRecord; type: "done"; results: ExtractionResult[]; status: "succeeded"; work?: ResolvedDouyinWork }
-  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; work?: ResolvedDouyinWork };
+  | { historyRecord?: TranscriptHistoryRecord; type: "done"; results: ExtractionResult[]; status: "successed"; work?: ResolvedDouyinWork }
+  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; status: "canceled" | "failed"; work?: ResolvedDouyinWork };
 type TranscribeStreamOutcome =
   | { type: "done" }
   | { type: "running"; jobId: string };
@@ -426,17 +437,18 @@ function readUserFacingError(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) {
     return fallback;
   }
+  const message = error.message.trim();
   if (error.name === "AbortError") {
     return "请求超时，请稍后重试。";
   }
-  if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(error.message)) {
+  if (/^(Failed to fetch|NetworkError|Load failed|fetch failed)$/i.test(message)) {
     return "网络连接异常，请检查网络后重试。";
   }
-  if (/非 JSON 响应|JSON 格式无效|HTTP 5\d\d|服务响应异常/.test(error.message)) {
+  if (/非 JSON 响应|JSON 格式无效|HTTP 5\d\d|服务响应异常/.test(message)) {
     return "服务暂时不可用，请稍后重试。";
   }
 
-  return error.message || fallback;
+  return message || fallback;
 }
 
 function throwApiError(payload: ApiError | undefined, fallback: string): never {
@@ -530,6 +542,79 @@ async function streamSummaryContent(input: {
     } else if (event.type === "error") {
       throw new Error(event.error);
     }
+  }
+}
+
+async function fetchCustomSummaryPrompts(): Promise<CustomSummaryPrompt[]> {
+  const response = await fetch("/api/transcript-prompts", { cache: "no-store" });
+  const payload = await readApiPayload(response, "自定义提示词加载失败。") as CustomSummaryPromptsPayload;
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "自定义提示词加载失败。");
+  }
+  return "prompts" in payload ? payload.prompts : [];
+}
+
+async function createCustomSummaryPrompt(input: {
+  prompt: string;
+  title: string;
+}): Promise<CustomSummaryPrompt> {
+  const response = await fetch("/api/transcript-prompts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = await readApiPayload(response, "自定义提示词保存失败。") as CustomSummaryPromptPayload;
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "自定义提示词保存失败。");
+  }
+  if (!("prompt" in payload)) {
+    throw new Error("自定义提示词保存失败。");
+  }
+  return payload.prompt;
+}
+
+async function updateCustomSummaryPrompt(input: {
+  id: string;
+  prompt: string;
+  title: string;
+}): Promise<CustomSummaryPrompt> {
+  const response = await fetch(`/api/transcript-prompts/${encodeURIComponent(input.id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      prompt: input.prompt,
+      title: input.title,
+    }),
+  });
+  const payload = await readApiPayload(response, "自定义提示词更新失败。") as CustomSummaryPromptPayload;
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "自定义提示词更新失败。");
+  }
+  if (!("prompt" in payload)) {
+    throw new Error("自定义提示词更新失败。");
+  }
+  return payload.prompt;
+}
+
+async function deleteCustomSummaryPrompt(id: string): Promise<void> {
+  const response = await fetch(`/api/transcript-prompts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  const payload = await readApiPayload(response, "自定义提示词删除失败。") as DeleteCustomSummaryPromptPayload;
+  if (!response.ok) {
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "自定义提示词删除失败。");
   }
 }
 
@@ -740,8 +825,7 @@ const SPEAKER_COUNT_MAX = 10;
 const SUBTITLE_MAX_CHARS_PER_CUE = 84;
 const SUBTITLE_MAX_LINE_LENGTH = 42;
 const ASR_MODEL_PANEL_WIDTH = 220;
-const TRANSCRIBE_POLL_INITIAL_DELAY_MS = 1_500;
-const TRANSCRIBE_POLL_MAX_DELAY_MS = 5_000;
+const TRANSCRIBE_POLL_INTERVAL_MS = 1_000;
 const TRANSCRIBE_POLL_TIMEOUT_MS = 10 * 60_000;
 const ASSET_CACHE_RETRY_ATTEMPTS = 3;
 const ASSET_CACHE_RETRY_BASE_DELAY_MS = 800;
@@ -894,13 +978,13 @@ export default function HomePage() {
     ? cachedAssets.originalAudio
     : undefined;
   const isOriginalAudioReady = Boolean(
-    originalAudioCache?.url &&
-    originalAudioCache.asrAudioUrl &&
-    originalAudioCache.asrAudioObjectKey &&
-    !originalAudioCache.isLoading,
+    originalAudioCache?.asrAudioUrl &&
+    originalAudioCache.asrAudioObjectKey,
   );
-  const isOriginalAudioPreparing = activeKind === "video" && (!originalAudioCache || originalAudioCache.isLoading);
-  const originalAudioError = activeKind === "video" && originalAudioCache?.error && !originalAudioCache.url
+  const isOriginalAudioPreparing = activeKind === "video" &&
+    !isOriginalAudioReady &&
+    (!originalAudioCache || originalAudioCache.isLoading);
+  const originalAudioError = activeKind === "video" && !isOriginalAudioReady && originalAudioCache?.error
     ? originalAudioCache.error
     : "";
   const visibleResults = useMemo(
@@ -1401,7 +1485,6 @@ export default function HomePage() {
     signal: AbortSignal,
   ) {
     let elapsedMs = 0;
-    let delayMs = TRANSCRIBE_POLL_INITIAL_DELAY_MS;
     setLiveTranscribeSession((current) => current ? { ...current, jobId } : current);
 
     while (requestId === transcribeRequestIdRef.current && !signal.aborted) {
@@ -1415,9 +1498,8 @@ export default function HomePage() {
         return;
       }
 
-      await abortableSleep(delayMs, signal);
-      elapsedMs += delayMs;
-      delayMs = Math.min(TRANSCRIBE_POLL_MAX_DELAY_MS, Math.round(delayMs * 1.35));
+      await abortableSleep(TRANSCRIBE_POLL_INTERVAL_MS, signal);
+      elapsedMs += TRANSCRIBE_POLL_INTERVAL_MS;
     }
   }
 
@@ -1448,7 +1530,7 @@ export default function HomePage() {
     }
 
     for await (const event of readJsonEventStream<TranscribeStreamEvent>(response.body)) {
-      if (event.type === "postprocess_start" || event.type === "delta") {
+      if (event.type === "postprocess_start") {
         setTranscribeStatusMessage("正在后处理优化转录结果...");
       } else if (event.type === "running") {
         const eventWork = event.work;
@@ -1551,10 +1633,7 @@ export default function HomePage() {
           records={historyList}
         />
         <div
-          className={cn(
-            "content-scroll flex h-full min-w-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 sm:px-5 md:gap-7 md:py-10",
-            historySidebarOpen ? "md:max-w-6xl" : "md:max-w-none",
-          )}
+          className="content-scroll flex h-full min-w-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 sm:px-5 md:gap-7 md:py-10"
         >
           <button
             type="button"
@@ -2362,6 +2441,36 @@ function AsrModelSelect({
     setOpen(false);
   }
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (buttonRef.current?.contains(target) || panelRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   useLayoutEffect(() => {
     if (!open) {
       return;
@@ -2839,7 +2948,7 @@ function useWorkAssetCache(
       });
     });
 
-    void cacheAssetsInOrder(
+    void cacheAssetsForWork(
       actions,
       cacheWork,
       workKey,
@@ -2866,7 +2975,7 @@ function createCacheRunId(): string {
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function cacheAssetsInOrder(
+async function cacheAssetsForWork(
   actions: typeof DOWNLOAD_ACTIONS,
   cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
   workKey: string,
@@ -2876,31 +2985,46 @@ async function cacheAssetsInOrder(
   setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
   onAuthRequired: () => void,
 ): Promise<void> {
-  let videoCacheError = "";
+  let originalAudioHandled = false;
 
   for (const action of actions) {
-    if (action.asset === "originalAudio" && videoCacheError) {
-      setAssetCacheError(
-        setCachedAssets,
-        cacheWork,
-        action.asset,
-        workKey,
-        "视频资源缓存失败，已停止原声音频缓存。",
-      );
+    if (action.asset === "originalAudio" && originalAudioHandled) {
       continue;
     }
 
     try {
-      const cached = await cacheAsset(cacheWork, workKey, cacheRunId, action.asset, signal);
-      if (signal.aborted) {
-        URL.revokeObjectURL(cached.url);
-        return;
+      if (action.asset === "video") {
+        const response = await fetchCacheAssetResponse(
+          buildMediaDownloadPath(cacheWork, action.asset, { cacheRunId }),
+          signal,
+        );
+        await assertCacheAssetResponse(response);
+        originalAudioHandled = true;
+        void cacheOriginalAudioAsset(
+          cacheWork,
+          workKey,
+          cacheRunId,
+          signal,
+          objectUrls,
+          setCachedAssets,
+          onAuthRequired,
+        );
+        const cached = await readCachedAssetResponse(cacheWork, workKey, action.asset, response);
+        cacheCompletedAsset("video", cached, signal, objectUrls, setCachedAssets);
+      } else if (action.asset === "originalAudio") {
+        await cacheOriginalAudioAsset(
+          cacheWork,
+          workKey,
+          cacheRunId,
+          signal,
+          objectUrls,
+          setCachedAssets,
+          onAuthRequired,
+        );
+      } else {
+        const cached = await cacheAsset(cacheWork, workKey, cacheRunId, action.asset, signal);
+        cacheCompletedAsset(action.asset, cached, signal, objectUrls, setCachedAssets);
       }
-      objectUrls.push(cached.url);
-      setCachedAssets((current) => ({
-        ...current,
-        [action.asset]: cached,
-      }));
     } catch (error: unknown) {
       if (signal.aborted) {
         return;
@@ -2910,12 +3034,82 @@ async function cacheAssetsInOrder(
         return;
       }
       const errorMessage = readUserFacingError(error, "资源缓存失败。");
-      if (action.asset === "video") {
-        videoCacheError = errorMessage;
-      }
       setAssetCacheError(setCachedAssets, cacheWork, action.asset, workKey, errorMessage);
+      if (action.asset === "video" && !originalAudioHandled) {
+        originalAudioHandled = true;
+        setAssetCacheError(
+          setCachedAssets,
+          cacheWork,
+          "originalAudio",
+          workKey,
+          "视频资源缓存失败，已停止原声音频缓存。",
+        );
+      }
     }
   }
+}
+
+async function cacheOriginalAudioAsset(
+  cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
+  workKey: string,
+  cacheRunId: string,
+  signal: AbortSignal,
+  objectUrls: string[],
+  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
+  onAuthRequired: () => void,
+): Promise<void> {
+  try {
+    const response = await fetchCacheAssetResponse(
+      buildMediaDownloadPath(cacheWork, "originalAudio", { cacheRunId }),
+      signal,
+    );
+    await assertCacheAssetResponse(response);
+
+    const asrAudio = readAsrAudioHeaders(response, "originalAudio");
+    if (asrAudio.asrAudioObjectKey && asrAudio.asrAudioUrl && !signal.aborted) {
+      setCachedAssets((current) => ({
+        ...current,
+        originalAudio: {
+          ...current.originalAudio,
+          ...asrAudio,
+          downloadName: buildCachedAssetFilename(cacheWork, "originalAudio"),
+          isLoading: true,
+          workKey,
+        },
+      }));
+    }
+
+    const cached = await readCachedAssetResponse(cacheWork, workKey, "originalAudio", response);
+    cacheCompletedAsset("originalAudio", cached, signal, objectUrls, setCachedAssets);
+  } catch (error: unknown) {
+    if (signal.aborted) {
+      return;
+    }
+    if (isAuthRequiredError(error)) {
+      onAuthRequired();
+      return;
+    }
+    const errorMessage = readUserFacingError(error, "资源缓存失败。");
+    setAssetCacheError(setCachedAssets, cacheWork, "originalAudio", workKey, errorMessage);
+  }
+}
+
+function cacheCompletedAsset(
+  asset: MediaAssetKind,
+  cached: CachedMediaAsset & { url: string },
+  signal: AbortSignal,
+  objectUrls: string[],
+  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
+): void {
+  if (signal.aborted) {
+    URL.revokeObjectURL(cached.url);
+    return;
+  }
+  objectUrls.push(cached.url);
+  setCachedAssets((current) => ({
+    ...current,
+    [asset]: cached,
+  }));
 }
 
 function setAssetCacheError(
@@ -2925,15 +3119,26 @@ function setAssetCacheError(
   workKey: string,
   error: string,
 ): void {
-  setCachedAssets((current) => ({
-    ...current,
-    [asset]: {
-      downloadName: buildCachedAssetFilename(cacheWork, asset),
-      error,
-      isLoading: false,
-      workKey,
-    },
-  }));
+  setCachedAssets((current) => {
+    const currentAsset = current[asset];
+    const reusableAsset = asset === "originalAudio" &&
+      currentAsset?.workKey === workKey &&
+      currentAsset.asrAudioObjectKey &&
+      currentAsset.asrAudioUrl
+      ? currentAsset
+      : undefined;
+
+    return {
+      ...current,
+      [asset]: {
+        ...(reusableAsset ?? {}),
+        downloadName: buildCachedAssetFilename(cacheWork, asset),
+        error,
+        isLoading: false,
+        workKey,
+      },
+    };
+  });
 }
 
 function WorkDownloadActions({
@@ -3039,7 +3244,11 @@ async function cacheAsset(
   signal: AbortSignal,
 ): Promise<CachedMediaAsset & { url: string }> {
   const response = await fetchCacheAssetResponse(buildMediaDownloadPath(work, asset, { cacheRunId }), signal);
+  await assertCacheAssetResponse(response);
+  return readCachedAssetResponse(work, workKey, asset, response);
+}
 
+async function assertCacheAssetResponse(response: Response): Promise<void> {
   if (!response.ok) {
     if (response.status === 401) {
       const payload = await readJsonError(response);
@@ -3050,7 +3259,14 @@ async function cacheAsset(
     }
     throw new Error(await readCacheAssetError(response));
   }
+}
 
+async function readCachedAssetResponse(
+  work: Pick<ResolvedDouyinWork, "id" | "kind">,
+  workKey: string,
+  asset: MediaAssetKind,
+  response: Response,
+): Promise<CachedMediaAsset & { url: string }> {
   const blob = await response.blob();
   return {
     ...readAsrAudioHeaders(response, asset),
@@ -3149,11 +3365,14 @@ function readCachedAssetExtension(asset: MediaAssetKind, contentType: string): s
   if (contentType.includes("mpeg")) {
     return "mp3";
   }
+  if (contentType.includes("mp4") && asset === "originalAudio") {
+    return "m4a";
+  }
   if (contentType.includes("mp4")) {
     return "mp4";
   }
 
-  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : "mp4";
+  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "m4a" : "mp4";
 }
 
 function AssetPreviewDialog({
@@ -3584,10 +3803,7 @@ function TranscriptResultPanel({
   onAuthRequired: () => void;
   result: ExtractionResult;
 }) {
-  const normalizedResult = useMemo(() => stripTrailingDouyinWatermarkFromTranscript(result), [result]);
-  const initialContent = normalizedResult.content ?? "";
-  const canEditSpeakers = supportsTranscriptSpeakers(result.asrModel);
-  const canUseSpeakerEmotion = supportsTranscriptSpeakerEmotion(result.asrModel);
+  const initialContent = result.content ?? "";
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
@@ -3627,7 +3843,11 @@ function TranscriptResultPanel({
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
-  const [customPrompts, setCustomPrompts] = useState<SummaryPrompt[]>([]);
+  const [customPrompts, setCustomPrompts] = useState<CustomSummaryPrompt[]>([]);
+  const [customPromptError, setCustomPromptError] = useState("");
+  const [deletingCustomPromptId, setDeletingCustomPromptId] = useState<string | null>(null);
+  const [editingCustomPrompt, setEditingCustomPrompt] = useState<CustomSummaryPrompt | null>(null);
+  const [isSavingCustomPrompt, setIsSavingCustomPrompt] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [customSpeakerIds, setCustomSpeakerIds] = useState<string[]>([]);
@@ -3640,13 +3860,13 @@ function TranscriptResultPanel({
   const latestHistorySummary = history?.summaries[0];
 
   useEffect(() => {
-    if (isEditingContent || normalizedResult.content === undefined) {
+    if (isEditingContent || result.content === undefined) {
       return;
     }
-    setContent(normalizedResult.content);
+    setContent(result.content);
     setEditedSegments(null);
     setEditedSubtitleCues(null);
-  }, [isEditingContent, normalizedResult.content]);
+  }, [isEditingContent, result.content]);
 
   useEffect(() => {
     setSummary(latestHistorySummary?.content ?? "");
@@ -3654,8 +3874,37 @@ function TranscriptResultPanel({
     setSummaryHistoryOpen(false);
   }, [latestHistorySummary?.content, latestHistorySummary?.id]);
 
-  const usesOriginalSegments = content === (normalizedResult.content ?? initialContent);
-  const segments = normalizeTranscriptSegments(content, editedSegments ?? (usesOriginalSegments ? normalizedResult.transcriptSegments : undefined));
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadCustomPrompts() {
+      try {
+        const prompts = await fetchCustomSummaryPrompts();
+        if (isActive) {
+          setCustomPrompts(prompts);
+          setCustomPromptError("");
+        }
+      } catch (error) {
+        if (isAuthRequiredError(error)) {
+          onAuthRequired();
+          return;
+        }
+        if (isActive) {
+          setCustomPromptError(readUserFacingError(error, "自定义提示词加载失败。"));
+        }
+      }
+    }
+
+    void loadCustomPrompts();
+    return () => {
+      isActive = false;
+    };
+  }, [onAuthRequired]);
+
+  const usesOriginalSegments = content === (result.content ?? initialContent);
+  const segments = readDisplayTranscriptSegments(content, editedSegments ?? (usesOriginalSegments ? result.transcriptSegments : undefined));
+  const canEditSpeakers = segments.some((segment) => Boolean(segment.speakerId));
+  const canUseSpeakerEmotion = segments.some((segment) => Boolean(segment.emotion));
   const visibleSegments = isEditingContent ? draftSegments : segments;
   const generatedSubtitleCues = useMemo(() => buildSubtitleCues(segments), [segments]);
   const subtitleCues = editedSubtitleCues ?? generatedSubtitleCues;
@@ -3687,7 +3936,6 @@ function TranscriptResultPanel({
   );
   const activeSearchContainerRef = useRef<HTMLDivElement | null>(null);
   const activeSearchMatchRef = useRef<HTMLDivElement | null>(null);
-  const prompts = [...SUMMARY_PROMPTS, ...customPrompts];
   const hasSummaryOutput = isSummarizing || Boolean(summary || summaryError);
   const isTranslatingAll = activeSourceItems.length > 0
     && activeSourceItems.every((item, index) => activeTranslations[buildTimedTextKey(item, index)]?.isLoading);
@@ -4077,16 +4325,52 @@ function TranscriptResultPanel({
     }
   }
 
-  function saveCustomPrompt(title: string, prompt: string) {
-    const customPrompt: SummaryPrompt = {
-      description: prompt,
-      id: `custom-${Date.now()}`,
-      prompt,
-      title,
-    };
-    setCustomPrompts((current) => [...current, customPrompt]);
-    setPromptDialogOpen(false);
-    void summarize(customPrompt);
+  async function saveCustomPrompt(title: string, prompt: string) {
+    setIsSavingCustomPrompt(true);
+    setCustomPromptError("");
+
+    try {
+      const customPrompt = editingCustomPrompt
+        ? await updateCustomSummaryPrompt({ id: editingCustomPrompt.id, prompt, title })
+        : await createCustomSummaryPrompt({ prompt, title });
+      setCustomPrompts((current) => editingCustomPrompt
+        ? current.map((item) => (item.id === customPrompt.id ? customPrompt : item))
+        : [...current, customPrompt]);
+      setPromptDialogOpen(false);
+      setEditingCustomPrompt(null);
+      if (!editingCustomPrompt) {
+        void summarize(customPrompt);
+      }
+    } catch (error) {
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
+        return;
+      }
+      setCustomPromptError(readUserFacingError(error, "自定义提示词保存失败。"));
+    } finally {
+      setIsSavingCustomPrompt(false);
+    }
+  }
+
+  async function removeCustomPrompt(prompt: CustomSummaryPrompt) {
+    if (!window.confirm(`删除自定义提示词“${prompt.title}”？`)) {
+      return;
+    }
+
+    setDeletingCustomPromptId(prompt.id);
+    setCustomPromptError("");
+    try {
+      await deleteCustomSummaryPrompt(prompt.id);
+      setCustomPrompts((current) => current.filter((item) => item.id !== prompt.id));
+    } catch (error) {
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
+        return;
+      }
+      setCustomPromptError(readUserFacingError(error, "自定义提示词删除失败。"));
+    } finally {
+      setDeletingCustomPromptId(null);
+    }
   }
 
   function resetSummary() {
@@ -4520,8 +4804,20 @@ function TranscriptResultPanel({
                 </button>
                 {summaryMenuOpen ? (
                   <SummaryPromptMenu
-                    prompts={prompts}
+                    customPrompts={customPrompts}
+                    deletingCustomPromptId={deletingCustomPromptId}
+                    error={customPromptError}
+                    builtInPrompts={SUMMARY_PROMPTS}
                     onCustomPrompt={() => {
+                      setCustomPromptError("");
+                      setEditingCustomPrompt(null);
+                      setSummaryMenuOpen(false);
+                      setPromptDialogOpen(true);
+                    }}
+                    onDeleteCustomPrompt={(prompt) => void removeCustomPrompt(prompt)}
+                    onEditCustomPrompt={(prompt) => {
+                      setCustomPromptError("");
+                      setEditingCustomPrompt(prompt);
                       setSummaryMenuOpen(false);
                       setPromptDialogOpen(true);
                     }}
@@ -4612,8 +4908,16 @@ function TranscriptResultPanel({
 
       {promptDialogOpen ? (
         <CustomPromptDialog
-          onClose={() => setPromptDialogOpen(false)}
-          onSave={saveCustomPrompt}
+          error={customPromptError}
+          initialPrompt={editingCustomPrompt?.prompt}
+          initialTitle={editingCustomPrompt?.title}
+          isSaving={isSavingCustomPrompt}
+          mode={editingCustomPrompt ? "edit" : "create"}
+          onClose={() => {
+            setPromptDialogOpen(false);
+            setEditingCustomPrompt(null);
+          }}
+          onSave={(title, prompt) => void saveCustomPrompt(title, prompt)}
         />
       ) : null}
       {canEditSpeakers && speakerEditorTarget ? (
@@ -5319,14 +5623,27 @@ function SettingLabel({ help, label }: { help: string; label: string }) {
 }
 
 function SummaryPromptMenu({
+  builtInPrompts,
+  customPrompts,
+  deletingCustomPromptId,
+  error,
+  onDeleteCustomPrompt,
   onCustomPrompt,
+  onEditCustomPrompt,
   onSelect,
-  prompts,
 }: {
+  builtInPrompts: SummaryPrompt[];
+  customPrompts: CustomSummaryPrompt[];
+  deletingCustomPromptId?: string | null;
+  error?: string;
+  onDeleteCustomPrompt: (prompt: CustomSummaryPrompt) => void;
   onCustomPrompt: () => void;
+  onEditCustomPrompt: (prompt: CustomSummaryPrompt) => void;
   onSelect: (prompt: SummaryPrompt) => void;
-  prompts: SummaryPrompt[];
 }) {
+  const [builtInOpen, setBuiltInOpen] = useState(true);
+  const [customOpen, setCustomOpen] = useState(true);
+
   return (
     <div className="mobile-popover w-auto overflow-hidden rounded-md border border-white/12 bg-[#171a27] shadow-2xl shadow-black/40 sm:w-[min(20rem,calc(100vw-2rem))]">
       <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
@@ -5342,20 +5659,142 @@ function SummaryPromptMenu({
           <Plus className="size-3.5" aria-hidden="true" />
         </button>
       </div>
-      <div className="content-scroll max-h-[min(28rem,calc(100dvh-9rem))] overflow-auto py-1">
-        {prompts.map((prompt) => (
-          <button
+      <div className="content-scroll max-h-[min(30rem,calc(100dvh-9rem))] overflow-auto py-1">
+        <PromptMenuSectionHeader
+          count={builtInPrompts.length}
+          open={builtInOpen}
+          title="内置提示词"
+          onToggle={() => setBuiltInOpen((value) => !value)}
+        />
+        {builtInOpen ? builtInPrompts.map((prompt) => (
+          <PromptMenuItem
             key={prompt.id}
-            type="button"
-            onClick={() => onSelect(prompt)}
-            className="block w-full px-3 py-2.5 text-left transition hover:bg-cyan/[0.07] active:bg-cyan/[0.1]"
-          >
-            <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
-            <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
-              {prompt.description}
-            </div>
-          </button>
-        ))}
+            prompt={prompt}
+            onSelect={onSelect}
+          />
+        )) : null}
+
+        <PromptMenuSectionHeader
+          count={customPrompts.length}
+          open={customOpen}
+          title="自定义提示词"
+          onToggle={() => setCustomOpen((value) => !value)}
+        />
+        {customOpen ? (
+          customPrompts.length ? customPrompts.map((prompt) => (
+            <CustomPromptMenuItem
+              deleting={deletingCustomPromptId === prompt.id}
+              key={prompt.id}
+              prompt={prompt}
+              onDelete={onDeleteCustomPrompt}
+              onEdit={onEditCustomPrompt}
+              onSelect={onSelect}
+            />
+          )) : (
+            <div className="px-3 py-3 text-xs leading-5 text-muted-foreground">暂无自定义提示词</div>
+          )
+        ) : null}
+        {error ? (
+          <div className="px-3 py-2 text-xs font-medium leading-5 text-amber">{error}</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PromptMenuSectionHeader({
+  count,
+  onToggle,
+  open,
+  title,
+}: {
+  count: number;
+  onToggle: () => void;
+  open: boolean;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex h-9 w-full items-center justify-between gap-3 border-t border-white/10 px-3 text-left text-xs font-semibold text-muted-foreground transition first:border-t-0 hover:bg-white/[0.04] hover:text-foreground"
+      aria-expanded={open}
+    >
+      <span>{title}</span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-[11px] tabular-nums">{count}</span>
+        <ChevronDown className={cn("size-3.5 transition", open ? "rotate-180" : "")} aria-hidden="true" />
+      </span>
+    </button>
+  );
+}
+
+function PromptMenuItem({
+  onSelect,
+  prompt,
+}: {
+  onSelect: (prompt: SummaryPrompt) => void;
+  prompt: SummaryPrompt;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(prompt)}
+      className="block w-full px-3 py-2.5 text-left transition hover:bg-cyan/[0.07] active:bg-cyan/[0.1]"
+    >
+      <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
+      <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+        {prompt.description}
+      </div>
+    </button>
+  );
+}
+
+function CustomPromptMenuItem({
+  deleting,
+  onDelete,
+  onEdit,
+  onSelect,
+  prompt,
+}: {
+  deleting: boolean;
+  onDelete: (prompt: CustomSummaryPrompt) => void;
+  onEdit: (prompt: CustomSummaryPrompt) => void;
+  onSelect: (prompt: SummaryPrompt) => void;
+  prompt: CustomSummaryPrompt;
+}) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-1.5 transition hover:bg-cyan/[0.07]">
+      <button
+        type="button"
+        onClick={() => onSelect(prompt)}
+        className="min-w-0 px-1.5 py-2.5 text-left active:bg-cyan/[0.1]"
+      >
+        <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
+        <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+          {prompt.description}
+        </div>
+      </button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => onEdit(prompt)}
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan active:scale-[0.94]"
+          aria-label={`编辑${prompt.title}`}
+          title="编辑"
+        >
+          <PencilLine className="size-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onDelete(prompt)}
+          disabled={deleting}
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label={`删除${prompt.title}`}
+          title="删除"
+        >
+          {deleting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
+        </button>
       </div>
     </div>
   );
@@ -5745,24 +6184,36 @@ function SpeakerEditorDialog({
 }
 
 function CustomPromptDialog({
+  error,
+  initialPrompt = "",
+  initialTitle = "",
+  isSaving,
+  mode,
   onClose,
   onSave,
 }: {
+  error?: string;
+  initialPrompt?: string;
+  initialTitle?: string;
+  isSaving: boolean;
+  mode: "create" | "edit";
   onClose: () => void;
   onSave: (title: string, prompt: string) => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const [title, setTitle] = useState(initialTitle);
+  const [prompt, setPrompt] = useState(initialPrompt);
   const canSave = title.trim().length > 0 && prompt.trim().length > 0;
+  const actionText = mode === "edit" ? "更新" : "保存";
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
       <div className="max-h-[calc(100dvh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-xl overflow-auto rounded-lg border border-white/20 bg-background p-4 shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h4 className="text-base font-semibold">添加自定义提示词</h4>
+          <h4 className="text-base font-semibold">{mode === "edit" ? "编辑自定义提示词" : "添加自定义提示词"}</h4>
           <button
             type="button"
             onClick={onClose}
+            disabled={isSaving}
             className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
             aria-label="关闭"
             title="关闭"
@@ -5788,10 +6239,14 @@ function CustomPromptDialog({
             placeholder="请输入描述。"
           />
         </label>
+        {error ? (
+          <div className="mt-3 text-xs font-medium leading-5 text-amber">{error}</div>
+        ) : null}
         <div className="mt-4 grid gap-2.5 sm:flex sm:justify-end">
           <button
             type="button"
             onClick={onClose}
+            disabled={isSaving}
             className="inline-flex h-10 items-center justify-center rounded-md border border-white/15 px-4 text-sm font-semibold text-foreground transition hover:bg-white/10 active:scale-[0.98] sm:h-9"
           >
             取消
@@ -5799,10 +6254,10 @@ function CustomPromptDialog({
           <button
             type="button"
             onClick={() => onSave(title.trim(), prompt.trim())}
-            disabled={!canSave}
+            disabled={!canSave || isSaving}
             className="inline-flex h-10 items-center justify-center rounded-md bg-cyan px-4 text-sm font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground sm:h-9"
           >
-            保存
+            {isSaving ? `${actionText}中` : actionText}
           </button>
         </div>
       </div>
@@ -5810,29 +6265,17 @@ function CustomPromptDialog({
   );
 }
 
-function supportsTranscriptSpeakers(asrModel: string | undefined): boolean {
-  return asrModel !== "qwen3-asr-flash-filetrans";
-}
-
-function supportsTranscriptSpeakerEmotion(asrModel: string | undefined): boolean {
-  return asrModel === "qwen3-asr-flash-filetrans";
-}
-
-function normalizeTranscriptSegments(
+function readDisplayTranscriptSegments(
   content: string,
   segments: TranscriptSegment[] | undefined,
 ): TranscriptSegment[] {
   const usableSegments = segments?.filter((segment) => segment.text.trim());
-  const normalized = stripTrailingDouyinWatermarkFromTranscript({
-    content,
-    transcriptSegments: usableSegments,
-  });
-  if (normalized.transcriptSegments?.length) {
-    return normalized.transcriptSegments;
+  if (usableSegments?.length) {
+    return usableSegments;
   }
 
-  const normalizedContent = normalized.content?.trim();
-  return normalizedContent ? [{ endSeconds: 0, startSeconds: 0, text: normalizedContent }] : [];
+  const text = content.trim();
+  return text ? [{ endSeconds: 0, startSeconds: 0, text }] : [];
 }
 
 function buildTranscriptCopyText(

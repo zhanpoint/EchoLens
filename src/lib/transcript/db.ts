@@ -16,11 +16,6 @@ type StoredAsrTaskRow = {
   user_id: string;
   work_key: string;
 };
-type StoredAsrAudioCacheRow = {
-  duration_seconds: number;
-  object_key: string;
-  updated_at: number;
-};
 type TranscriptHistoryRecordRow = {
   author_name: string | null;
   created_at: number;
@@ -45,12 +40,21 @@ type TranscriptHistorySummaryRow = {
   prompt_id: string;
   prompt_title: string;
 };
+type TranscriptCustomPromptRow = {
+  created_at: number;
+  description: string;
+  id: string;
+  prompt: string;
+  title: string;
+  updated_at: number;
+  user_id: string;
+};
 
 type GlobalWithTranscriptDb = typeof globalThis & {
   __echolensTranscriptDbMigrated?: number;
 };
 
-const TRANSCRIPT_SCHEMA_VERSION = 9;
+const TRANSCRIPT_SCHEMA_VERSION = 10;
 const globalForTranscriptDb = globalThis as GlobalWithTranscriptDb;
 
 export type StoredAsrTaskStatus = "running" | "succeeded" | "failed" | "canceled";
@@ -71,11 +75,6 @@ export type StoredAsrTask = {
 export type StoredAsrHistoryContext = {
   historyRecordId: string;
   work: unknown;
-};
-export type StoredAsrAudioCache = {
-  durationSeconds: number;
-  objectKey: string;
-  updatedAt: number;
 };
 export type TranscriptHistoryRecord = {
   authorName?: string;
@@ -100,6 +99,15 @@ export type TranscriptHistorySummary = {
   id: string;
   promptId: string;
   promptTitle: string;
+};
+export type TranscriptCustomPrompt = {
+  createdAt: number;
+  description: string;
+  id: string;
+  prompt: string;
+  title: string;
+  updatedAt: number;
+  userId: string;
 };
 
 export function getTranscriptDb(): Database.Database {
@@ -129,29 +137,6 @@ export function upsertAsrAudioCache(input: {
          updated_at = excluded.updated_at`,
     )
     .run(input.userId, input.workKey, input.objectKey, input.durationSeconds, now, now);
-}
-
-export function readAsrAudioCache(input: {
-  objectKey: string;
-  userId: string;
-}): StoredAsrAudioCache | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT object_key, duration_seconds, updated_at
-       FROM transcript_asr_audio_cache
-       WHERE user_id = ? AND object_key = ?
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-    )
-    .get(input.userId, input.objectKey) as StoredAsrAudioCacheRow | undefined;
-
-  return row
-    ? {
-        durationSeconds: row.duration_seconds,
-        objectKey: row.object_key,
-        updatedAt: row.updated_at,
-      }
-    : null;
 }
 
 export function insertAsrTask(input: {
@@ -416,12 +401,12 @@ export function listTranscriptHistoryRecords(input: {
   const sql = query
     ? `SELECT ${HISTORY_RECORD_COLUMNS}
        FROM transcript_history_records
-       WHERE user_id = ? AND display_title LIKE ?
+       WHERE user_id = ? AND transcript_content <> '' AND display_title LIKE ?
        ORDER BY updated_at DESC
        LIMIT ?`
     : `SELECT ${HISTORY_RECORD_COLUMNS}
        FROM transcript_history_records
-       WHERE user_id = ?
+       WHERE user_id = ? AND transcript_content <> ''
        ORDER BY updated_at DESC
        LIMIT ?`;
   const params = query ? [input.userId, `%${query}%`, limit] : [input.userId, limit];
@@ -559,6 +544,100 @@ export function readTranscriptHistorySummary(input: {
   return row ? mapTranscriptHistorySummary(row) : null;
 }
 
+export function listTranscriptCustomPrompts(input: {
+  userId: string;
+}): TranscriptCustomPrompt[] {
+  const rows = getTranscriptDb()
+    .prepare(
+      `SELECT id, user_id, title, description, prompt, created_at, updated_at
+       FROM transcript_custom_prompts
+       WHERE user_id = ?
+       ORDER BY created_at ASC`,
+    )
+    .all(input.userId) as TranscriptCustomPromptRow[];
+  return rows.map(mapTranscriptCustomPrompt);
+}
+
+export function insertTranscriptCustomPrompt(input: {
+  description?: string;
+  id: string;
+  prompt: string;
+  title: string;
+  userId: string;
+}): TranscriptCustomPrompt {
+  const now = Date.now();
+  getTranscriptDb()
+    .prepare(
+      `INSERT INTO transcript_custom_prompts (
+         id, user_id, title, description, prompt, created_at, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.id,
+      input.userId,
+      input.title.trim(),
+      input.description?.trim() || input.prompt.trim(),
+      input.prompt.trim(),
+      now,
+      now,
+    );
+
+  const prompt = readTranscriptCustomPrompt({ id: input.id, userId: input.userId });
+  if (!prompt) {
+    throw new Error("自定义提示词保存失败。");
+  }
+  return prompt;
+}
+
+export function updateTranscriptCustomPrompt(input: {
+  id: string;
+  prompt: string;
+  title: string;
+  userId: string;
+}): TranscriptCustomPrompt | null {
+  getTranscriptDb()
+    .prepare(
+      `UPDATE transcript_custom_prompts
+       SET title = ?, description = ?, prompt = ?, updated_at = ?
+       WHERE user_id = ? AND id = ?`,
+    )
+    .run(
+      input.title.trim(),
+      input.prompt.trim(),
+      input.prompt.trim(),
+      Date.now(),
+      input.userId,
+      input.id,
+    );
+  return readTranscriptCustomPrompt({ id: input.id, userId: input.userId });
+}
+
+export function deleteTranscriptCustomPrompt(input: {
+  id: string;
+  userId: string;
+}): boolean {
+  const result = getTranscriptDb()
+    .prepare("DELETE FROM transcript_custom_prompts WHERE user_id = ? AND id = ?")
+    .run(input.userId, input.id);
+  return result.changes > 0;
+}
+
+export function readTranscriptCustomPrompt(input: {
+  id: string;
+  userId: string;
+}): TranscriptCustomPrompt | null {
+  const row = getTranscriptDb()
+    .prepare(
+      `SELECT id, user_id, title, description, prompt, created_at, updated_at
+       FROM transcript_custom_prompts
+       WHERE user_id = ? AND id = ?
+       LIMIT 1`,
+    )
+    .get(input.userId, input.id) as TranscriptCustomPromptRow | undefined;
+  return row ? mapTranscriptCustomPrompt(row) : null;
+}
+
 export function nextAsrQuotaResetAt(now = Date.now()): number {
   return startOfNextLocalDay(now);
 }
@@ -646,6 +725,19 @@ function migrate(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS transcript_history_summaries_record_idx
       ON transcript_history_summaries(user_id, history_record_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS transcript_custom_prompts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS transcript_custom_prompts_user_created_idx
+      ON transcript_custom_prompts(user_id, created_at);
   `);
   ensureColumn(db, "transcript_asr_tasks", "model", "TEXT");
   ensureColumn(db, "transcript_asr_tasks", "audio_duration_seconds", "REAL NOT NULL DEFAULT 0");
@@ -730,6 +822,18 @@ function mapTranscriptHistorySummary(row: TranscriptHistorySummaryRow): Transcri
     id: row.id,
     promptId: row.prompt_id,
     promptTitle: row.prompt_title,
+  };
+}
+
+function mapTranscriptCustomPrompt(row: TranscriptCustomPromptRow): TranscriptCustomPrompt {
+  return {
+    createdAt: row.created_at,
+    description: row.description,
+    id: row.id,
+    prompt: row.prompt,
+    title: row.title,
+    updatedAt: row.updated_at,
+    userId: row.user_id,
   };
 }
 

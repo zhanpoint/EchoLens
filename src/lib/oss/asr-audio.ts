@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { createReadStream, promises as fs } from "node:fs";
+import { extname } from "node:path";
 import { Readable } from "node:stream";
-import { fetchWithRetry } from "@/lib/http/retry";
 
 export type UploadedAsrAudio = {
   objectKey: string;
@@ -20,7 +20,8 @@ type OssConfig = {
 const DEFAULT_ASR_PREFIX = "echolens/asr/";
 const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 6 * 60 * 60;
 const OSS_REQUEST_TIMEOUT_MS = 120_000;
-const SIGNED_URL_CHECK_TIMEOUT_MS = 20_000;
+const ASR_AUDIO_CONTENT_TYPE = "audio/mp4";
+const ASR_AUDIO_EXTENSION = ".m4a";
 
 export async function uploadAsrAudioFile(input: {
   filePath: string;
@@ -33,19 +34,16 @@ export async function uploadAsrAudioFile(input: {
   }
 
   const config = readOssConfig();
+  assertAsrAudioFile(input.filePath);
   const objectKey = buildAsrObjectKey(config.prefix, input.userId, input.workKey);
-  if (!(await objectExists(config, objectKey))) {
-    await requestOssObject(config, objectKey, {
-      body: Readable.toWeb(createReadStream(input.filePath)) as BodyInit,
-      contentLength: stat.size,
-      contentType: "audio/wav",
-      method: "PUT",
-    });
-  }
+  await requestOssObject(config, objectKey, {
+    body: Readable.toWeb(createReadStream(input.filePath)) as BodyInit,
+    contentLength: stat.size,
+    contentType: ASR_AUDIO_CONTENT_TYPE,
+    method: "PUT",
+  });
 
   const signedUrl = buildSignedGetUrl(config, objectKey);
-  await assertSignedUrlIsPubliclyReadable(signedUrl);
-
   return { objectKey, signedUrl };
 }
 
@@ -59,7 +57,7 @@ export function isManagedAsrAudioUrl(input: {
     const objectUrl = new URL(buildObjectUrl(config, input.objectKey));
     return (
       input.objectKey.startsWith(config.prefix) &&
-      input.objectKey.endsWith(".wav") &&
+      input.objectKey.endsWith(ASR_AUDIO_EXTENSION) &&
       signedUrl.protocol === "https:" &&
       signedUrl.origin === objectUrl.origin &&
       signedUrl.pathname === objectUrl.pathname &&
@@ -70,19 +68,6 @@ export function isManagedAsrAudioUrl(input: {
   } catch {
     return false;
   }
-}
-
-async function objectExists(config: OssConfig, objectKey: string): Promise<boolean> {
-  const response = await signedOssRequest(config, objectKey, { method: "HEAD" });
-  await response.body?.cancel();
-  if (response.status === 404) {
-    return false;
-  }
-  if (!response.ok) {
-    throw new Error(`OSS HEAD 临时音频对象失败：HTTP ${response.status}`);
-  }
-
-  return true;
 }
 
 async function requestOssObject(
@@ -109,7 +94,7 @@ async function signedOssRequest(
     body?: BodyInit;
     contentLength?: number;
     contentType?: string;
-    method: "HEAD" | "PUT";
+    method: "PUT";
   },
 ): Promise<Response> {
   const date = new Date().toUTCString();
@@ -130,15 +115,7 @@ async function signedOssRequest(
     },
     method: input.method,
     timeoutMs: OSS_REQUEST_TIMEOUT_MS,
-  } satisfies RequestInit & { duplex?: "half"; method: "HEAD" | "PUT"; timeoutMs: number };
-
-  if (input.method === "HEAD") {
-    const { timeoutMs, ...requestInit } = request;
-    return await fetchWithRetry(buildObjectUrl(config, objectKey), {
-      ...requestInit,
-      retry: { timeoutMs },
-    });
-  }
+  } satisfies RequestInit & { duplex?: "half"; method: "PUT"; timeoutMs: number };
 
   return await fetchWithTimeout(buildObjectUrl(config, objectKey), request);
 }
@@ -156,18 +133,6 @@ function buildSignedGetUrl(config: OssConfig, objectKey: string): string {
   return url.toString();
 }
 
-async function assertSignedUrlIsPubliclyReadable(signedUrl: string): Promise<void> {
-  const response = await fetchWithRetry(signedUrl, {
-    method: "GET",
-    retry: { timeoutMs: SIGNED_URL_CHECK_TIMEOUT_MS },
-  });
-  await response.body?.cancel();
-
-  if (response.status !== 200) {
-    throw new Error(`OSS 签名音频 URL 公网访问校验失败：HTTP ${response.status}`);
-  }
-}
-
 async function fetchWithTimeout(
   url: string,
   init: RequestInit & { duplex?: "half"; timeoutMs: number },
@@ -182,10 +147,31 @@ async function fetchWithTimeout(
       signal: controller.signal,
     });
   } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "OSS 网络请求失败。");
+    throw new Error(formatOssNetworkError(url, error));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function formatOssNetworkError(url: string, error: unknown): string {
+  const host = new URL(url).hostname;
+  const detail = readNetworkErrorDetail(error);
+  return [
+    `OSS PUT 临时音频对象失败：服务端无法连接 ${host}`,
+    detail ? `（${detail}）` : "",
+    "。请检查服务端网络、ALI_OSS_ENDPOINT 与 bucket 传输加速配置。",
+  ].join("");
+}
+
+function readNetworkErrorDetail(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "";
+  }
+  const cause = error.cause;
+  if (cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string") {
+    return cause.code;
+  }
+  return error.message;
 }
 
 function signOssRequest(
@@ -193,7 +179,7 @@ function signOssRequest(
   input: {
     contentType: string;
     date: string;
-    method: "HEAD" | "PUT";
+    method: "PUT";
     objectKey: string;
   },
 ): string {
@@ -251,7 +237,13 @@ function buildAsrObjectKey(prefix: string, userId: string, workKey: string): str
   const date = new Date().toISOString().slice(0, 10);
   const userHash = sha256(userId).slice(0, 16);
   const workHash = sha256(workKey).slice(0, 24);
-  return `${prefix}${date}/${userHash}/${workHash}.wav`;
+  return `${prefix}${date}/${userHash}/${workHash}${ASR_AUDIO_EXTENSION}`;
+}
+
+function assertAsrAudioFile(filePath: string): void {
+  if (extname(filePath).toLowerCase() !== ASR_AUDIO_EXTENSION) {
+    throw new Error("ASR 音频必须是 m4a 格式。");
+  }
 }
 
 function encodeObjectKey(objectKey: string): string {

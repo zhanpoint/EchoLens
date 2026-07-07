@@ -31,20 +31,16 @@ type PostprocessedSegmentText = {
   text: string;
 };
 
-export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen3.5-flash-boundary-v1";
+export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen-transcript-postprocess-v2";
 
-const DEFAULT_TRANSCRIPT_POSTPROCESS_MODEL = "qwen3.5-flash";
 const POSTPROCESS_REQUEST_TIMEOUT_MS = 120_000;
-const POSTPROCESS_INPUT_LIMIT = 200_000;
-const POSTPROCESS_MAX_TOKENS = 32_768;
 
 export async function streamQwenTranscriptPostprocess(input: {
   content: string;
-  onDelta: (delta: string) => void;
   segments?: TranscriptSegment[];
   signal?: AbortSignal;
 }): Promise<ProviderResult> {
-  const promptSegments = buildPromptSegments(input.content, input.segments);
+  const promptSegments = buildPromptSegments(input);
   if (promptSegments.length === 0) {
     return { ok: false, code: "unavailable", detail: "没有可后处理的转录文本。" };
   }
@@ -52,7 +48,6 @@ export async function streamQwenTranscriptPostprocess(input: {
   try {
     const config = readDashScopeTranscriptPostprocessConfig();
     const prompt = buildTranscriptPostprocessPrompt(promptSegments);
-    assertPostprocessPayloadWithinLimit(prompt);
 
     const response = await callQwenTranscriptPostprocess(config, prompt, input.signal);
     if (!response.ok) {
@@ -81,7 +76,6 @@ export async function streamQwenTranscriptPostprocess(input: {
       const delta = payload.choices?.[0]?.delta?.content;
       if (typeof delta === "string" && delta) {
         output += delta;
-        input.onDelta(delta);
       }
     }
 
@@ -113,7 +107,6 @@ async function callQwenTranscriptPostprocess(
       stream: true,
       stream_options: { include_usage: false },
       temperature: 0,
-      max_tokens: POSTPROCESS_MAX_TOKENS,
     }),
     retry: {
       attempts: 2,
@@ -123,19 +116,19 @@ async function callQwenTranscriptPostprocess(
   });
 }
 
-function buildPromptSegments(content: string, segments: TranscriptSegment[] | undefined): TimestampedPromptSegment[] {
-  const promptSegments = segments?.map((segment, index): TimestampedPromptSegment => ({
+function buildPromptSegments(transcript: { content: string; segments?: TranscriptSegment[] }): TimestampedPromptSegment[] {
+  const promptSegments = transcript.segments?.map((segment, index): TimestampedPromptSegment => ({
     id: index,
     startSeconds: roundSeconds(segment.startSeconds),
     endSeconds: roundSeconds(segment.endSeconds),
-    text: segment.text.trim(),
+    text: segment.text,
   }));
 
   if (promptSegments?.some((segment) => segment.text)) {
     return promptSegments;
   }
 
-  const text = content.trim();
+  const text = transcript.content.trim();
   return text ? [{ id: 0, startSeconds: 0, endSeconds: 0, text }] : [];
 }
 
@@ -166,7 +159,7 @@ function buildPostprocessedTranscript(
       };
     })
     .filter((segment): segment is TranscriptSegment => Boolean(segment));
-  const content = joinTranscriptText(transcriptSegments.map((segment) => segment.text));
+  const content = joinPostprocessedTranscriptText(transcriptSegments);
 
   if (!content) {
     return { ok: false, code: "unavailable", detail: "Qwen 转录后处理没有返回可用文本。" };
@@ -183,7 +176,7 @@ function buildPostprocessedTranscript(
 }
 
 function parsePostprocessedSegmentTexts(output: string, expectedLength: number): PostprocessedSegmentText[] | null {
-  const jsonText = extractJsonArrayText(output.trim());
+  const jsonText = output.trim();
   if (!jsonText) {
     return null;
   }
@@ -214,26 +207,6 @@ function parsePostprocessedSegmentTexts(output: string, expectedLength: number):
   }
 }
 
-function extractJsonArrayText(value: string): string | null {
-  const withoutFence = value
-    .replace(/^```(?:json)?\s*/iu, "")
-    .replace(/\s*```$/u, "")
-    .trim();
-  if (withoutFence.startsWith("[") && withoutFence.endsWith("]")) {
-    return withoutFence;
-  }
-
-  const start = withoutFence.indexOf("[");
-  const end = withoutFence.lastIndexOf("]");
-  return start >= 0 && end > start ? withoutFence.slice(start, end + 1) : null;
-}
-
-function assertPostprocessPayloadWithinLimit(prompt: string): void {
-  if (prompt.length > POSTPROCESS_INPUT_LIMIT) {
-    throw new Error("转录文本过长，暂不支持一次性进行 AI 后处理。");
-  }
-}
-
 function readDashScopeTranscriptPostprocessConfig(): DashScopeTranscriptPostprocessConfig {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
   if (!apiKey) {
@@ -243,7 +216,7 @@ function readDashScopeTranscriptPostprocessConfig(): DashScopeTranscriptPostproc
   return {
     apiKey,
     baseUrl: readDashScopeCompatibleBaseUrl(),
-    model: process.env.DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL?.trim() || DEFAULT_TRANSCRIPT_POSTPROCESS_MODEL,
+    model: readRequiredEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL"),
   };
 }
 
@@ -253,6 +226,14 @@ function readDashScopeCompatibleBaseUrl(): string {
     throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
   }
   return baseUrl;
+}
+
+function readRequiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} 未配置。`);
+  }
+  return value;
 }
 
 function readPostprocessFailure(
@@ -283,7 +264,7 @@ function formatPostprocessThrownError(error: unknown): ProviderResult {
     return { ok: false, code: "error", detail: "转录任务已放弃。" };
   }
   if (error instanceof Error) {
-    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL)/.test(error.message)) {
+    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL|TRANSCRIPT_POSTPROCESS_MODEL)/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {
@@ -325,22 +306,18 @@ function formatPostprocessError(
   return message ?? `Qwen 转录后处理请求失败：HTTP ${httpStatus}`;
 }
 
-function joinTranscriptText(parts: string[]): string {
-  return parts
-    .map((part) => part.trim().replace(/\s+/g, " "))
-    .filter(Boolean)
-    .reduce((content, part) => {
-      if (!content) {
-        return part;
-      }
-      return `${content}${needsWordBoundary(content, part) ? " " : "\n"}${part}`;
-    }, "");
-}
-
-function needsWordBoundary(left: string, right: string): boolean {
-  return /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right);
-}
-
 function roundSeconds(value: number): number {
   return Number.isFinite(value) ? Math.round(value * 1000) / 1000 : 0;
+}
+
+function joinPostprocessedTranscriptText(segments: TranscriptSegment[]): string {
+  return segments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .reduce((content, text) => {
+      if (!content) {
+        return text;
+      }
+      return `${content}${/[A-Za-z0-9]$/.test(content) && /^[A-Za-z0-9]/.test(text) ? " " : "\n"}${text}`;
+    }, "");
 }

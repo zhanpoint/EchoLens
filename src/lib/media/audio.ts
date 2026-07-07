@@ -14,6 +14,8 @@ const DOUYIN_USER_AGENT =
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 600_000;
 const MEDIA_DOWNLOAD_MAX_ATTEMPTS = 3;
 const MEDIA_DOWNLOAD_RETRY_BASE_DELAY_MS = 500;
+const FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS = 600_000;
+const FFMPEG_STDERR_TAIL_CHARS = 8_192;
 const MAX_USER_MEDIA_CACHES = 256;
 const MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS = 12 * 60 * 60;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 2 * 1024 * 1024 * 1024;
@@ -32,8 +34,10 @@ export type AudioTranscriptionLimits = {
   maxDurationSeconds: number;
   sizeLimitMessage?: string;
 };
-export type TranscribableWavAudio = {
+export type TranscribableAudio = {
+  contentType: string;
   durationSeconds: number;
+  extension: string;
   filePath: string;
   sizeBytes: number;
 };
@@ -45,8 +49,13 @@ class RangeResumeUnsupportedError extends Error {}
 type CachedRemoteMediaEntry = CachedRemoteMedia & {
   lastAccessedAt: number;
 };
-type CachedAudioEntry = {
+type AudioFileMetadata = {
+  contentType: string;
+  durationSeconds: number;
+  extension: string;
   filePath: string;
+};
+type CachedAudioEntry = AudioFileMetadata & {
   lastAccessedAt: number;
 };
 type UserMediaCache = {
@@ -67,6 +76,8 @@ type MediaCacheOptions = AbortableOptions & {
 };
 
 const userMediaCaches = new Map<string, UserMediaCache>();
+const EXTRACTED_AUDIO_CONTENT_TYPE = "audio/mp4";
+const EXTRACTED_AUDIO_EXTENSION = "m4a";
 
 export function resolveBundledFfmpegPath(): string {
   return path.join(
@@ -110,7 +121,7 @@ export async function prepareMediaCacheForWork(userId: string, workKey: string, 
   }
 }
 
-async function extractAudioToCachedWav(
+async function extractAudioToCachedFile(
   userId: string,
   mediaCacheKey: string,
   options: AbortableOptions = {},
@@ -425,43 +436,80 @@ async function cacheExtractedAudioFile(
   const media = await readRequiredCompletedRemoteMediaCache(cache, cacheKey);
   throwIfAborted(signal);
   const cacheDir = path.join(os.tmpdir(), "echolens-audio-cache");
-  const filePath = path.join(cacheDir, `${cacheKey}.wav`);
-  const partialPath = buildTaskPartialPath(filePath);
   await fs.mkdir(cacheDir, { recursive: true });
 
-  try {
-    await runFfmpeg(resolveFfmpegPath(), [
-      "-y",
-      "-i",
-      media.filePath,
-      "-vn",
-      "-acodec",
-      "pcm_s16le",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-f",
-      "wav",
-      partialPath,
-    ], signal);
-    throwIfAborted(signal);
-    await fs.rm(filePath, { force: true });
-    await fs.rename(partialPath, filePath);
-  } catch (error) {
-    await fs.rm(partialPath, { force: true });
-    throw error;
-  }
+  const audio = await extractAudioToM4a(media.filePath, cacheDir, cacheKey, signal);
 
   const entry = {
-    filePath,
+    contentType: audio.contentType,
+    durationSeconds: audio.durationSeconds,
+    extension: audio.extension,
+    filePath: audio.filePath,
     lastAccessedAt: Date.now(),
   };
   cache.extractedAudio.set(cacheKey, entry);
   return entry;
 }
 
-export async function prepareTranscribableWavAudioFromCachedMedia(
+async function extractAudioToM4a(
+  inputPath: string,
+  outputDir: string,
+  cacheKey: string,
+  signal: AbortSignal,
+): Promise<AudioFileMetadata> {
+  const filePath = path.join(outputDir, `${cacheKey}.${EXTRACTED_AUDIO_EXTENSION}`);
+  const partialPath = buildTaskPartialPath(filePath);
+  await fs.rm(partialPath, { force: true });
+
+  try {
+    const durationSeconds = await runFfmpeg(resolveFfmpegPath(), m4aExtractArgs(inputPath, partialPath), signal);
+    throwIfAborted(signal);
+    const size = await readFileSize(partialPath);
+    if (size <= 0) {
+      throw new Error("ffmpeg 抽取音频失败：输出文件为空。");
+    }
+    await fs.rm(filePath, { force: true });
+    await fs.rename(partialPath, filePath);
+    return {
+      contentType: EXTRACTED_AUDIO_CONTENT_TYPE,
+      durationSeconds,
+      extension: EXTRACTED_AUDIO_EXTENSION,
+      filePath,
+    };
+  } catch (error) {
+    await fs.rm(partialPath, { force: true });
+    throw error;
+  }
+}
+
+function m4aExtractArgs(inputPath: string, outputPath: string): string[] {
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-nostdin",
+    "-y",
+    "-i",
+    inputPath,
+    "-map",
+    "0:a:0",
+    "-vn",
+    "-sn",
+    "-dn",
+    "-c:a",
+    "copy",
+    "-movflags",
+    "+faststart",
+    "-f",
+    "mp4",
+    "-progress",
+    "pipe:2",
+    "-nostats",
+    outputPath,
+  ];
+}
+
+export async function prepareTranscribableAudioFromCachedMedia(
   userId: string,
   mediaCacheKey: string,
   limits: AudioTranscriptionLimits = {
@@ -469,93 +517,27 @@ export async function prepareTranscribableWavAudioFromCachedMedia(
     maxDurationSeconds: MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS,
   },
   options: AbortableOptions = {},
-): Promise<TranscribableWavAudio> {
-  const audio = await extractAudioToCachedWav(userId, mediaCacheKey, options);
+): Promise<TranscribableAudio> {
+  const audio = await extractAudioToCachedFile(userId, mediaCacheKey, options);
   throwIfAborted(options.signal);
   const size = await readFileSize(audio.filePath);
   if (size > limits.maxBytes) {
     throw new AudioTranscriptionLimitError(limits.sizeLimitMessage ?? AUDIO_SIZE_LIMIT_MESSAGE);
   }
 
-  const durationSeconds = await readCachedWavDurationSeconds(audio.filePath).catch(() => {
-    throw new AudioTranscriptionLimitError(AUDIO_DURATION_READ_MESSAGE);
-  });
+  const durationSeconds = audio.durationSeconds;
   throwIfAborted(options.signal);
   if (durationSeconds > limits.maxDurationSeconds) {
     throw new AudioTranscriptionLimitError(limits.durationLimitMessage ?? AUDIO_DURATION_LIMIT_MESSAGE);
   }
 
   return {
+    contentType: audio.contentType,
     durationSeconds,
+    extension: audio.extension,
     filePath: audio.filePath,
     sizeBytes: size,
   };
-}
-
-async function readCachedWavDurationSeconds(filePath: string): Promise<number> {
-  const file = await fs.open(filePath, "r");
-  try {
-    const header = Buffer.alloc(12);
-    const { bytesRead } = await file.read(header, 0, header.byteLength, 0);
-    if (
-      bytesRead < header.byteLength ||
-      header.subarray(0, 4).toString("ascii") !== "RIFF" ||
-      header.subarray(8, 12).toString("ascii") !== "WAVE"
-    ) {
-      throw new Error("Invalid WAV header");
-    }
-
-    const stat = await file.stat();
-    const chunkHeader = Buffer.alloc(8);
-    let byteRate: number | null = null;
-    let dataBytes: number | null = null;
-    let offset = 12;
-
-    while (offset + chunkHeader.byteLength <= stat.size) {
-      const chunk = await file.read(chunkHeader, 0, chunkHeader.byteLength, offset);
-      if (chunk.bytesRead < chunkHeader.byteLength) {
-        break;
-      }
-
-      const chunkId = chunkHeader.subarray(0, 4).toString("ascii");
-      const chunkSize = chunkHeader.readUInt32LE(4);
-      const dataOffset = offset + chunkHeader.byteLength;
-      const nextOffset = dataOffset + chunkSize + (chunkSize % 2);
-      if (dataOffset + chunkSize > stat.size) {
-        throw new Error("Invalid WAV chunk size");
-      }
-
-      if (chunkId === "fmt ") {
-        if (chunkSize < 16) {
-          throw new Error("Invalid WAV fmt chunk");
-        }
-
-        const fmt = Buffer.alloc(16);
-        const fmtRead = await file.read(fmt, 0, fmt.byteLength, dataOffset);
-        if (fmtRead.bytesRead < fmt.byteLength) {
-          throw new Error("Invalid WAV fmt payload");
-        }
-        byteRate = fmt.readUInt32LE(8);
-      } else if (chunkId === "data") {
-        dataBytes = chunkSize;
-      }
-
-      if (byteRate && dataBytes !== null) {
-        break;
-      }
-
-      offset = nextOffset;
-    }
-
-    const durationSeconds = byteRate && dataBytes !== null ? dataBytes / byteRate : 0;
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      throw new Error("Invalid WAV duration");
-    }
-
-    return durationSeconds;
-  } finally {
-    await file.close();
-  }
 }
 
 async function clearCachedFiles(entries: Map<string, { filePath: string }>): Promise<void> {
@@ -638,43 +620,96 @@ function mediaDownloadHeaders(): Record<string, string> {
   };
 }
 
-function runFfmpeg(ffmpegPath: string, args: string[], signal?: AbortSignal): Promise<void> {
-  const stderr: string[] = [];
+function runFfmpeg(ffmpegPath: string, args: string[], signal?: AbortSignal): Promise<number> {
+  let stderr = "";
+  let maxDurationSeconds = 0;
   throwIfAborted(signal);
 
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<number>((resolve, reject) => {
     const child = spawn(ffmpegPath, args, { windowsHide: true });
     let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill("SIGTERM");
+      signal?.removeEventListener("abort", abort);
+      reject(new Error("ffmpeg 抽取音频超时，请稍后重试或改用更短的视频。"));
+    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
     const abort = () => {
       if (settled) {
         return;
       }
+      settled = true;
       child.kill("SIGTERM");
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
       reject(abortError());
     };
     signal?.addEventListener("abort", abort, { once: true });
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => stderr.push(chunk));
+    child.stderr.on("data", (chunk: string) => {
+      stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
+      maxDurationSeconds = Math.max(maxDurationSeconds, parseFfmpegProgressDurationSeconds(stderr));
+    });
     child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
       settled = true;
+      clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       reject(error);
     });
     child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
       settled = true;
+      clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
       if (signal?.aborted) {
         reject(abortError());
         return;
       }
       if (code === 0) {
-        resolve();
+        if (maxDurationSeconds > 0) {
+          resolve(maxDurationSeconds);
+          return;
+        }
+        reject(new Error(AUDIO_DURATION_READ_MESSAGE));
         return;
       }
 
-      reject(new Error(`ffmpeg 抽取音频失败：${stderr.join("").slice(-600)}`));
+      reject(new Error(`ffmpeg 抽取音频失败：${stderr.slice(-600)}`));
     });
   });
+}
+
+function parseFfmpegProgressDurationSeconds(chunk: string): number {
+  let maxSeconds = 0;
+  for (const line of chunk.split(/\r?\n/u)) {
+    const outTime = line.match(/^out_time=(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)$/u);
+    if (outTime) {
+      maxSeconds = Math.max(
+        maxSeconds,
+        Number(outTime[1]) * 3600 + Number(outTime[2]) * 60 + Number(outTime[3]),
+      );
+      continue;
+    }
+
+    const outTimeMs = line.match(/^out_time_ms=(\d+)$/u);
+    if (outTimeMs) {
+      maxSeconds = Math.max(maxSeconds, Number(outTimeMs[1]) / 1_000_000);
+    }
+  }
+
+  return Number.isFinite(maxSeconds) ? maxSeconds : 0;
+}
+
+function tailText(value: string, maxLength: number): string {
+  return value.length > maxLength ? value.slice(-maxLength) : value;
 }
 
 function linkedAbortSignal(...signals: Array<AbortSignal | undefined>): AbortSignal {

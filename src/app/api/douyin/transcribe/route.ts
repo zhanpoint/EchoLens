@@ -13,7 +13,7 @@ import {
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
 import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
-import { readAsrAudioCache, upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
+import { upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
 import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 import {
   DOUYIN_KINDS,
@@ -70,17 +70,16 @@ const ReadJobSchema = z.object({
 }).strict();
 
 type TranscribeStreamEvent =
-  | { type: "running"; jobId: string; work?: z.infer<typeof WorkSchema> }
+  | { type: "running"; jobId: string; status: "running"; work?: z.infer<typeof WorkSchema> }
   | { type: "postprocess_start"; work?: z.infer<typeof WorkSchema> }
-  | { type: "delta"; value: string }
   | {
       type: "done";
       historyRecord?: TranscriptHistoryRecord;
       results: ExtractionResult[];
-      status: "succeeded";
+      status: "successed";
       work?: z.infer<typeof WorkSchema>;
     }
-  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; work?: z.infer<typeof WorkSchema> };
+  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; status: "canceled" | "failed"; work?: z.infer<typeof WorkSchema> };
 
 export async function POST(request: Request) {
   const user = requireUser(request);
@@ -100,29 +99,20 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "原声音频缓存地址无效，请重新缓存后再转录。" }, { status: 400 });
       }
 
-      const audioCache = readAsrAudioCache({
-        objectKey: audioObjectKey,
-        userId: user.id,
-      });
-      if (!audioCache) {
-        return NextResponse.json({ error: "原声音频缓存已失效，请重新缓存后再转录。" }, { status: 400 });
-      }
-
       const asrOptions = buildAsrOptions(parsed.data);
       return streamTranscribeOperation(
-        ({ onDelta }) => transcribeDashScopeAsr(
+        ({ onPostprocessStart }) => transcribeDashScopeAsr(
           user.id,
           buildWorkCacheKey(work),
           {
-            durationSeconds: audioCache.durationSeconds,
+            durationSeconds: work.durationSeconds ?? 0,
             objectKey: audioObjectKey,
             signedUrl: audioUrl,
           },
           asrOptions,
           {
             postprocess: {
-              enabled: true,
-              onDelta,
+              onStart: onPostprocessStart,
             },
             ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
             ...(parsed.data.historyRecordId ? {
@@ -167,10 +157,9 @@ export async function GET(request: Request) {
   }
 
   return streamTranscribeOperation(
-    ({ onDelta }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+    ({ onPostprocessStart }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
       postprocess: {
-        enabled: true,
-        onDelta,
+        onStart: onPostprocessStart,
       },
       signal: request.signal,
     }),
@@ -200,7 +189,7 @@ export async function DELETE(request: Request) {
 }
 
 function streamTranscribeOperation(
-  run: (input: { onDelta: (delta: string) => void }) => Promise<DashScopeAsrJobResult | null>,
+  run: (input: { onPostprocessStart: () => void }) => Promise<DashScopeAsrJobResult | null>,
   options: {
     fallbackAsrModel?: DashScopeAsrModel;
     userId?: string;
@@ -230,12 +219,11 @@ function streamTranscribeOperation(
       try {
         let postprocessStarted = false;
         const result = await run({
-          onDelta: (delta) => {
+          onPostprocessStart: () => {
             if (!postprocessStarted) {
               postprocessStarted = true;
               send({ type: "postprocess_start", work: options.work });
             }
-            send({ type: "delta", value: delta });
           },
         });
         if (signal?.aborted) {
@@ -243,11 +231,11 @@ function streamTranscribeOperation(
         }
 
         if (!result) {
-          send({ type: "error", error: "转录任务不存在或已过期。", work: options.work });
+          send({ type: "error", error: "转录任务不存在或已过期。", status: "failed", work: options.work });
           return;
         }
         if (result.status === "running") {
-          send({ type: "running", jobId: result.jobId, work: options.work });
+          send({ type: "running", jobId: result.jobId, status: "running", work: options.work });
           return;
         }
         if (!result.result.ok) {
@@ -255,6 +243,7 @@ function streamTranscribeOperation(
             type: "error",
             code: result.result.code,
             error: result.result.detail,
+            status: result.status === "canceled" ? "canceled" : "failed",
             work: options.work,
           });
           return;
@@ -274,7 +263,7 @@ function streamTranscribeOperation(
           type: "done",
           historyRecord,
           results: [resultItem],
-          status: "succeeded",
+          status: "successed",
           work: options.work ?? historyContext,
         });
       } catch (error) {
@@ -288,6 +277,7 @@ function streamTranscribeOperation(
             error: error.message,
             resetAt: new Date(error.resetAt).toISOString(),
             retryAfter,
+            status: "failed",
             work: options.work,
           });
           return;
@@ -296,6 +286,7 @@ function streamTranscribeOperation(
         send({
           type: "error",
           error: error instanceof Error ? error.message : "转录失败。",
+          status: "failed",
           work: options.work,
         });
       } finally {
@@ -352,19 +343,19 @@ function saveTranscriptHistory(input: {
 }
 
 function buildAsrOptions(input: z.infer<typeof TranscribeSchema>) {
-  const options: {
-    diarizationEnabled?: boolean;
-    enableItn?: boolean;
-    model?: DashScopeAsrModel;
-    specialWordFilter?: z.infer<typeof SpecialWordFilterSchema>;
-    speakerCount?: number;
-  } = {};
   const profile = input.model ?? E1_ASR_PROFILE;
   const model = getDashScopeAsrModelForProfile(profile);
   const isE1 = profile === E1_ASR_PROFILE;
   const isE2 = profile === E2_ASR_PROFILE;
 
-  options.model = model;
+  const options: {
+    diarizationEnabled?: boolean;
+    enableItn?: boolean;
+    model: DashScopeAsrModel;
+    profile: DashScopeAsrModelProfile;
+    specialWordFilter?: z.infer<typeof SpecialWordFilterSchema>;
+    speakerCount?: number;
+  } = { model, profile };
 
   if (input.enableItn && isE1) {
     options.enableItn = true;

@@ -13,7 +13,7 @@ import {
   downloadRemoteMediaToCachedFile,
   downloadRemoteMediaToFile,
   prepareMediaCacheForWork,
-  prepareTranscribableWavAudioFromCachedMedia,
+  prepareTranscribableAudioFromCachedMedia,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
 } from "../lib/media/audio";
@@ -35,19 +35,6 @@ function sharePageHtml(videoInfoRes: unknown): string {
       },
     },
   })}</script></body></html>`;
-}
-
-async function readWavHeader(filePath: string): Promise<{
-  bitsPerSample: number;
-  channels: number;
-  sampleRate: number;
-}> {
-  const header = await fs.readFile(filePath);
-  return {
-    bitsPerSample: header.readUInt16LE(34),
-    channels: header.readUInt16LE(22),
-    sampleRate: header.readUInt32LE(24),
-  };
 }
 
 describe("douyin url utilities", () => {
@@ -485,7 +472,7 @@ describe("audio transcription preparation", () => {
 
   it("extracts audio from a completed cached media file", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const wavPath = path.join(tempDir, "tone.wav");
+    const sourceAudioPath = path.join(tempDir, "tone.m4a");
 
     try {
       await runFfmpeg(resolveBundledFfmpegPath(), [
@@ -494,9 +481,13 @@ describe("audio transcription preparation", () => {
         "lavfi",
         "-i",
         "sine=frequency=440:duration=0.1",
-        wavPath,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        sourceAudioPath,
       ]);
-      const source = await fs.readFile(wavPath);
+      const source = await fs.readFile(sourceAudioPath);
       let referer = "";
       let requestCount = 0;
       let userAgent = "";
@@ -506,7 +497,7 @@ describe("audio transcription preparation", () => {
         userAgent = request.headers["user-agent"] ?? "";
         response.writeHead(200, {
           "content-length": String(source.byteLength),
-          "content-type": "audio/wav",
+          "content-type": "audio/mp4",
         });
         response.end(source);
       });
@@ -524,38 +515,34 @@ describe("audio transcription preparation", () => {
         const mediaCacheKey = "video:7644929016692636809:video";
         await prepareMediaCacheForWork(userA, "video:7644929016692636809");
         const cachedMedia = await downloadRemoteMediaToCachedFile(userA, mediaUrl, { cacheKey: mediaCacheKey });
-        const audio = await prepareTranscribableWavAudioFromCachedMedia(userA, mediaCacheKey);
+        const audio = await prepareTranscribableAudioFromCachedMedia(userA, mediaCacheKey);
         const audioCachePath = path.join(
           os.tmpdir(),
           "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userA, "stable", mediaCacheKey])).digest("hex")}.wav`,
+          `${createHash("sha256").update(JSON.stringify([userA, "stable", mediaCacheKey])).digest("hex")}.m4a`,
         );
         const otherUserAudioCachePath = path.join(
           os.tmpdir(),
           "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userB, "stable", mediaCacheKey])).digest("hex")}.wav`,
+          `${createHash("sha256").update(JSON.stringify([userB, "stable", mediaCacheKey])).digest("hex")}.m4a`,
         );
         const audioMtime = (await fs.stat(audioCachePath)).mtimeMs;
         await prepareMediaCacheForWork(userA, "video:7644929016692636809");
-        await prepareTranscribableWavAudioFromCachedMedia(userA, mediaCacheKey);
-        const wavHeader = await readWavHeader(audio.filePath);
+        await prepareTranscribableAudioFromCachedMedia(userA, mediaCacheKey);
 
         expect(referer).toBe("https://www.douyin.com/");
         expect(userAgent).toContain("Mozilla/5.0");
-        expect(wavHeader).toMatchObject({
-          bitsPerSample: 16,
-          channels: 1,
-          sampleRate: 16000,
-        });
+        expect(audio.contentType).toBe("audio/mp4");
+        expect(path.extname(audio.filePath)).toBe(".m4a");
         expect(audio.durationSeconds).toBeGreaterThan(0);
-        expect(audio.sizeBytes).toBeGreaterThan(44);
+        expect(audio.sizeBytes).toBeGreaterThan(0);
         await expect(fs.readFile(cachedMedia.filePath)).resolves.toEqual(source);
         expect((await fs.stat(audioCachePath)).mtimeMs).toBe(audioMtime);
         expect(requestCount).toBe(1);
 
         await prepareMediaCacheForWork(userB, "video:7644929016692636809");
         await downloadRemoteMediaToCachedFile(userB, mediaUrl, { cacheKey: mediaCacheKey });
-        await prepareTranscribableWavAudioFromCachedMedia(userB, mediaCacheKey);
+        await prepareTranscribableAudioFromCachedMedia(userB, mediaCacheKey);
         expect(requestCount).toBe(2);
 
         await prepareMediaCacheForWork(userA, "video:7644929016692636810");
@@ -573,19 +560,10 @@ describe("audio transcription preparation", () => {
 
   it("resumes partially downloaded remote media files", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const wavPath = path.join(tempDir, "tone.wav");
-    const partialPath = path.join(tempDir, "partial.wav");
+    const partialPath = path.join(tempDir, "partial.bin");
 
     try {
-      await runFfmpeg(resolveBundledFfmpegPath(), [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=0.1",
-        wavPath,
-      ]);
-      const source = await fs.readFile(wavPath);
+      const source = Buffer.from("0123456789".repeat(1024));
       const firstChunkSize = Math.floor(source.byteLength / 2);
       let resumedRange = "";
       await fs.writeFile(partialPath, source.subarray(0, firstChunkSize));
@@ -601,7 +579,7 @@ describe("audio transcription preparation", () => {
         response.writeHead(206, {
           "content-length": String(source.byteLength - start),
           "content-range": `bytes ${start}-${source.byteLength - 1}/${source.byteLength}`,
-          "content-type": "audio/wav",
+          "content-type": "application/octet-stream",
         });
         response.end(source.subarray(start));
       });

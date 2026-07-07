@@ -11,7 +11,7 @@ import {
   CompletedMediaCacheRequiredError,
   downloadRemoteMediaToCachedFile,
   prepareMediaCacheForWork,
-  prepareTranscribableWavAudioFromCachedMedia,
+  prepareTranscribableAudioFromCachedMedia,
 } from "@/lib/media/audio";
 import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
 import { upsertAsrAudioCache } from "@/lib/transcript/db";
@@ -58,7 +58,7 @@ export async function GET(request: Request) {
   if (asset === "originalAudio") {
     try {
       const videoCacheKey = buildWorkMediaCacheKey(work, "video");
-      const audio = await prepareTranscribableWavAudioFromCachedMedia(user.id, videoCacheKey);
+      const audio = await prepareTranscribableAudioFromCachedMedia(user.id, videoCacheKey);
       const asrAudio = await uploadAsrAudioFile({
         filePath: audio.filePath,
         userId: user.id,
@@ -72,8 +72,8 @@ export async function GET(request: Request) {
       });
       return await fileResponse(audio.filePath, {
         asrAudio,
-        contentType: "audio/wav",
-        filename: buildFilename(id, asset, "audio/wav"),
+        contentType: audio.contentType,
+        filename: buildFilename(id, asset, audio.extension),
         inline: isPreview,
         range: requestRange,
       });
@@ -101,7 +101,7 @@ export async function GET(request: Request) {
       const contentType = media.contentType ?? defaultContentType(asset);
       return await fileResponse(media.filePath, {
         contentType,
-        filename: buildFilename(id, asset, contentType),
+        filename: buildFilename(id, asset, readExtension(asset, contentType)),
         inline: isPreview,
         range: requestRange,
       });
@@ -113,7 +113,7 @@ export async function GET(request: Request) {
     const contentType = media.contentType ?? defaultContentType(asset);
     return await fileResponse(media.filePath, {
       contentType,
-      filename: buildFilename(id, asset, contentType),
+      filename: buildFilename(id, asset, readExtension(asset, contentType)),
       inline: isPreview,
       range: requestRange,
     });
@@ -177,9 +177,9 @@ function parseSingleRange(value: string | null, size: number): { start: number; 
 function buildFilename(
   id: string,
   asset: MediaAssetKind,
-  contentType: string,
+  extension: string,
 ): string {
-  return `echolens-${id}-${asset}.${readExtension(asset, contentType)}`;
+  return `echolens-${id}-${asset}.${extension}`;
 }
 
 function readExtension(asset: MediaAssetKind, contentType: string): string {
@@ -202,15 +202,12 @@ function readExtension(asset: MediaAssetKind, contentType: string): string {
     return "mp4";
   }
 
-  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "wav" : "mp4";
+  return asset === "cover" ? "jpg" : "mp4";
 }
 
-function defaultContentType(asset: MediaAssetKind): string {
+function defaultContentType(asset: Exclude<MediaAssetKind, "originalAudio">): string {
   if (asset === "cover") {
     return "image/jpeg";
-  }
-  if (asset === "originalAudio") {
-    return "audio/wav";
   }
   return "video/mp4";
 }

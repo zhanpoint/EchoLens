@@ -13,7 +13,7 @@ vi.mock("@/lib/media/audio", () => ({
   CompletedMediaCacheRequiredError: class CompletedMediaCacheRequiredError extends Error {},
   downloadRemoteMediaToCachedFile: vi.fn(),
   prepareMediaCacheForWork: vi.fn(),
-  prepareTranscribableWavAudioFromCachedMedia: vi.fn(),
+  prepareTranscribableAudioFromCachedMedia: vi.fn(),
 }));
 
 vi.mock("@/lib/oss/asr-audio", () => ({
@@ -31,7 +31,7 @@ vi.mock("@/app/api/auth/_shared", () => ({
 import { collectWorkMetadata } from "@/lib/douyin/detail";
 import {
   downloadRemoteMediaToCachedFile,
-  prepareTranscribableWavAudioFromCachedMedia,
+  prepareTranscribableAudioFromCachedMedia,
 } from "@/lib/media/audio";
 import { uploadAsrAudioFile } from "@/lib/oss/asr-audio";
 import { upsertAsrAudioCache } from "@/lib/transcript/db";
@@ -40,7 +40,7 @@ import { GET } from "../app/api/douyin/download/route";
 
 const collectWorkMetadataMock = vi.mocked(collectWorkMetadata);
 const downloadRemoteMediaToCachedFileMock = vi.mocked(downloadRemoteMediaToCachedFile);
-const prepareTranscribableWavAudioFromCachedMediaMock = vi.mocked(prepareTranscribableWavAudioFromCachedMedia);
+const prepareTranscribableAudioFromCachedMediaMock = vi.mocked(prepareTranscribableAudioFromCachedMedia);
 const requireUserMock = vi.mocked(requireUser);
 const upsertAsrAudioCacheMock = vi.mocked(upsertAsrAudioCache);
 const uploadAsrAudioFileMock = vi.mocked(uploadAsrAudioFile);
@@ -152,15 +152,17 @@ describe("douyin download route", () => {
   });
 
   it("streams cached original audio and exposes the ASR OSS URL headers", async () => {
-    const filePath = await writeTempMediaFile("wav");
-    prepareTranscribableWavAudioFromCachedMediaMock.mockResolvedValue({
+    const filePath = await writeTempMediaFile("m4a");
+    prepareTranscribableAudioFromCachedMediaMock.mockResolvedValue({
+      contentType: "audio/mp4",
       durationSeconds: 1,
+      extension: "m4a",
       filePath,
       sizeBytes: 3,
     });
     uploadAsrAudioFileMock.mockResolvedValue({
-      objectKey: "echolens/asr/test.wav",
-      signedUrl: "https://oss.example.com/echolens/asr/test.wav?OSSAccessKeyId=test&Expires=1&Signature=sig",
+      objectKey: "echolens/asr/test.m4a",
+      signedUrl: "https://oss.example.com/echolens/asr/test.m4a?OSSAccessKeyId=test&Expires=1&Signature=sig",
     });
 
     const response = await GET(new Request(
@@ -173,13 +175,13 @@ describe("douyin download route", () => {
     ));
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe("audio/wav");
-    expect(response.headers.get("x-echolens-asr-audio-object-key")).toBe("echolens%2Fasr%2Ftest.wav");
+    expect(response.headers.get("content-type")).toBe("audio/mp4");
+    expect(response.headers.get("x-echolens-asr-audio-object-key")).toBe("echolens%2Fasr%2Ftest.m4a");
     expect(response.headers.get("x-echolens-asr-audio-url")).toBe(
-      encodeURIComponent("https://oss.example.com/echolens/asr/test.wav?OSSAccessKeyId=test&Expires=1&Signature=sig"),
+      encodeURIComponent("https://oss.example.com/echolens/asr/test.m4a?OSSAccessKeyId=test&Expires=1&Signature=sig"),
     );
-    expect(await response.text()).toBe("wav");
-    expect(prepareTranscribableWavAudioFromCachedMediaMock).toHaveBeenCalledWith(
+    expect(await response.text()).toBe("m4a");
+    expect(prepareTranscribableAudioFromCachedMediaMock).toHaveBeenCalledWith(
       "user-1",
       "video:7649250336875613449:video",
     );
@@ -191,7 +193,7 @@ describe("douyin download route", () => {
     });
     expect(upsertAsrAudioCacheMock).toHaveBeenCalledWith({
       durationSeconds: 1,
-      objectKey: "echolens/asr/test.wav",
+      objectKey: "echolens/asr/test.m4a",
       userId: "user-1",
       workKey: "video:7649250336875613449",
     });

@@ -48,7 +48,6 @@ type DashScopeChatCompletionPayload = {
   error?: DashScopeChatCompletionError;
 };
 
-const DEFAULT_QWEN_MT_MODEL = "qwen-mt-flash";
 const QWEN_MT_REQUEST_TIMEOUT_MS = 90_000;
 const QWEN_MT_TEXT_LIMIT = 24_000;
 const QWEN_MT_REFERENCE_TEXT_LIMIT = 16_000;
@@ -358,8 +357,16 @@ function readDashScopeTranslationConfig(): DashScopeTranslationConfig {
   return {
     apiKey,
     baseUrl: readDashScopeTranslationBaseUrl(),
-    model: process.env.DASHSCOPE_TRANSLATION_MODEL?.trim() || DEFAULT_QWEN_MT_MODEL,
+    model: readRequiredEnv("DASHSCOPE_TRANSLATION_MODEL"),
   };
+}
+
+function readRequiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} 未配置。`);
+  }
+  return value;
 }
 
 function readDashScopeTranslationBaseUrl(): string {
@@ -393,7 +400,7 @@ function readQwenMtFailure(
 
 function formatQwenMtThrownError(error: unknown): ProviderResult {
   if (error instanceof Error) {
-    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL)/.test(error.message)) {
+    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL|TRANSLATION_MODEL)/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {

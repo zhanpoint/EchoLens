@@ -23,7 +23,6 @@ type OpenRouterConfig = {
 };
 
 const OPENROUTER_REQUEST_TIMEOUT_MS = 60_000;
-const DEFAULT_SUMMARY_MODEL = "deepseek/deepseek-v4-flash";
 
 export async function summarizeTranscript(
   transcript: string,
@@ -41,7 +40,7 @@ export async function summarizeTranscript(
   return callOpenRouter(
     buildSummaryPromptContent(text, instruction),
     {
-      model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
+      model: readRequiredEnv("OPENROUTER_SUMMARY_MODEL"),
     },
   );
 }
@@ -66,7 +65,7 @@ export async function streamSummarizeTranscript(input: {
       config,
       buildSummaryPromptContent(text, instruction),
       {
-        model: process.env.OPENROUTER_SUMMARY_MODEL || DEFAULT_SUMMARY_MODEL,
+        model: readRequiredEnv("OPENROUTER_SUMMARY_MODEL"),
         stream: true,
       },
     )
@@ -173,15 +172,18 @@ async function callOpenRouterChatCompletions(
 }
 
 function readOpenRouterConfig(): OpenRouterConfig {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY 未配置。");
-  }
-
   return {
-    apiKey,
+    apiKey: readRequiredEnv("OPENROUTER_API_KEY"),
     baseUrl: (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/$/, ""),
   };
+}
+
+function readRequiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} 未配置。`);
+  }
+  return value;
 }
 
 async function readOpenRouterJsonResponse(response: Response): Promise<OpenRouterChatPayload | null> {
@@ -213,7 +215,7 @@ function readOpenRouterFailure(
 
 function formatOpenRouterThrownError(error: unknown): ProviderResult {
   if (error instanceof Error) {
-    if (/OPENROUTER_API_KEY/.test(error.message)) {
+    if (/OPENROUTER_(?:API_KEY|SUMMARY_MODEL)/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {

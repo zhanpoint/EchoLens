@@ -18,22 +18,22 @@ import {
   type StoredAsrTask,
   type StoredAsrHistoryContext,
 } from "@/lib/transcript/db";
-import { stripTrailingDouyinWatermarkFromTranscript } from "@/lib/transcript/normalize";
+import { joinTranscriptText } from "@/lib/transcript/text";
 import type { TranscriptSegment } from "@/types/douyin";
 
 type DashScopeConfig = {
   apiKey: string;
   baseUrl: string;
-  model: DashScopeAsrModel;
 };
 
-export type DashScopeAsrModel = "fun-asr" | "qwen3-asr-flash-filetrans";
+export type DashScopeAsrModel = string;
 export type DashScopeAsrModelProfile = "e1" | "e2";
 
 export type DashScopeAsrOptions = {
   diarizationEnabled?: boolean;
   enableItn?: boolean;
-  model?: DashScopeAsrModel;
+  model: DashScopeAsrModel;
+  profile: DashScopeAsrModelProfile;
   specialWordFilter?: DashScopeSpecialWordFilter;
   speakerCount?: number;
 };
@@ -42,8 +42,7 @@ export type DashScopeAsrRuntimeOptions = {
   clientJobId?: string;
   historyContext?: StoredAsrHistoryContext;
   postprocess?: {
-    enabled: boolean;
-    onDelta?: (delta: string) => void;
+    onStart?: () => void;
   };
   signal?: AbortSignal;
 };
@@ -54,7 +53,7 @@ export type DashScopeSpecialWordFilter = {
   system_reserved_filter?: boolean;
 };
 export type DashScopeAsrAudio = UploadedAsrAudio & {
-  durationSeconds: number;
+  durationSeconds?: number;
 };
 
 type DashScopeSensitiveWordList = {
@@ -68,12 +67,8 @@ type TranscriptPayload = {
 };
 export type DashScopeAsrJobResult =
   | { historyContext?: StoredAsrHistoryContext; jobId: string; status: "running" }
-  | { historyContext?: StoredAsrHistoryContext; result: ProviderResult; status: "failed" | "succeeded" };
+  | { historyContext?: StoredAsrHistoryContext; result: ProviderResult; status: "canceled" | "failed" | "successed" };
 
-const QWEN_FILETRANS_MODEL: DashScopeAsrModel = "qwen3-asr-flash-filetrans";
-const FUN_ASR_MODEL: DashScopeAsrModel = "fun-asr";
-const DEFAULT_ASR_MODEL: DashScopeAsrModel = QWEN_FILETRANS_MODEL;
-const SUPPORTED_ASR_MODELS = new Set<DashScopeAsrModel>(["fun-asr", QWEN_FILETRANS_MODEL]);
 const DASH_SCOPE_REQUEST_TIMEOUT_MS = 60_000;
 const DASH_SCOPE_SUBMIT_TIMEOUT_MS = 15_000;
 const DASH_SCOPE_SUBMIT_ATTEMPTS = 2;
@@ -90,16 +85,16 @@ export async function submitDashScopeAsrJob(
   userId: string,
   workKey: string,
   audio: DashScopeAsrAudio | undefined,
-  options: DashScopeAsrOptions = {},
+  options: DashScopeAsrOptions,
   runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult> {
-  if (!audio?.signedUrl || !audio.objectKey || !Number.isFinite(audio.durationSeconds) || audio.durationSeconds <= 0) {
+  if (!audio?.signedUrl || !audio.objectKey) {
     return { status: "failed", result: { ok: false, code: "unavailable", detail: "原声音频缓存未就绪。" } };
   }
 
   try {
     const config = readDashScopeConfig();
-    const normalizedOptions = normalizeDashScopeAsrOptions(options, config.model);
+    const normalizedOptions = normalizeDashScopeAsrOptions(options);
     const model = normalizedOptions.model;
     const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions);
     const runningTask = readRunningAsrTask({ cacheKey, userId });
@@ -113,7 +108,7 @@ export async function submitDashScopeAsrJob(
       return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
     }
     const taskInput = {
-      audioDurationSeconds: audio.durationSeconds,
+      audioDurationSeconds: audio.durationSeconds ?? 0,
       cacheKey,
       historyContext,
       id: jobId,
@@ -122,13 +117,15 @@ export async function submitDashScopeAsrJob(
       userId,
       workKey,
     };
-    assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
+    if (audio.durationSeconds && audio.durationSeconds > 0) {
+      assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
+    }
     reserveAsrTask(taskInput);
     if (isAsrJobCancellationRequested({ id: jobId, userId })) {
       markAsrTaskCanceled(jobId);
       return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
     }
-    const taskId = await submitDashScopeAsrTask({ ...config, model }, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
+    const taskId = await submitDashScopeAsrTask(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
     if (isAsrJobCancellationRequested({ id: jobId, userId })) {
       markAsrTaskCanceled(jobId);
       await cancelDashScopeAsrTask(taskId).catch(() => undefined);
@@ -151,43 +148,39 @@ export async function transcribeDashScopeAsr(
   userId: string,
   workKey: string,
   audio: DashScopeAsrAudio | undefined,
-  options: DashScopeAsrOptions = {},
+  options: DashScopeAsrOptions,
   runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult> {
   return await submitDashScopeAsrJob(userId, workKey, audio, options, runtimeOptions);
 }
 
 export function parseDashScopeTranscriptPayload(payload: unknown): TranscriptPayload | null {
-  const transcripts = readArrayField(payload, "transcripts");
-  if (transcripts) {
-    const segments = transcripts.flatMap((transcript) => parseTranscriptSegments(transcript));
-    const content = joinTranscriptText(
-      transcripts
-        .map((transcript) => readStringField(transcript, "text") || readStringField(transcript, "content"))
-        .filter((text): text is string => Boolean(text)),
-    ) || joinTranscriptText(segments.map((segment) => segment.text));
-
-    return buildTranscriptPayload(content, segments);
+  if (!payload || typeof payload !== "object") {
+    throw new Error("DashScope 转录结果格式无效：结果文件不是 JSON 对象。");
   }
 
-  const segments = parseTranscriptSegments(payload);
-  const content = readStringField(payload, "text") ||
-    readStringField(payload, "content") ||
-    joinTranscriptText(segments.map((segment) => segment.text));
+  const transcripts = (payload as Record<string, unknown>).transcripts;
+  if (!Array.isArray(transcripts) || transcripts.length === 0) {
+    throw new Error("DashScope 转录结果格式无效：缺少 transcripts 数组。");
+  }
 
+  const segments = transcripts.flatMap((transcript) => parseTranscriptSegments(transcript));
+  const content = joinTranscriptText(segments.map((segment) => segment.text));
   return buildTranscriptPayload(content, segments);
 }
 
 function buildTranscriptPayload(content: string, segments: TranscriptSegment[]): TranscriptPayload | null {
-  if (!content) {
+  const cleanSegments = segments.filter((segment) => segment.text.trim());
+  const transcriptContent = joinTranscriptText(cleanSegments.map((segment) => segment.text)) || content.trim();
+  if (!transcriptContent) {
     return null;
   }
 
-  const emotions = readSegmentEmotions(segments);
+  const emotions = readSegmentEmotions(cleanSegments);
   return {
-    content,
+    content: transcriptContent,
     ...(emotions ? { emotions } : {}),
-    ...(segments.length > 0 ? { transcriptSegments: segments } : {}),
+    ...(cleanSegments.length ? { transcriptSegments: cleanSegments } : {}),
   };
 }
 
@@ -198,8 +191,8 @@ async function settleDashScopeAsrTask(
 ): Promise<DashScopeAsrJobResult> {
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
-    const transcript = stripTrailingDouyinWatermarkFromTranscript(await readDashScopeTranscript(taskPayload, runtimeOptions.signal));
-    const model = parseDashScopeAsrModel(job.model) ?? DEFAULT_ASR_MODEL;
+    const transcript = await readDashScopeTranscript(taskPayload, runtimeOptions.signal);
+    const model = job.model;
     const result = await postprocessTranscript({
       model,
       runtimeOptions,
@@ -211,20 +204,35 @@ async function settleDashScopeAsrTask(
         transcriptSegments: transcript.transcriptSegments,
       },
     });
-    markAsrTaskSucceeded(job.id);
-    return result.ok
-      ? { status: "succeeded", historyContext: job.historyContext, result }
-      : { status: "failed", historyContext: job.historyContext, result };
+    if (result.ok) {
+      markAsrTaskSucceeded(job.id);
+      return { status: "successed", historyContext: job.historyContext, result };
+    }
+
+    markAsrTaskFailed(job.id, result.detail);
+    return { status: "failed", historyContext: job.historyContext, result };
   }
 
-  if (status === "FAILED" || status === "CANCELED" || status === "UNKNOWN") {
+  if (status === "CANCELED") {
+    const detail = formatDashScopeTaskFailure(status, taskPayload);
+    markAsrTaskCanceled(job.id, detail);
+    return { status: "canceled", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
+  }
+
+  if (status === "FAILED") {
     const detail = formatDashScopeTaskFailure(status, taskPayload);
     markAsrTaskFailed(job.id, detail);
     return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
   }
 
-  markAsrTaskRunning(job.id);
-  return { status: "running", historyContext: job.historyContext, jobId: job.id };
+  if (status === "PENDING" || status === "RUNNING") {
+    markAsrTaskRunning(job.id);
+    return { status: "running", historyContext: job.historyContext, jobId: job.id };
+  }
+
+  const detail = `DashScope ASR 返回未知任务状态：${status || "空状态"}`;
+  markAsrTaskFailed(job.id, detail);
+  return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
 }
 
 export async function refreshDashScopeAsrJob(userId: string, jobId: string): Promise<DashScopeAsrJobResult | null> {
@@ -277,9 +285,9 @@ async function submitDashScopeAsrTask(
       "x-dashscope-async": "enable",
     },
     body: JSON.stringify({
-      model: config.model,
-      input: buildDashScopeAsrInput(config.model, fileUrl),
-      parameters: buildDashScopeAsrParameters(options, config.model),
+      model: options.model,
+      input: buildDashScopeAsrInput(options, fileUrl),
+      parameters: buildDashScopeAsrParameters(options),
     }),
     signal,
   });
@@ -331,14 +339,7 @@ function readTaskStatus(payload: unknown): string {
 }
 
 async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSignal): Promise<TranscriptPayload> {
-  const resultUrls = findTranscriptionUrls(taskPayload);
-  if (resultUrls.length === 0) {
-    const inlineTranscript = parseDashScopeTranscriptPayload(taskPayload);
-    if (inlineTranscript) {
-      return inlineTranscript;
-    }
-    throw new Error("DashScope 未返回可下载的转录结果。");
-  }
+  const resultUrls = readTranscriptionUrls(taskPayload);
 
   const transcripts: TranscriptPayload[] = [];
   for (const url of resultUrls) {
@@ -368,10 +369,14 @@ async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSigna
 
   const transcriptSegments = transcripts.flatMap((transcript) => transcript.transcriptSegments ?? []);
   const emotions = [...new Set(transcripts.flatMap((transcript) => transcript.emotions ?? []))];
+  const transcript = buildTranscriptPayload(content, transcriptSegments);
+  if (!transcript) {
+    throw new Error("DashScope 没有识别到可用转录文本。");
+  }
+
   return {
-    content,
-    emotions: emotions.length > 0 ? emotions : undefined,
-    transcriptSegments: transcriptSegments.length > 0 ? transcriptSegments : undefined,
+    ...transcript,
+    emotions: transcript.emotions ?? (emotions.length > 0 ? emotions : undefined),
   };
 }
 
@@ -410,7 +415,7 @@ function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
   }
   if (job.status === "canceled") {
     return {
-      status: "failed",
+      status: "canceled",
       historyContext: job.historyContext,
       result: { ok: false, code: "error", detail: job.errorDetail ?? "转录任务已放弃。" },
     };
@@ -424,17 +429,10 @@ async function postprocessTranscript(input: {
   runtimeOptions: DashScopeAsrRuntimeOptions;
   transcript: Extract<ProviderResult, { ok: true }>;
 }): Promise<ProviderResult> {
-  if (!input.runtimeOptions.postprocess?.enabled) {
-    return {
-      ...input.transcript,
-      asrModel: input.transcript.asrModel ?? input.model,
-    };
-  }
-
+  input.runtimeOptions.postprocess?.onStart?.();
   const result = await streamQwenTranscriptPostprocess({
     content: input.transcript.content,
     segments: input.transcript.transcriptSegments,
-    onDelta: input.runtimeOptions.postprocess.onDelta ?? (() => undefined),
     signal: input.runtimeOptions.signal,
   });
 
@@ -460,29 +458,32 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 function parseTranscriptSegments(payload: unknown): TranscriptSegment[] {
-  const sentences = readArrayField(payload, "sentences");
-  if (!sentences) {
-    return [];
+  if (!payload || typeof payload !== "object") {
+    throw new Error("DashScope 转录结果格式无效：transcript 不是对象。");
+  }
+  const sentences = (payload as Record<string, unknown>).sentences;
+  if (!Array.isArray(sentences)) {
+    throw new Error("DashScope 转录结果格式无效：缺少 sentences 数组。");
   }
   const speakerLabels = new Map<string, string>();
 
-  return sentences
-    .map((sentence): TranscriptSegment | null => {
-      const text = readStringField(sentence, "text") || readStringField(sentence, "content");
-      if (!text) {
-        return null;
-      }
+  return sentences.map((sentence): TranscriptSegment => {
+    const text = readRequiredStringField(sentence, "text", "sentence.text");
+    const emotion = readStringField(sentence, "emotion");
+    const startSeconds = readRequiredMillisecondsField(sentence, "begin_time", "sentence.begin_time") / 1000;
+    const endSeconds = readRequiredMillisecondsField(sentence, "end_time", "sentence.end_time") / 1000;
+    if (endSeconds < startSeconds) {
+      throw new Error("DashScope 转录结果格式无效：sentence.end_time 小于 begin_time。");
+    }
 
-      const emotion = readStringField(sentence, "emotion");
-      return {
-        endSeconds: readTimeField(sentence, ["end_time", "endTime", "end"]) ?? 0,
-        ...(emotion ? { emotion } : {}),
-        speakerId: readSpeakerId(sentence, speakerLabels) ?? undefined,
-        startSeconds: readTimeField(sentence, ["begin_time", "beginTime", "start_time", "startTime", "start"]) ?? 0,
-        text,
-      };
-    })
-    .filter((segment): segment is TranscriptSegment => Boolean(segment));
+    return {
+      endSeconds: roundSeconds(endSeconds),
+      ...(emotion ? { emotion } : {}),
+      speakerId: readSpeakerId(sentence, speakerLabels) ?? undefined,
+      startSeconds: roundSeconds(startSeconds),
+      text,
+    };
+  });
 }
 
 function readSegmentEmotions(segments: TranscriptSegment[]): string[] | undefined {
@@ -490,73 +491,38 @@ function readSegmentEmotions(segments: TranscriptSegment[]): string[] | undefine
   return emotions.length > 0 ? emotions : undefined;
 }
 
-function findTranscriptionUrls(value: unknown): string[] {
-  const officialUrls = [
-    readStringPath(value, ["data", "output_result", "output", "result", "transcription_url"]),
-    ...readTranscriptionUrlsFromResults(readArrayPath(value, ["data", "output_result", "output", "results"])),
-    readStringPath(value, ["output", "result", "transcription_url"]),
-    ...readTranscriptionUrlsFromResults(readArrayPath(value, ["output", "results"])),
-  ].filter((url): url is string => Boolean(url));
-  if (officialUrls.length > 0) {
-    return [...new Set(officialUrls)];
+function readTranscriptionUrls(value: unknown): string[] {
+  if (!value || typeof value !== "object") {
+    throw new Error("DashScope 任务结果格式无效：响应不是 JSON 对象。");
+  }
+  const output = (value as Record<string, unknown>).output;
+  if (!output || typeof output !== "object") {
+    throw new Error("DashScope 任务结果格式无效：缺少 output 对象。");
   }
 
-  const urls: string[] = [];
-  function visit(node: unknown): void {
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        visit(item);
-      }
-      return;
-    }
-    if (!node || typeof node !== "object") {
-      return;
-    }
-
-    for (const [key, child] of Object.entries(node)) {
-      if (/transcription_?url/i.test(key) && typeof child === "string" && child.startsWith("http")) {
-        urls.push(child);
-        continue;
-      }
-      visit(child);
-    }
+  const resultUrl = readStringPath(output, ["result", "transcription_url"]);
+  if (resultUrl) {
+    return [resultUrl];
   }
 
-  visit(value);
-  return [...new Set(urls)];
-}
-
-function readArrayPath(value: unknown, path: string[]): unknown[] | null {
-  let current = value;
-  for (const key of path) {
-    if (!current || typeof current !== "object") {
-      return null;
-    }
-    current = (current as Record<string, unknown>)[key];
+  const results = (output as Record<string, unknown>).results;
+  if (Array.isArray(results) && results.length > 0) {
+    const urls = results.map((result, index) =>
+      readRequiredStringField(result, "transcription_url", `output.results[${index}].transcription_url`),
+    );
+    return [...new Set(urls)];
   }
 
-  return Array.isArray(current) ? current : null;
-}
-
-function readTranscriptionUrlsFromResults(results: unknown[] | null): string[] {
-  if (!results) {
-    return [];
-  }
-
-  return results
-    .map((result) => readStringField(result, "transcription_url"))
-    .filter((url): url is string => Boolean(url));
+  throw new Error("DashScope 任务结果格式无效：缺少 output.result.transcription_url 或 output.results[].transcription_url。");
 }
 
 function readDashScopeConfig(): DashScopeConfig {
   const apiKey = readRequiredEnv("DASHSCOPE_API_KEY");
   const baseUrl = readRequiredEnv("DASHSCOPE_BASE_URL").replace(/\/+$/, "");
-  const model = getDashScopeAsrModelForProfile("e1");
 
   return {
     apiKey,
     baseUrl,
-    model,
   };
 }
 
@@ -575,17 +541,19 @@ function assertDailyAsrQuotaAvailable(userId: string, nextDurationSeconds: numbe
   }
 }
 
-function readArrayField(value: unknown, field: string): unknown[] | null {
-  return value && typeof value === "object" && Array.isArray((value as Record<string, unknown>)[field])
-    ? ((value as Record<string, unknown>)[field] as unknown[])
-    : null;
-}
-
 function readStringField(value: unknown, field: string): string | null {
   const fieldValue = value && typeof value === "object"
     ? (value as Record<string, unknown>)[field]
     : null;
   return typeof fieldValue === "string" && fieldValue.trim() ? fieldValue.trim() : null;
+}
+
+function readRequiredStringField(value: unknown, field: string, label: string): string {
+  const fieldValue = readStringField(value, field);
+  if (!fieldValue) {
+    throw new Error(`DashScope 转录结果格式无效：缺少 ${label}。`);
+  }
+  return fieldValue;
 }
 
 function readStringPath(value: unknown, path: string[]): string | null {
@@ -600,21 +568,19 @@ function readStringPath(value: unknown, path: string[]): string | null {
   return typeof current === "string" && current.trim() ? current.trim() : null;
 }
 
-function readTimeField(value: unknown, fields: string[]): number | null {
+function readRequiredMillisecondsField(value: unknown, field: string, label: string): number {
   if (!value || typeof value !== "object") {
-    return null;
+    throw new Error(`DashScope 转录结果格式无效：缺少 ${label}。`);
   }
 
   const record = value as Record<string, unknown>;
-  for (const field of fields) {
-    const rawValue = record[field];
-    const parsed = typeof rawValue === "number" ? rawValue : Number(rawValue);
-    if (Number.isFinite(parsed) && parsed >= 0) {
-      return field.endsWith("_time") || field.endsWith("Time") ? parsed / 1000 : parsed;
-    }
+  const rawValue = record[field];
+  const parsed = typeof rawValue === "number" ? rawValue : Number(rawValue);
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
   }
 
-  return null;
+  throw new Error(`DashScope 转录结果格式无效：${label} 不是有效毫秒时间。`);
 }
 
 function readSpeakerId(value: unknown, labels: Map<string, string>): string | null {
@@ -650,10 +616,10 @@ function normalizeSpeakerId(value: string): string {
 }
 
 export function buildDashScopeAsrParameters(
-  options: DashScopeAsrOptions = {},
-  model: string = DEFAULT_ASR_MODEL,
+  options: DashScopeAsrOptions,
+  model = options.model,
 ): Record<string, unknown> {
-  const parameters: Record<string, unknown> = isQwenFiletransModel(model)
+  const parameters: Record<string, unknown> = options.profile === "e1"
     ? {
         enable_words: false,
         ...(options.enableItn ? { enable_itn: true } : {}),
@@ -661,8 +627,8 @@ export function buildDashScopeAsrParameters(
     : { channel_id: [0] };
 
   if (options.diarizationEnabled) {
-    if (!supportsDiarization(model)) {
-      throw new Error(`当前 DashScope ASR 模型 ${model} 不支持说话人分离，请改用 Fun-ASR 模型。`);
+    if (options.profile !== "e2") {
+      throw new Error(`当前 ASR profile ${options.profile} 的模型 ${model} 不支持说话人分离，请切换到支持说话人分离的 ASR profile。`);
     }
     parameters.diarization_enabled = true;
     if (options.speakerCount !== undefined) {
@@ -671,8 +637,8 @@ export function buildDashScopeAsrParameters(
   }
 
   if (options.specialWordFilter) {
-    if (!supportsSpecialWordFilter(model)) {
-      throw new Error(`当前 DashScope ASR 模型 ${model} 不支持敏感词过滤，请改用 Fun-ASR 或 Paraformer 模型。`);
+    if (options.profile !== "e2") {
+      throw new Error(`当前 ASR profile ${options.profile} 的模型 ${model} 不支持敏感词过滤，请切换到支持敏感词过滤的 ASR profile。`);
     }
     parameters.special_word_filter = JSON.stringify(options.specialWordFilter);
   }
@@ -682,16 +648,17 @@ export function buildDashScopeAsrParameters(
 
 function normalizeDashScopeAsrOptions(
   options: DashScopeAsrOptions,
-  fallbackModel = DEFAULT_ASR_MODEL,
-): Required<Pick<DashScopeAsrOptions, "model">> & Omit<DashScopeAsrOptions, "model"> {
-  const model = options.model && SUPPORTED_ASR_MODELS.has(options.model) ? options.model : fallbackModel;
-  const normalized: Required<Pick<DashScopeAsrOptions, "model">> & Omit<DashScopeAsrOptions, "model"> = { model };
+): DashScopeAsrOptions {
+  const normalized: DashScopeAsrOptions = {
+    model: options.model,
+    profile: options.profile,
+  };
 
-  if (options.enableItn && isQwenFiletransModel(model)) {
+  if (options.enableItn && options.profile === "e1") {
     normalized.enableItn = true;
   }
 
-  if (options.diarizationEnabled && supportsDiarization(model)) {
+  if (options.diarizationEnabled && options.profile === "e2") {
     normalized.diarizationEnabled = true;
     if (Number.isInteger(options.speakerCount)) {
       normalized.speakerCount = options.speakerCount;
@@ -699,7 +666,7 @@ function normalizeDashScopeAsrOptions(
   }
 
   const specialWordFilter = normalizeSpecialWordFilter(options.specialWordFilter);
-  if (specialWordFilter && supportsSpecialWordFilter(model)) {
+  if (specialWordFilter && options.profile === "e2") {
     normalized.specialWordFilter = specialWordFilter;
   }
 
@@ -736,57 +703,15 @@ function normalizeSensitiveWordList(wordList: string[] | undefined): string[] {
   return [...new Set(wordList.map((word) => word.trim()).filter(Boolean))];
 }
 
-function supportsSpecialWordFilter(model: string): boolean {
-  const normalizedModel = model.trim().toLowerCase();
-  return normalizedModel.includes("fun-asr") || normalizedModel.includes("paraformer");
-}
-
-function supportsDiarization(model: string): boolean {
-  const normalizedModel = model.trim().toLowerCase();
-  return normalizedModel.includes("fun-asr");
-}
-
-function isQwenFiletransModel(model: string): boolean {
-  return model.trim().toLowerCase() === QWEN_FILETRANS_MODEL;
-}
-
-function buildDashScopeAsrInput(model: string, fileUrl: string): Record<string, unknown> {
-  return isQwenFiletransModel(model)
+function buildDashScopeAsrInput(options: DashScopeAsrOptions, fileUrl: string): Record<string, unknown> {
+  return options.profile === "e1"
     ? { file_url: fileUrl }
     : { file_urls: [fileUrl] };
 }
 
-function parseDashScopeAsrModel(value: string | undefined): DashScopeAsrModel | null {
-  const model = value?.trim();
-  if (!model) {
-    return null;
-  }
-
-  return SUPPORTED_ASR_MODELS.has(model as DashScopeAsrModel)
-    ? (model as DashScopeAsrModel)
-    : null;
-}
-
 export function getDashScopeAsrModelForProfile(profile: DashScopeAsrModelProfile): DashScopeAsrModel {
   const envName = profile === "e1" ? "DASHSCOPE_ASR_MODEL_E1" : "DASHSCOPE_ASR_MODEL_E2";
-  const fallback = profile === "e1" ? DEFAULT_ASR_MODEL : FUN_ASR_MODEL;
-  return parseDashScopeAsrModel(process.env[envName]) ?? fallback;
-}
-
-function joinTranscriptText(parts: string[]): string {
-  return parts
-    .map((part) => part.trim().replace(/\s+/g, " "))
-    .filter(Boolean)
-    .reduce((content, part) => {
-      if (!content) {
-        return part;
-      }
-      return `${content}${needsWordBoundary(content, part) ? " " : ""}${part}`;
-    }, "");
-}
-
-function needsWordBoundary(left: string, right: string): boolean {
-  return /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right);
+  return readRequiredEnv(envName);
 }
 
 function formatDashScopeError(status: number, payload: unknown): string {
@@ -835,4 +760,8 @@ function readRequiredEnv(name: string): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function roundSeconds(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
