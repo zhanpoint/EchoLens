@@ -132,7 +132,7 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Upload Compose file
+      - name: Upload deployment files
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
@@ -141,7 +141,12 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
-          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" deploy/compose.yml "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/compose.yml"
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" \
+            deploy/compose.yml \
+            deploy/migrate-sqlite-auth-to-postgres.sh \
+            "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "chmod 700 '$DEPLOY_PATH/migrate-sqlite-auth-to-postgres.sh'"
 
       - name: Deploy image
         env:
