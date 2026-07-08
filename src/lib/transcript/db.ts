@@ -114,7 +114,8 @@ const ASR_TASK_COLUMNS = `
   status, error_detail, updated_at
 `;
 
-const DAILY_TRANSCRIPTION_QUOTA_TIME_ZONE = "Asia/Shanghai";
+const SHANGHAI_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export async function upsertAsrAudioCache(input: {
   durationSeconds: number;
@@ -666,12 +667,9 @@ function parseJsonValue(value: unknown): unknown {
 }
 
 function startOfLocalDay(now: number): number {
-  return new Date(new Date(now).toLocaleString("en-US", { timeZone: DAILY_TRANSCRIPTION_QUOTA_TIME_ZONE }))
-    .setHours(0, 0, 0, 0);
+  return Math.floor((now + SHANGHAI_TIME_OFFSET_MS) / DAY_MS) * DAY_MS - SHANGHAI_TIME_OFFSET_MS;
 }
 
 function startOfNextLocalDay(now: number): number {
-  const date = new Date(startOfLocalDay(now));
-  date.setDate(date.getDate() + 1);
-  return date.getTime();
+  return startOfLocalDay(now) + DAY_MS;
 }
