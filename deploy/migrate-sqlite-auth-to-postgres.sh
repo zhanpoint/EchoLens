@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE=${COMPOSE_FILE:-"$SCRIPT_DIR/compose.yml"}
 ENV_FILE=${ENV_FILE:-"$SCRIPT_DIR/.env"}
+DEPLOY_ENV_FILE=${DEPLOY_ENV_FILE:-"$SCRIPT_DIR/.deploy.env"}
 SQLITE_FILE=${SQLITE_FILE:-echolens.sqlite}
 SQLITE_VOLUME=${SQLITE_VOLUME:-}
 SQLITE_HOST_DIR=${SQLITE_HOST_DIR:-"$SCRIPT_DIR/data"}
@@ -15,10 +16,28 @@ if [ -f "$ENV_FILE" ]; then
   . "$ENV_FILE"
   set +a
 fi
+if [ -f "$DEPLOY_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$DEPLOY_ENV_FILE"
+  set +a
+fi
 
 POSTGRES_DB=${POSTGRES_DB:-echolens}
 POSTGRES_USER=${POSTGRES_USER:-postgres}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+if [ -z "${ECHOLENS_IMAGE:-}" ]; then
+  ECHOLENS_IMAGE=$(docker inspect -f '{{.Config.Image}}' echolens 2>/dev/null || true)
+fi
+if [ -z "$ECHOLENS_IMAGE" ]; then
+  echo "Missing ECHOLENS_IMAGE. Run CI/CD once to create .deploy.env, or set ECHOLENS_IMAGE before running this script." >&2
+  exit 1
+fi
+ECHOLENS_PORT=${ECHOLENS_PORT:-3000}
+POSTGRES_POOL_MAX=${POSTGRES_POOL_MAX:-10}
+FFMPEG_PATH=${FFMPEG_PATH:-/usr/bin/ffmpeg}
+
+export ECHOLENS_IMAGE ECHOLENS_PORT FFMPEG_PATH POSTGRES_DB POSTGRES_POOL_MAX POSTGRES_PASSWORD POSTGRES_USER
 
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_BIN="docker compose"
