@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/dashscope/summary";
 import {
+  deleteTranscriptHistorySummary,
   insertTranscriptHistorySummary,
   readTranscriptHistoryRecord,
   type TranscriptHistorySummary,
@@ -51,6 +52,30 @@ export async function POST(request: Request, context: RouteContext) {
     transcript: record.transcriptContent,
     userId: user.id,
   });
+}
+
+export async function DELETE(request: Request, context: RouteContext) {
+  const user = await requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
+  }
+
+  const { id } = await context.params;
+  const summaryId = new URL(request.url).searchParams.get("summaryId")?.trim();
+  if (!summaryId) {
+    return NextResponse.json({ error: "总结记录无效。" }, { status: 400 });
+  }
+
+  const deleted = await deleteTranscriptHistorySummary({
+    historyRecordId: id,
+    id: summaryId,
+    userId: user.id,
+  });
+  if (!deleted) {
+    return NextResponse.json({ error: "总结记录不存在。" }, { status: 404 });
+  }
+
+  return NextResponse.json({ deleted: true });
 }
 
 function streamHistorySummary(input: {

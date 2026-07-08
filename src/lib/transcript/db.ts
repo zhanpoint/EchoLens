@@ -483,6 +483,18 @@ export async function readTranscriptHistorySummary(input: {
   return row ? mapTranscriptHistorySummary(row) : null;
 }
 
+export async function deleteTranscriptHistorySummary(input: {
+  historyRecordId: string;
+  id: string;
+  userId: string;
+}): Promise<boolean> {
+  const rowCount = await execute(
+    "DELETE FROM transcript_history_summaries WHERE user_id = $1 AND history_record_id = $2 AND id = $3",
+    [input.userId, input.historyRecordId, input.id],
+  );
+  return rowCount > 0;
+}
+
 export async function listTranscriptCustomPrompts(input: {
   userId: string;
 }): Promise<TranscriptCustomPrompt[]> {

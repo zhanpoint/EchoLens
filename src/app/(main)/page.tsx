@@ -14,6 +14,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  History,
   Image as ImageIcon,
   Info,
   Languages,
@@ -25,7 +26,6 @@ import {
   PencilLine,
   Play,
   Plus,
-  RefreshCw,
   Save,
   Search,
   Settings,
@@ -532,6 +532,7 @@ async function streamSummaryContent(input: {
   prompt: string;
   promptId: string;
   promptTitle: string;
+  signal?: AbortSignal;
   text: string;
 }): Promise<void> {
   const response = await fetch("/api/douyin/summarize", {
@@ -544,6 +545,7 @@ async function streamSummaryContent(input: {
       promptTitle: input.promptTitle,
       text: input.text,
     }),
+    signal: input.signal,
   });
 
   if (!response.ok || !response.body) {
@@ -704,6 +706,20 @@ async function deleteTranscriptHistory(id: string): Promise<void> {
   if (!response.ok) {
     const payload = await readApiPayload(response, "历史记录删除失败。") as ApiError;
     throw new Error(payload.error || "历史记录删除失败。");
+  }
+}
+
+async function deleteTranscriptHistorySummary(recordId: string, summaryId: string): Promise<void> {
+  const response = await fetch(
+    `/api/transcript-history/${encodeURIComponent(recordId)}/summaries?summaryId=${encodeURIComponent(summaryId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const payload = await readApiPayload(response, "总结记录删除失败。") as ApiError;
+    if (isUnauthenticatedApiResponse(response, payload)) {
+      throw new AuthRequiredError();
+    }
+    throw new Error(getApiError(payload)?.error || "总结记录删除失败。");
   }
 }
 
@@ -926,7 +942,7 @@ function createHistoryRecordId(): string {
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function historyRecordToResult(record: TranscriptHistoryRecord): ExtractionResult {
@@ -1151,6 +1167,22 @@ export default function HomePage() {
     setLiveHistorySummariesByRecordId((current) => ({
       ...current,
       [recordId]: [summary, ...(current[recordId] ?? []).filter((item) => item.id !== summary.id)],
+    }));
+  }
+
+  function removeHistorySummary(recordId: string, summaryId: string) {
+    setHistoryDetail((current) => current
+      ? {
+          ...current,
+          summaries: current.record.id === recordId
+            ? current.summaries.filter((item) => item.id !== summaryId)
+            : current.summaries,
+        }
+      : current
+    );
+    setLiveHistorySummariesByRecordId((current) => ({
+      ...current,
+      [recordId]: (current[recordId] ?? []).filter((item) => item.id !== summaryId),
     }));
   }
 
@@ -1970,6 +2002,8 @@ export default function HomePage() {
         </section>
         ) : null}
 
+        {historyDetail ? <HistoryWorkInfoPanel record={historyDetail.record} /> : null}
+
         {hasVisibleResults ? (
           <section
             className="rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
@@ -1978,11 +2012,13 @@ export default function HomePage() {
               {visibleResults.map((result) => (
                 <ResultBlock
                   history={historyDetail ? {
+                    onSummaryDeleted: removeHistorySummary,
                     onSummarySaved: addHistorySummary,
                     onTranscriptSaved: updateHistoryTranscript,
                     recordId: historyDetail.record.id,
                     summaries: historyDetail.summaries,
                   } : activeLiveSession?.persisted ? {
+                    onSummaryDeleted: removeHistorySummary,
                     onSummarySaved: addHistorySummary,
                     onTranscriptSaved: updateHistoryTranscript,
                     recordId: activeLiveSession.historyRecordId,
@@ -2048,49 +2084,49 @@ function TranscriptHistorySidebar({
   showReturnLive: boolean;
 }) {
   const content = (
-    <div className="flex h-full min-h-0 flex-col px-2 py-2">
-      <div className="mb-5 flex h-10 items-center justify-between px-1">
-        <span className="text-sm font-semibold text-foreground">转录历史</span>
+    <div className="flex h-full min-h-0 flex-col px-1.5 py-2">
+      <div className="mb-4 flex h-9 items-center justify-between px-1">
+        <span className="text-[13px] font-semibold text-foreground">转录历史</span>
         <button
           type="button"
           onClick={onToggle}
-          className="hidden size-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:inline-flex"
+          className="hidden size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:inline-flex"
           aria-label={isOpen ? "收起侧栏" : "展开侧栏"}
           title={isOpen ? "收起侧栏" : "展开侧栏"}
         >
-          <PanelLeft className="size-5" aria-hidden="true" />
+          <PanelLeft className="size-4" aria-hidden="true" />
         </button>
         <button
           type="button"
           onClick={onCloseDrawer}
-          className="inline-flex size-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:hidden"
+          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan md:hidden"
           aria-label="关闭转录历史"
           title="关闭"
         >
-          <X className="size-5" aria-hidden="true" />
+          <X className="size-4" aria-hidden="true" />
         </button>
       </div>
       <div className="grid gap-1">
-        <button
-          type="button"
-          onClick={onNew}
-          className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
-        >
-          <Plus className="size-5 shrink-0 text-cyan" aria-hidden="true" />
-          新建转录
-        </button>
         {showReturnLive ? (
           <button
             type="button"
             onClick={onReturnLive}
-            className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-cyan transition hover:text-foreground active:scale-[0.99]"
+            className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] font-semibold text-cyan transition hover:text-foreground active:scale-[0.99]"
           >
-            <CornerUpLeft className="size-5 shrink-0" aria-hidden="true" />
+            <CornerUpLeft className="size-4 shrink-0" aria-hidden="true" />
             返回当前转录
           </button>
         ) : null}
-        <label className="flex h-10 items-center gap-3 rounded-md px-3 text-sm text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
-          <Search className="size-5 shrink-0 text-cyan" aria-hidden="true" />
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
+        >
+          <Plus className="size-4 shrink-0 text-cyan" aria-hidden="true" />
+          新建转录
+        </button>
+        <label className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
+          <Search className="size-4 shrink-0 text-cyan" aria-hidden="true" />
           <input
             value={query}
             onChange={(event) => onSearch(event.target.value)}
@@ -2099,7 +2135,7 @@ function TranscriptHistorySidebar({
           />
         </label>
       </div>
-      <div className="mt-7 px-3 text-sm font-semibold text-foreground">最近</div>
+      <div className="mt-6 px-2.5 text-[13px] font-semibold text-foreground">最近</div>
       <div className="content-scroll mt-2 min-h-0 flex-1 overflow-auto pb-3">
         {error ? <div className="px-2 py-2 text-xs text-amber">{error}</div> : null}
         {isLoading ? (
@@ -2130,55 +2166,55 @@ function TranscriptHistorySidebar({
       <aside
         className={cn(
           "hidden h-full shrink-0 border-r border-white/10 bg-background/90 backdrop-blur md:block",
-          isOpen ? "w-60" : "w-14",
+          isOpen ? "w-52" : "w-12",
         )}
       >
         {isOpen ? content : (
-          <div className="flex h-full w-full flex-col items-center gap-3 py-2">
+          <div className="flex h-full w-full flex-col items-center gap-2.5 py-2">
             <button
               type="button"
               onClick={onToggle}
-              className="inline-flex size-10 items-center justify-center rounded-md text-foreground transition hover:bg-white/10 hover:text-cyan"
+              className="inline-flex size-8 items-center justify-center rounded-md text-foreground transition hover:bg-white/10 hover:text-cyan"
               aria-label="展开侧栏"
               title="展开侧栏"
             >
-              <PanelLeft className="size-5" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={onNew}
-              className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
-              aria-label="新建转录"
-              title="新建转录"
-            >
-              <Plus className="size-5" aria-hidden="true" />
+              <PanelLeft className="size-4" aria-hidden="true" />
             </button>
             {showReturnLive ? (
               <button
                 type="button"
                 onClick={onReturnLive}
-                className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:text-foreground"
+                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:text-foreground"
                 aria-label="返回当前转录"
                 title="返回当前转录"
               >
-                <CornerUpLeft className="size-5" aria-hidden="true" />
+                <CornerUpLeft className="size-4" aria-hidden="true" />
               </button>
             ) : null}
             <button
               type="button"
+              onClick={onNew}
+              className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
+              aria-label="新建转录"
+              title="新建转录"
+            >
+              <Plus className="size-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
               onClick={onToggle}
-              className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
+              className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
               aria-label="搜索历史"
               title="搜索历史"
             >
-              <Search className="size-5" aria-hidden="true" />
+              <Search className="size-4" aria-hidden="true" />
             </button>
           </div>
         )}
       </aside>
       {isDrawerOpen ? (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm md:hidden">
-          <aside className="h-full w-[min(21rem,88vw)] border-r border-white/12 bg-background shadow-2xl shadow-black/50">
+          <aside className="h-full w-[min(19rem,86vw)] border-r border-white/12 bg-background shadow-2xl shadow-black/50">
             {content}
           </aside>
         </div>
@@ -2244,7 +2280,7 @@ function TranscriptHistoryItem({
                 cancelEditing();
               }
             }}
-            className="h-8 min-w-0 flex-1 rounded bg-black/30 px-2 text-sm outline-none ring-1 ring-cyan/40"
+            className="h-7 min-w-0 flex-1 rounded bg-black/30 px-2 text-[13px] outline-none ring-1 ring-cyan/40"
           />
           <button
             type="button"
@@ -2266,11 +2302,11 @@ function TranscriptHistoryItem({
           </button>
         </form>
       ) : (
-        <div className="flex min-w-0 items-center gap-1 px-1 py-1">
+        <div className="flex min-w-0 items-center gap-1 px-1 py-0.5">
           <button
             type="button"
             onClick={onOpen}
-            className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-sm"
+            className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-[13px]"
             title={record.displayTitle}
           >
             {record.displayTitle}
@@ -2841,6 +2877,69 @@ function WorkTitleRow({ title }: { title: string | undefined }) {
           </button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function HistoryWorkInfoPanel({ record }: { record: TranscriptHistoryRecord }) {
+  const title = record.originalTitle || record.displayTitle || undefined;
+
+  return (
+    <section className="work-flow-panel shrink-0 overflow-hidden rounded-lg border border-white/25 p-4 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)] sm:p-5">
+      <div className="relative z-10">
+        <div className="grid gap-x-3 gap-y-4 text-left text-sm md:grid-cols-[8rem_minmax(13rem,24rem)_minmax(0,1fr)]">
+          <dl className="contents">
+            <InfoRow
+              label="作者"
+              singleLine
+              value={record.authorName ?? "未识别"}
+            />
+            <InfoRow
+              className="min-w-0 flex-1"
+              label="作品链接"
+              value={record.finalUrl || "未识别"}
+              href={record.finalUrl}
+              singleLine
+            />
+            <HistoryTitleInfoRow title={title} />
+          </dl>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function HistoryTitleInfoRow({ title }: { title: string | undefined }) {
+  const value = title ?? "未识别";
+  const [copied, setCopied] = useState(false);
+
+  async function copyTitle() {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="min-w-0 text-left">
+      <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">标题</dt>
+      <dd className="min-h-8 min-w-0 text-left font-semibold text-foreground">
+        <div className="min-w-0 break-words text-sm leading-6">
+          <span>
+            <HighlightedTitle text={value} />
+          </span>
+          {title ? (
+            <button
+              type="button"
+              onClick={() => void copyTitle()}
+              className="ml-1 inline-flex size-5 align-[-3px] items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
+              aria-label={copied ? "已复制标题" : "复制标题"}
+              title={copied ? "已复制" : "复制"}
+            >
+              {copied ? <Check className="size-3.5 text-cyan" /> : <Copy className="size-3.5" />}
+            </button>
+          ) : null}
+        </div>
+      </dd>
     </div>
   );
 }
@@ -3871,6 +3970,7 @@ function ResultBlock({
 }
 
 type TranscriptPanelHistory = {
+  onSummaryDeleted: (recordId: string, summaryId: string) => void;
   onSummarySaved: (recordId: string, summary: TranscriptHistorySummary | undefined) => void;
   onTranscriptSaved: (input: {
     recordId: string;
@@ -3929,9 +4029,11 @@ function TranscriptResultPanel({
   const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
+  const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [customPrompts, setCustomPrompts] = useState<CustomSummaryPrompt[]>([]);
   const [customPromptError, setCustomPromptError] = useState("");
+  const [deletingSummaryId, setDeletingSummaryId] = useState<string | null>(null);
   const [deletingCustomPromptId, setDeletingCustomPromptId] = useState<string | null>(null);
   const [editingCustomPrompt, setEditingCustomPrompt] = useState<CustomSummaryPrompt | null>(null);
   const [focusedCustomPromptId, setFocusedCustomPromptId] = useState<string | null>(null);
@@ -3942,8 +4044,10 @@ function TranscriptResultPanel({
   const [segmentSpeakerOverrides, setSegmentSpeakerOverrides] = useState<Record<string, string | undefined>>({});
   const [speakerEditorTarget, setSpeakerEditorTarget] = useState<SpeakerEditorTarget | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const summaryAbortControllerRef = useRef<AbortController | null>(null);
   const summaryHistoryRef = useRef<HTMLDivElement | null>(null);
   const summaryMenuRef = useRef<HTMLDivElement | null>(null);
+  const summaryRequestIdRef = useRef(0);
   const summaryScrollRef = useRef<HTMLDivElement | null>(null);
   const latestHistorySummary = history?.summaries[0];
 
@@ -3958,6 +4062,7 @@ function TranscriptResultPanel({
 
   useEffect(() => {
     setSummary(latestHistorySummary?.content ?? "");
+    setSelectedSummaryId(latestHistorySummary?.id ?? null);
     setSummaryError("");
     setSummaryHistoryOpen(false);
   }, [latestHistorySummary?.content, latestHistorySummary?.id]);
@@ -3988,6 +4093,12 @@ function TranscriptResultPanel({
       isActive = false;
     };
   }, [onAuthRequired]);
+
+  useEffect(() => {
+    return () => {
+      abortSummaryRequest();
+    };
+  }, []);
 
   const usesOriginalSegments = content === (result.content ?? initialContent);
   const segments = readDisplayTranscriptSegments(content, editedSegments ?? (usesOriginalSegments ? result.transcriptSegments : undefined));
@@ -4381,35 +4492,80 @@ function TranscriptResultPanel({
     window.setTimeout(() => setCopiedSummary(false), 1600);
   }
 
+  function abortSummaryRequest() {
+    summaryRequestIdRef.current += 1;
+    summaryAbortControllerRef.current?.abort();
+    summaryAbortControllerRef.current = null;
+  }
+
+  function pauseSummary() {
+    abortSummaryRequest();
+    setIsSummarizing(false);
+    setSummaryError("");
+    setSummaryMenuOpen(false);
+  }
+
   async function summarize(prompt: SummaryPrompt) {
+    if (isSummarizing) {
+      pauseSummary();
+      return;
+    }
+
+    const requestId = summaryRequestIdRef.current + 1;
+    const controller = new AbortController();
+    const isCurrentSummaryRequest = () =>
+      summaryRequestIdRef.current === requestId &&
+      summaryAbortControllerRef.current === controller &&
+      !controller.signal.aborted;
+
+    summaryRequestIdRef.current = requestId;
+    summaryAbortControllerRef.current = controller;
     setSummaryMenuOpen(false);
     setSummary("");
     setSummaryError("");
+    setSelectedSummaryId(null);
     setIsSummarizing(true);
 
-      try {
-        await streamSummaryContent({
-          historyRecordId: history?.recordId,
-          text: content,
-          prompt: prompt.prompt,
-          promptId: prompt.id,
-          promptTitle: prompt.title,
-          onDelta: (delta) => setSummary((current) => current + delta),
-          onDone: (text, savedSummary) => {
-            setSummary(text);
-            if (history) {
-              history.onSummarySaved(history.recordId, savedSummary);
-            }
-          },
-        });
+    try {
+      await streamSummaryContent({
+        historyRecordId: history?.recordId,
+        text: content,
+        prompt: prompt.prompt,
+        promptId: prompt.id,
+        promptTitle: prompt.title,
+        signal: controller.signal,
+        onDelta: (delta) => {
+          if (isCurrentSummaryRequest()) {
+            setSummary((current) => current + delta);
+          }
+        },
+        onDone: (text, savedSummary) => {
+          if (!isCurrentSummaryRequest()) {
+            return;
+          }
+          setSummary(text);
+          setSelectedSummaryId(savedSummary?.id ?? null);
+          if (history) {
+            history.onSummarySaved(history.recordId, savedSummary);
+          }
+        },
+      });
     } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
       if (isAuthRequiredError(error)) {
         onAuthRequired();
         return;
       }
-      setSummaryError(readUserFacingError(error, "AI处理失败。"));
+      if (isCurrentSummaryRequest()) {
+        setSummaryError(readUserFacingError(error, "AI处理失败。"));
+      }
     } finally {
-      setIsSummarizing(false);
+      if (summaryAbortControllerRef.current === controller) {
+        summaryAbortControllerRef.current = null;
+        setIsSummarizing(false);
+      }
     }
   }
 
@@ -4460,10 +4616,39 @@ function TranscriptResultPanel({
     }
   }
 
-  function resetSummary() {
-    setSummary("");
+  async function removeSummary(summaryToDelete: TranscriptHistorySummary) {
+    if (!history) {
+      return;
+    }
+
+    setDeletingSummaryId(summaryToDelete.id);
     setSummaryError("");
-    setIsSummarizing(false);
+    try {
+      await deleteTranscriptHistorySummary(history.recordId, summaryToDelete.id);
+      const nextSummary = history.summaries.find((item) => item.id !== summaryToDelete.id);
+      history.onSummaryDeleted(history.recordId, summaryToDelete.id);
+      if (selectedSummaryId === summaryToDelete.id) {
+        setSummary(nextSummary?.content ?? "");
+        setSelectedSummaryId(nextSummary?.id ?? null);
+      }
+      if (history.summaries.length <= 1) {
+        setSummaryHistoryOpen(false);
+      }
+    } catch (error) {
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
+        return;
+      }
+      setSummaryError(readUserFacingError(error, "总结记录删除失败。"));
+    } finally {
+      setDeletingSummaryId(null);
+    }
+  }
+
+  function resetSummary() {
+    pauseSummary();
+    setSummary("");
+    setSelectedSummaryId(null);
   }
 
   function startEditingContent() {
@@ -4869,6 +5054,10 @@ function TranscriptResultPanel({
                 <button
                   type="button"
                   onClick={() => {
+                    if (isSummarizing) {
+                      pauseSummary();
+                      return;
+                    }
                     setSummaryMenuOpen((value) => !value);
                     setCopyMenuOpen(false);
                     setDownloadMenuOpen(false);
@@ -4883,13 +5072,17 @@ function TranscriptResultPanel({
                       : "",
                   )}
                   aria-expanded={summaryMenuOpen}
-                  title="选择总结提示词"
+                  title={isSummarizing ? "暂停AI总结" : "选择总结提示词"}
                 >
                   <Sparkles className="size-3.5 transition group-hover:rotate-12 group-hover:scale-110" aria-hidden="true" />
                   总结
-                  <ChevronDown className={cn("size-3 transition", summaryMenuOpen ? "rotate-180" : "")} aria-hidden="true" />
+                  {isSummarizing ? (
+                    <Pause className="size-3.5 text-amber" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className={cn("size-3 transition", summaryMenuOpen ? "rotate-180" : "")} aria-hidden="true" />
+                  )}
                 </button>
-                {summaryMenuOpen ? (
+                {summaryMenuOpen && !isSummarizing ? (
                   <SummaryPromptMenu
                     customPrompts={customPrompts}
                     deletingCustomPromptId={deletingCustomPromptId}
@@ -4916,17 +5109,6 @@ function TranscriptResultPanel({
                   />
                 ) : null}
               </div>
-              {hasSummaryOutput && !isSummarizing ? (
-                <button
-                  type="button"
-                  onClick={resetSummary}
-                  className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.94]"
-                  aria-label="重新生成"
-                  title="重新生成"
-                >
-                  <RefreshCw className="size-4" aria-hidden="true" />
-                </button>
-              ) : null}
               {history?.summaries.length ? (
                 <div ref={summaryHistoryRef} className="relative">
                   <button
@@ -4937,13 +5119,16 @@ function TranscriptResultPanel({
                     aria-label="查看历史总结"
                     title="历史总结"
                   >
-                    <ChevronDown className={cn("size-4 transition", summaryHistoryOpen ? "rotate-180" : "")} aria-hidden="true" />
+                    <History className="size-4" aria-hidden="true" />
                   </button>
                   {summaryHistoryOpen ? (
                     <SummaryHistoryMenu
+                      deletingSummaryId={deletingSummaryId}
+                      onDelete={(item) => void removeSummary(item)}
                       summaries={history.summaries}
                       onSelect={(item) => {
                         setSummary(item.content);
+                        setSelectedSummaryId(item.id);
                         setSummaryError("");
                         setSummaryHistoryOpen(false);
                       }}
@@ -5916,28 +6101,47 @@ function CustomPromptMenuItem({
 }
 
 function SummaryHistoryMenu({
+  deletingSummaryId,
+  onDelete,
   onSelect,
   summaries,
 }: {
+  deletingSummaryId: string | null;
+  onDelete: (summary: TranscriptHistorySummary) => void;
   onSelect: (summary: TranscriptHistorySummary) => void;
   summaries: TranscriptHistorySummary[];
 }) {
   return (
     <div className="mobile-popover w-64 overflow-hidden rounded-md border border-white/12 bg-[#171a27] shadow-2xl shadow-black/40">
-      <div className="border-b border-white/10 px-3 py-2 text-sm font-semibold text-foreground">历史总结</div>
       <div className="content-scroll max-h-72 overflow-auto py-1">
         {summaries.map((summary) => (
-          <button
+          <div
             key={summary.id}
-            type="button"
-            onClick={() => onSelect(summary)}
-            className="block w-full px-3 py-2 text-left transition hover:bg-cyan/[0.07]"
+            className="group flex min-w-0 items-center gap-1 px-2 py-1 transition hover:bg-cyan/[0.07]"
           >
-            <div className="truncate text-sm font-semibold text-foreground">{summary.promptTitle}</div>
-            <div className="mt-0.5 text-xs text-muted-foreground">
-              {formatFriendlyDateTime(summary.createdAt)}
-            </div>
-          </button>
+            <button
+              type="button"
+              onClick={() => onSelect(summary)}
+              className="min-w-0 flex-1 rounded px-1 py-1 text-left"
+            >
+              <div className="truncate text-xs font-semibold text-foreground">{summary.promptTitle}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {formatFriendlyDateTime(summary.createdAt)}
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(summary)}
+              disabled={deletingSummaryId === summary.id}
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-70 transition hover:bg-rose-400/[0.12] hover:text-rose-300 disabled:cursor-not-allowed disabled:opacity-40 group-hover:opacity-100"
+              aria-label="删除AI总结"
+              title="删除"
+            >
+              {deletingSummaryId === summary.id
+                ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                : <Trash2 className="size-3.5" aria-hidden="true" />}
+            </button>
+          </div>
         ))}
       </div>
     </div>

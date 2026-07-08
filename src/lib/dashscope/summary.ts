@@ -9,6 +9,7 @@ type SummaryPromptBuildResult =
 export async function streamSummarizeTranscript(input: {
   onDelta: (delta: string) => void;
   prompt: string;
+  signal?: AbortSignal;
   transcript: string;
 }): Promise<ProviderResult> {
   const content = buildSummaryContent(input.transcript, input.prompt);
@@ -19,6 +20,7 @@ export async function streamSummarizeTranscript(input: {
   return streamQwenChat({
     prompt: content.prompt,
     onDelta: input.onDelta,
+    signal: input.signal,
   });
 }
 

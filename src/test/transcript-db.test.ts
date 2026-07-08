@@ -12,6 +12,7 @@ import {
   readDailySucceededAsrDurationSeconds,
   readTranscriptHistoryRecord,
   deleteTranscriptHistoryRecord,
+  deleteTranscriptHistorySummary,
   renameTranscriptHistoryRecord,
   updateTranscriptHistoryRecordTranscript,
   upsertTranscriptHistoryRecord,
@@ -173,6 +174,41 @@ describe("transcript db ASR quota and audio cache", () => {
       historyRecordId: "history-a",
       userId: "user-1",
     })).resolves.toMatchObject([{ content: "已有总结", id: "summary-1" }]);
+  });
+
+  it("deletes one transcript history summary without dropping sibling summaries", async () => {
+    await upsertTranscriptHistoryRecord(historyInput({ id: "history-a", workId: "100" }));
+    await insertTranscriptHistorySummary({
+      content: "总结一",
+      historyRecordId: "history-a",
+      id: "summary-1",
+      promptId: "quick",
+      promptTitle: "快速总结",
+      userId: "user-1",
+    });
+    await insertTranscriptHistorySummary({
+      content: "总结二",
+      historyRecordId: "history-a",
+      id: "summary-2",
+      promptId: "deep",
+      promptTitle: "深度总结",
+      userId: "user-1",
+    });
+
+    await expect(deleteTranscriptHistorySummary({
+      historyRecordId: "history-a",
+      id: "summary-1",
+      userId: "user-1",
+    })).resolves.toBe(true);
+    await expect(listTranscriptHistorySummaries({
+      historyRecordId: "history-a",
+      userId: "user-1",
+    })).resolves.toMatchObject([{ content: "总结二", id: "summary-2" }]);
+    await expect(deleteTranscriptHistorySummary({
+      historyRecordId: "history-a",
+      id: "summary-1",
+      userId: "user-1",
+    })).resolves.toBe(false);
   });
 });
 

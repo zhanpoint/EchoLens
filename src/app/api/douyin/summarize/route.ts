@@ -45,6 +45,7 @@ export async function POST(request: Request) {
     promptTitle: parsed.data.promptTitle,
     transcript,
     userId: user.id,
+    signal: request.signal,
   });
 }
 
@@ -58,20 +59,39 @@ function streamSummary(input: {
   prompt: string;
   promptId?: string;
   promptTitle?: string;
+  signal?: AbortSignal;
   transcript: string;
   userId: string;
 }): Response {
   const encoder = new TextEncoder();
+  let closed = false;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: SummaryEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      const close = () => {
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
+      };
+      const abort = () => close();
+      input.signal?.addEventListener("abort", abort, { once: true });
+      const send = (event: SummaryEvent) => {
+        if (closed || input.signal?.aborted) {
+          return;
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
 
       try {
         const result = await streamSummarizeTranscript({
           prompt: input.prompt,
           transcript: input.transcript,
           onDelta: (delta) => send({ type: "delta", value: delta }),
+          signal: input.signal,
         });
+        if (input.signal?.aborted) {
+          return;
+        }
 
         if (result.ok) {
           const summary = input.historyRecordId && input.promptId && input.promptTitle
@@ -84,14 +104,21 @@ function streamSummary(input: {
                 userId: input.userId,
               })
             : undefined;
+          if (input.signal?.aborted) {
+            return;
+          }
           send({ summary, type: "done", value: result.content });
         } else {
           send({ type: "error", error: result.detail, code: result.code });
         }
       } catch (error) {
+        if (input.signal?.aborted) {
+          return;
+        }
         send({ type: "error", error: error instanceof Error ? error.message : "AI处理失败。" });
       } finally {
-        controller.close();
+        input.signal?.removeEventListener("abort", abort);
+        close();
       }
     },
   });
