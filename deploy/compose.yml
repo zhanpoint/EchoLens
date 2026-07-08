@@ -1,4 +1,25 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: echolens-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-echolens}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - echolens-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   echolens:
     image: ${ECHOLENS_IMAGE:?ECHOLENS_IMAGE is required}
     container_name: echolens
@@ -11,16 +32,18 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: 3000
       FFMPEG_PATH: ${FFMPEG_PATH:-/usr/bin/ffmpeg}
-      SQLITE_PATH: /app/data/echolens.sqlite
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-echolens}
+      POSTGRES_POOL_MAX: ${POSTGRES_POOL_MAX:-10}
       NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - target: 3000
         published: "${ECHOLENS_PORT:-3000}"
         host_ip: 127.0.0.1
         protocol: tcp
     read_only: true
-    volumes:
-      - echolens-data:/app/data
     tmpfs:
       - /tmp:mode=1777
     security_opt:
@@ -38,4 +61,4 @@ services:
         max-file: "3"
 
 volumes:
-  echolens-data:
+  echolens-postgres:

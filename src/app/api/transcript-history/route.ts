@@ -5,7 +5,7 @@ import { listTranscriptHistoryRecords } from "@/lib/transcript/db";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -13,7 +13,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const query = url.searchParams.get("q") ?? undefined;
   return NextResponse.json({
-    records: listTranscriptHistoryRecords({
+    records: await listTranscriptHistoryRecords({
       query,
       userId: user.id,
     }),

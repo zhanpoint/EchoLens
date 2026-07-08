@@ -24,8 +24,9 @@ export function errorJson(error: unknown): NextResponse {
   );
 }
 
-export function requireUser(request: Request): AuthUser | NextResponse {
-  return readCurrentUserFromRequest(request) ?? unauthenticatedJson();
+export async function requireUser(request: Request): Promise<AuthUser | NextResponse> {
+  const user = await readCurrentUserFromRequest(request);
+  return user ?? unauthenticatedJson();
 }
 
 export function unauthenticatedJson(): NextResponse {

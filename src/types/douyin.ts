@@ -10,7 +10,7 @@ export type ExtractionStatus =
   | "unavailable"
   | "not_configured"
   | "error";
-export type ExtractionSource = "dashscope" | "detail" | "openrouter";
+export type ExtractionSource = "dashscope" | "detail";
 export type MediaAssetKind = (typeof MEDIA_ASSET_KINDS)[number];
 
 export type TranscriptSegment = {

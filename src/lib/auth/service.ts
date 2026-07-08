@@ -45,17 +45,17 @@ export async function registerUser(input: {
   assertPasswordConfirmation(input.password, input.confirmPassword);
   assertPassword(input.password);
 
-  if (findUserByIdentifier(username)) {
+  if (await findUserByIdentifier(username)) {
     throw new AuthError("用户名已被使用。");
   }
-  if (findUserByEmail(email)) {
+  if (await findUserByEmail(email)) {
     throw new AuthError("邮箱已被注册。");
   }
-  if (!verifyEmailCode(email, "signup", input.code)) {
+  if (!(await verifyEmailCode(email, "signup", input.code))) {
     throw new AuthError("验证码无效或已过期。");
   }
 
-  const user = insertUser({
+  const user = await insertUser({
     email,
     id: randomUUID(),
     passwordHash: await hashPassword(input.password),
@@ -72,7 +72,7 @@ export async function loginUser(input: {
 }): Promise<AuthUser> {
   assertLegalAccepted(input.acceptedLegal);
   const identifier = input.identifier.trim();
-  const user = findUserByIdentifier(identifier);
+  const user = await findUserByIdentifier(identifier);
   if (!user) {
     throw new AuthError(
       identifier.includes("@") ? "该邮箱尚未注册，请先注册账号。" : "该用户名不存在，请检查后重试。",
@@ -93,8 +93,8 @@ export async function loginUserWithEmailCode(input: {
 }): Promise<AuthUser> {
   assertLegalAccepted(input.acceptedLegal);
   const email = normalizeEmail(input.email);
-  const user = findUserByEmail(email);
-  if (!user || !verifyEmailCode(email, "login", input.code)) {
+  const user = await findUserByEmail(email);
+  if (!user || !(await verifyEmailCode(email, "login", input.code))) {
     throw new AuthError("验证码无效或已过期。", 401, "INVALID_CODE");
   }
   return toAuthUser(user);
@@ -110,25 +110,25 @@ export async function resetPassword(input: {
   assertPasswordConfirmation(input.password, input.confirmPassword);
   assertPassword(input.password);
 
-  const user = findUserByEmail(email);
+  const user = await findUserByEmail(email);
   if (!user) {
     throw new AuthError("验证码无效或已过期。");
   }
-  if (!verifyEmailCode(email, "reset", input.code)) {
+  if (!(await verifyEmailCode(email, "reset", input.code))) {
     throw new AuthError("验证码无效或已过期。");
   }
 
-  updateUserPassword(user.id, await hashPassword(input.password));
+  await updateUserPassword(user.id, await hashPassword(input.password));
 }
 
-export function emailExists(email: string): boolean {
-  return Boolean(findUserByEmail(normalizeEmail(email)));
+export async function emailExists(email: string): Promise<boolean> {
+  return Boolean(await findUserByEmail(normalizeEmail(email)));
 }
 
 export async function setSessionCookie(response: NextResponse, userId: string): Promise<void> {
   const sessionId = randomBytes(32).toString("base64url");
   const expiresAt = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
-  createSessionRow({
+  await createSessionRow({
     expiresAt,
     tokenHash: hashSessionId(sessionId),
     userId,
@@ -157,14 +157,14 @@ export async function readCurrentUserFromCookies(): Promise<AuthUser | null> {
   return readCurrentUserFromCookieValue(store.get(SESSION_COOKIE)?.value);
 }
 
-export function readCurrentUserFromRequest(request: Request): AuthUser | null {
-  return readCurrentUserFromCookieValue(readCookie(request.headers.get("cookie"), SESSION_COOKIE));
+export async function readCurrentUserFromRequest(request: Request): Promise<AuthUser | null> {
+  return await readCurrentUserFromCookieValue(readCookie(request.headers.get("cookie"), SESSION_COOKIE));
 }
 
-export function deleteCurrentSessionFromRequest(request: Request): void {
+export async function deleteCurrentSessionFromRequest(request: Request): Promise<void> {
   const parsed = readSessionCookieValue(readCookie(request.headers.get("cookie"), SESSION_COOKIE));
   if (parsed) {
-    deleteSessionRow(hashSessionId(parsed.sessionId));
+    await deleteSessionRow(hashSessionId(parsed.sessionId));
   }
 }
 
@@ -179,13 +179,13 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function readCurrentUserFromCookieValue(value: string | undefined): AuthUser | null {
+async function readCurrentUserFromCookieValue(value: string | undefined): Promise<AuthUser | null> {
   const parsed = readSessionCookieValue(value);
   if (!parsed) {
     return null;
   }
 
-  const row = readSessionUser(hashSessionId(parsed.sessionId));
+  const row = await readSessionUser(hashSessionId(parsed.sessionId));
   return row ? toAuthUser(row) : null;
 }
 

@@ -49,9 +49,9 @@ const AUTH_EMAIL_COPY: Record<AuthEmailKind, AuthEmailCopy> = {
 };
 
 export async function sendEmailCode(email: string, purpose: EmailCodePurpose): Promise<void> {
-  cleanupExpiredAuthRows();
+  await cleanupExpiredAuthRows();
 
-  const recent = readRecentEmailCode(email, purpose);
+  const recent = await readRecentEmailCode(email, purpose);
   const waitSeconds = recent ? EMAIL_CODE_RESEND_SECONDS - Math.floor((Date.now() - recent.sent_at) / 1000) : 0;
   if (waitSeconds > 0) {
     throw new EmailRateLimitError(waitSeconds);
@@ -80,20 +80,20 @@ export async function sendLoginNoticeEmail(email: string, username: string): Pro
   });
 }
 
-export function verifyEmailCode(email: string, purpose: EmailCodePurpose, code: string): boolean {
-  cleanupExpiredAuthRows();
-  const row = readActiveEmailCode(email, purpose);
+export async function verifyEmailCode(email: string, purpose: EmailCodePurpose, code: string): Promise<boolean> {
+  await cleanupExpiredAuthRows();
+  const row = await readActiveEmailCode(email, purpose);
   if (!row || row.expires_at <= Date.now() || row.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
     return false;
   }
 
   const ok = row.code_hash === hashEmailCode(email, purpose, code);
   if (!ok) {
-    markEmailCodeAttempt(row.id, row.attempts + 1);
+    await markEmailCodeAttempt(row.id, row.attempts + 1);
     return false;
   }
 
-  markEmailCodeUsed(row.id);
+  await markEmailCodeUsed(row.id);
   return true;
 }
 

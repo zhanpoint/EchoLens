@@ -43,7 +43,7 @@ type TranslateEvent =
   | { type: "error"; error: string; code?: string };
 
 export async function POST(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }

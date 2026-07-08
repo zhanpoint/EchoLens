@@ -256,11 +256,11 @@ function formatOpenRouterError(
   }
 
   if (status === 429) {
-    return `OpenRouter 或上游 ASR 提供方触发限流，系统已按 Retry-After 自动退避重试。当前仍被限流，请稍后重试或减少重复提取。${metadata}`;
+    return `OpenRouter 或上游模型触发限流，系统已按 Retry-After 自动退避重试。当前仍被限流，请稍后重试或减少重复总结。${metadata}`;
   }
 
   if (status === 502 && message === "Provider returned error") {
-    return `OpenRouter 上游模型处理失败：provider returned error。请检查 ASR 模型是否支持当前音频格式和大小。${metadata}`;
+    return `OpenRouter 上游模型处理失败：provider returned error。请检查总结模型是否可用。${metadata}`;
   }
 
   return `${message ?? "OpenRouter 返回错误。"}${metadata}`;

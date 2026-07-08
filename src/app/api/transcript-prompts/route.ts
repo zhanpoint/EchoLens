@@ -15,18 +15,18 @@ const CustomPromptSchema = z.object({
 }).strict();
 
 export async function GET(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
 
   return NextResponse.json({
-    prompts: listTranscriptCustomPrompts({ userId: user.id }).map(serializeCustomPrompt),
+    prompts: (await listTranscriptCustomPrompts({ userId: user.id })).map(serializeCustomPrompt),
   });
 }
 
 export async function POST(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "自定义提示词参数无效。" }, { status: 400 });
   }
 
-  const prompt = insertTranscriptCustomPrompt({
+  const prompt = await insertTranscriptCustomPrompt({
     id: createCustomPromptId(),
     prompt: parsed.data.prompt,
     title: parsed.data.title,

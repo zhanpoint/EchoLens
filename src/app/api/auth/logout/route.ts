@@ -4,7 +4,7 @@ import { clearSessionCookie, deleteCurrentSessionFromRequest } from "@/lib/auth/
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  deleteCurrentSessionFromRequest(request);
+  await deleteCurrentSessionFromRequest(request);
   const response = NextResponse.json({ ok: true });
   clearSessionCookie(response);
   return response;

@@ -1,14 +1,13 @@
-import Database from "better-sqlite3";
-import { getSqliteDb } from "@/lib/storage/sqlite";
+import { execute, queryRow, queryRows } from "@/lib/storage/postgres";
 
 type StoredAsrTaskRow = {
   audio_duration_seconds: number | null;
   cache_key: string;
   error_detail: string | null;
   history_record_id: string | null;
-  history_work_json: string | null;
+  history_work: unknown;
   id: string;
-  model: string | null;
+  model: string;
   object_key: string;
   status: StoredAsrTaskStatus;
   task_id: string;
@@ -26,7 +25,7 @@ type TranscriptHistoryRecordRow = {
   input_url: string;
   original_title: string;
   transcript_content: string;
-  transcript_segments_json: string | null;
+  transcript_segments: unknown;
   updated_at: number;
   user_id: string;
   work_id: string;
@@ -49,13 +48,6 @@ type TranscriptCustomPromptRow = {
   updated_at: number;
   user_id: string;
 };
-
-type GlobalWithTranscriptDb = typeof globalThis & {
-  __echolensTranscriptDbMigrated?: number;
-};
-
-const TRANSCRIPT_SCHEMA_VERSION = 10;
-const globalForTranscriptDb = globalThis as GlobalWithTranscriptDb;
 
 export type StoredAsrTaskStatus = "running" | "succeeded" | "failed" | "canceled";
 export type StoredAsrTask = {
@@ -110,36 +102,40 @@ export type TranscriptCustomPrompt = {
   userId: string;
 };
 
-export function getTranscriptDb(): Database.Database {
-  const db = getSqliteDb();
-  if (globalForTranscriptDb.__echolensTranscriptDbMigrated !== TRANSCRIPT_SCHEMA_VERSION) {
-    migrate(db);
-    globalForTranscriptDb.__echolensTranscriptDbMigrated = TRANSCRIPT_SCHEMA_VERSION;
-  }
-  return db;
-}
+const HISTORY_RECORD_COLUMNS = `
+  id, user_id, work_key, work_id, work_kind, input_url, final_url,
+  author_name, original_title, display_title, duration_seconds,
+  transcript_content, transcript_segments, created_at, updated_at
+`;
 
-export function upsertAsrAudioCache(input: {
+const ASR_TASK_COLUMNS = `
+  id, user_id, work_key, cache_key, task_id, object_key, model,
+  audio_duration_seconds, history_record_id, history_work,
+  status, error_detail, updated_at
+`;
+
+const DAILY_TRANSCRIPTION_QUOTA_TIME_ZONE = "Asia/Shanghai";
+
+export async function upsertAsrAudioCache(input: {
   durationSeconds: number;
   objectKey: string;
   userId: string;
   workKey: string;
-}): void {
+}): Promise<void> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_asr_audio_cache (
-         user_id, work_key, object_key, duration_seconds, created_at, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(user_id, work_key, object_key) DO UPDATE SET
-         duration_seconds = excluded.duration_seconds,
-         updated_at = excluded.updated_at`,
-    )
-    .run(input.userId, input.workKey, input.objectKey, input.durationSeconds, now, now);
+  await execute(
+    `INSERT INTO transcript_asr_audio_cache (
+       user_id, work_key, object_key, duration_seconds, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $5)
+     ON CONFLICT(user_id, work_key, object_key) DO UPDATE SET
+       duration_seconds = excluded.duration_seconds,
+       updated_at = excluded.updated_at`,
+    [input.userId, input.workKey, input.objectKey, input.durationSeconds, now],
+  );
 }
 
-export function insertAsrTask(input: {
+export async function insertAsrTask(input: {
   audioDurationSeconds: number;
   cacheKey: string;
   historyContext?: StoredAsrHistoryContext;
@@ -149,17 +145,15 @@ export function insertAsrTask(input: {
   taskId: string;
   userId: string;
   workKey: string;
-}): void {
+}): Promise<void> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_asr_tasks (
-         id, user_id, work_key, cache_key, task_id, object_key, model,
-         audio_duration_seconds, history_record_id, history_work_json, status, created_at, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
-    )
-    .run(
+  await execute(
+    `INSERT INTO transcript_asr_tasks (
+       id, user_id, work_key, cache_key, task_id, object_key, model,
+       audio_duration_seconds, history_record_id, history_work, status, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'running', $11, $11)`,
+    [
       input.id,
       input.userId,
       input.workKey,
@@ -169,13 +163,13 @@ export function insertAsrTask(input: {
       input.model,
       input.audioDurationSeconds,
       input.historyContext?.historyRecordId ?? null,
-      input.historyContext?.work === undefined ? null : JSON.stringify(input.historyContext.work),
+      stringifyJson(input.historyContext?.work),
       now,
-      now,
-    );
+    ],
+  );
 }
 
-export function reserveAsrTask(input: {
+export async function reserveAsrTask(input: {
   audioDurationSeconds: number;
   cacheKey: string;
   historyContext?: StoredAsrHistoryContext;
@@ -184,154 +178,113 @@ export function reserveAsrTask(input: {
   objectKey: string;
   userId: string;
   workKey: string;
-}): void {
-  insertAsrTask({
+}): Promise<void> {
+  await insertAsrTask({
     ...input,
     taskId: `pending:${input.id}`,
   });
 }
 
-export function markAsrJobCancellationRequested(input: {
+export async function attachAsrTaskProviderTask(input: {
   id: string;
-  userId: string;
-}): void {
-  const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_asr_job_cancellations (id, user_id, created_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(id, user_id) DO UPDATE SET created_at = excluded.created_at`,
-    )
-    .run(input.id, input.userId, now);
-}
-
-export function isAsrJobCancellationRequested(input: {
-  id: string;
-  userId: string;
-}): boolean {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT 1 AS found
-       FROM transcript_asr_job_cancellations
-       WHERE id = ? AND user_id = ?
-       LIMIT 1`,
-    )
-    .get(input.id, input.userId) as { found: number } | undefined;
+  taskId: string;
+}): Promise<boolean> {
+  const row = await queryRow<{ id: string }>(
+    `UPDATE transcript_asr_tasks
+     SET task_id = $1, updated_at = $2
+     WHERE id = $3 AND status = 'running'
+     RETURNING id`,
+    [input.taskId, Date.now(), input.id],
+  );
   return Boolean(row);
 }
 
-export function attachAsrTaskProviderTask(input: {
-  id: string;
-  taskId: string;
-}): boolean {
-  const result = getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_asr_tasks
-       SET task_id = ?, updated_at = ?
-       WHERE id = ? AND status = 'running'`,
-    )
-    .run(input.taskId, Date.now(), input.id);
-  return result.changes > 0;
-}
-
-export function readRunningAsrTask(input: {
+export async function readRunningAsrTask(input: {
   cacheKey: string;
   userId: string;
-}): StoredAsrTask | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT ${ASR_TASK_COLUMNS}
-       FROM transcript_asr_tasks
-       WHERE user_id = ? AND cache_key = ? AND status = 'running'
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-    )
-    .get(input.userId, input.cacheKey) as StoredAsrTaskRow | undefined;
-
+}): Promise<StoredAsrTask | null> {
+  const row = await queryRow<StoredAsrTaskRow>(
+    `SELECT ${ASR_TASK_COLUMNS}
+     FROM transcript_asr_tasks
+     WHERE user_id = $1 AND cache_key = $2 AND status = 'running'
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [input.userId, input.cacheKey],
+  );
   return row ? mapAsrTask(row) : null;
 }
 
-export function readAsrTask(input: {
+export async function readAsrTask(input: {
   id: string;
   userId: string;
-}): StoredAsrTask | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT ${ASR_TASK_COLUMNS}
-       FROM transcript_asr_tasks
-       WHERE user_id = ? AND id = ?
-       LIMIT 1`,
-    )
-    .get(input.userId, input.id) as StoredAsrTaskRow | undefined;
-
+}): Promise<StoredAsrTask | null> {
+  const row = await queryRow<StoredAsrTaskRow>(
+    `SELECT ${ASR_TASK_COLUMNS}
+     FROM transcript_asr_tasks
+     WHERE user_id = $1 AND id = $2
+     LIMIT 1`,
+    [input.userId, input.id],
+  );
   return row ? mapAsrTask(row) : null;
 }
 
-export function markAsrTaskRunning(id: string): void {
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_asr_tasks
-       SET updated_at = ?
-       WHERE id = ? AND status = 'running'`,
-    )
-    .run(Date.now(), id);
+export async function markAsrTaskRunning(id: string): Promise<void> {
+  await execute(
+    `UPDATE transcript_asr_tasks
+     SET updated_at = $1
+     WHERE id = $2 AND status = 'running'`,
+    [Date.now(), id],
+  );
 }
 
-export function markAsrTaskSucceeded(id: string): void {
+export async function markAsrTaskSucceeded(id: string): Promise<void> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_asr_tasks
-       SET status = 'succeeded', updated_at = ?, completed_at = ?
-       WHERE id = ?`,
-    )
-    .run(now, now, id);
+  await execute(
+    `UPDATE transcript_asr_tasks
+     SET status = 'succeeded', updated_at = $1, completed_at = $1
+     WHERE id = $2`,
+    [now, id],
+  );
 }
 
-export function markAsrTaskFailed(id: string, detail: string): void {
+export async function markAsrTaskFailed(id: string, detail: string): Promise<void> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_asr_tasks
-       SET status = 'failed', error_detail = ?, updated_at = ?, completed_at = ?
-       WHERE id = ?`,
-    )
-    .run(detail, now, now, id);
+  await execute(
+    `UPDATE transcript_asr_tasks
+     SET status = 'failed', error_detail = $1, updated_at = $2, completed_at = $2
+     WHERE id = $3`,
+    [detail, now, id],
+  );
 }
 
-export function markAsrTaskCanceled(id: string, detail = "用户已放弃当前转录任务。"): void {
+export async function markAsrTaskCanceled(id: string, detail = "用户已放弃当前转录任务。"): Promise<void> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_asr_tasks
-       SET status = 'canceled', error_detail = ?, updated_at = ?, completed_at = ?
-       WHERE id = ? AND status = 'running'`,
-    )
-    .run(detail, now, now, id);
+  await execute(
+    `UPDATE transcript_asr_tasks
+     SET status = 'canceled', error_detail = $1, updated_at = $2, completed_at = $2
+     WHERE id = $3 AND status = 'running'`,
+    [detail, now, id],
+  );
 }
 
-export function readDailySucceededAsrDurationSeconds(input: {
+export async function readDailySucceededAsrDurationSeconds(input: {
   now?: number;
   userId: string;
-}): number {
+}): Promise<number> {
   const now = input.now ?? Date.now();
-  const start = startOfLocalDay(now);
-  const end = startOfNextLocalDay(now);
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT COALESCE(SUM(audio_duration_seconds), 0) AS total
-       FROM transcript_asr_tasks
-       WHERE user_id = ?
-         AND status = 'succeeded'
-         AND completed_at >= ?
-         AND completed_at < ?`,
-    )
-    .get(input.userId, start, end) as { total: number } | undefined;
-
+  const row = await queryRow<{ total: number | null }>(
+    `SELECT COALESCE(SUM(audio_duration_seconds), 0)::double precision AS total
+     FROM transcript_asr_tasks
+     WHERE user_id = $1
+       AND status = 'succeeded'
+       AND completed_at >= $2
+       AND completed_at < $3`,
+    [input.userId, startOfLocalDay(now), startOfNextLocalDay(now)],
+  );
   return Number(row?.total ?? 0);
 }
 
-export function upsertTranscriptHistoryRecord(input: {
+export async function upsertTranscriptHistoryRecord(input: {
   authorName?: string;
   displayTitle?: string;
   durationSeconds?: number;
@@ -345,28 +298,27 @@ export function upsertTranscriptHistoryRecord(input: {
   workId: string;
   workKey: string;
   workKind: string;
-}): TranscriptHistoryRecord {
+}): Promise<TranscriptHistoryRecord> {
   const now = Date.now();
   const title = normalizeHistoryTitle(input.originalTitle, input.finalUrl);
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_history_records (
-         id, user_id, work_key, work_id, work_kind, input_url, final_url,
-         author_name, original_title, display_title, duration_seconds,
-         transcript_content, transcript_segments_json, created_at, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         input_url = excluded.input_url,
-         final_url = excluded.final_url,
-         author_name = excluded.author_name,
-         original_title = excluded.original_title,
-         duration_seconds = excluded.duration_seconds,
-         transcript_content = excluded.transcript_content,
-         transcript_segments_json = excluded.transcript_segments_json,
-         updated_at = excluded.updated_at`,
-    )
-    .run(
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `INSERT INTO transcript_history_records (
+       id, user_id, work_key, work_id, work_kind, input_url, final_url,
+       author_name, original_title, display_title, duration_seconds,
+       transcript_content, transcript_segments, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $14)
+     ON CONFLICT(id) DO UPDATE SET
+       input_url = excluded.input_url,
+       final_url = excluded.final_url,
+       author_name = excluded.author_name,
+       original_title = excluded.original_title,
+       duration_seconds = excluded.duration_seconds,
+       transcript_content = excluded.transcript_content,
+       transcript_segments = excluded.transcript_segments,
+       updated_at = excluded.updated_at
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [
       input.id,
       input.userId,
       input.workKey,
@@ -379,389 +331,250 @@ export function upsertTranscriptHistoryRecord(input: {
       input.displayTitle?.trim() || title,
       input.durationSeconds ?? null,
       input.transcriptContent,
-      input.transcriptSegments === undefined ? null : JSON.stringify(input.transcriptSegments),
+      stringifyJson(input.transcriptSegments),
       now,
-      now,
-    );
-
-  const record = readTranscriptHistoryRecord({ id: input.id, userId: input.userId });
-  if (!record) {
+    ],
+  );
+  if (!row) {
     throw new Error("转录历史保存失败。");
   }
-  return record;
+  return mapTranscriptHistoryRecord(row);
 }
 
-export function listTranscriptHistoryRecords(input: {
+export async function listTranscriptHistoryRecords(input: {
   limit?: number;
   query?: string;
   userId: string;
-}): TranscriptHistoryRecord[] {
+}): Promise<TranscriptHistoryRecord[]> {
   const limit = Math.min(Math.max(input.limit ?? 80, 1), 200);
   const query = input.query?.trim();
-  const sql = query
-    ? `SELECT ${HISTORY_RECORD_COLUMNS}
-       FROM transcript_history_records
-       WHERE user_id = ? AND transcript_content <> '' AND display_title LIKE ?
-       ORDER BY updated_at DESC
-       LIMIT ?`
-    : `SELECT ${HISTORY_RECORD_COLUMNS}
-       FROM transcript_history_records
-       WHERE user_id = ? AND transcript_content <> ''
-       ORDER BY updated_at DESC
-       LIMIT ?`;
-  const params = query ? [input.userId, `%${query}%`, limit] : [input.userId, limit];
-  const rows = getTranscriptDb().prepare(sql).all(...params) as TranscriptHistoryRecordRow[];
+  const rows = query
+    ? await queryRows<TranscriptHistoryRecordRow>(
+        `SELECT ${HISTORY_RECORD_COLUMNS}
+         FROM transcript_history_records
+         WHERE user_id = $1 AND transcript_content <> '' AND display_title ILIKE $2
+         ORDER BY updated_at DESC
+         LIMIT $3`,
+        [input.userId, `%${query}%`, limit],
+      )
+    : await queryRows<TranscriptHistoryRecordRow>(
+        `SELECT ${HISTORY_RECORD_COLUMNS}
+         FROM transcript_history_records
+         WHERE user_id = $1 AND transcript_content <> ''
+         ORDER BY updated_at DESC
+         LIMIT $2`,
+        [input.userId, limit],
+      );
   return rows.map(mapTranscriptHistoryRecord);
 }
 
-export function readTranscriptHistoryRecord(input: {
+export async function readTranscriptHistoryRecord(input: {
   id: string;
   userId: string;
-}): TranscriptHistoryRecord | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT ${HISTORY_RECORD_COLUMNS}
-       FROM transcript_history_records
-       WHERE user_id = ? AND id = ?
-       LIMIT 1`,
-    )
-    .get(input.userId, input.id) as TranscriptHistoryRecordRow | undefined;
-
+}): Promise<TranscriptHistoryRecord | null> {
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `SELECT ${HISTORY_RECORD_COLUMNS}
+     FROM transcript_history_records
+     WHERE user_id = $1 AND id = $2
+     LIMIT 1`,
+    [input.userId, input.id],
+  );
   return row ? mapTranscriptHistoryRecord(row) : null;
 }
 
-export function renameTranscriptHistoryRecord(input: {
+export async function renameTranscriptHistoryRecord(input: {
   displayTitle: string;
   id: string;
   userId: string;
-}): TranscriptHistoryRecord | null {
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_history_records
-       SET display_title = ?, updated_at = ?
-       WHERE user_id = ? AND id = ?`,
-    )
-    .run(input.displayTitle.trim(), Date.now(), input.userId, input.id);
-  return readTranscriptHistoryRecord({ id: input.id, userId: input.userId });
+}): Promise<TranscriptHistoryRecord | null> {
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `UPDATE transcript_history_records
+     SET display_title = $1, updated_at = $2
+     WHERE user_id = $3 AND id = $4
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [input.displayTitle, Date.now(), input.userId, input.id],
+  );
+  return row ? mapTranscriptHistoryRecord(row) : null;
 }
 
-export function updateTranscriptHistoryRecordTranscript(input: {
+export async function updateTranscriptHistoryRecordTranscript(input: {
   id: string;
   transcriptContent: string;
   transcriptSegments?: unknown;
   userId: string;
-}): TranscriptHistoryRecord | null {
-  const result = getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_history_records
-       SET transcript_content = ?, transcript_segments_json = ?, updated_at = ?
-       WHERE user_id = ? AND id = ?`,
-    )
-    .run(
+}): Promise<TranscriptHistoryRecord | null> {
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `UPDATE transcript_history_records
+     SET transcript_content = $1, transcript_segments = $2::jsonb, updated_at = $3
+     WHERE user_id = $4 AND id = $5
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [
       input.transcriptContent,
-      input.transcriptSegments === undefined ? null : JSON.stringify(input.transcriptSegments),
+      stringifyJson(input.transcriptSegments),
       Date.now(),
       input.userId,
       input.id,
-    );
-  return result.changes > 0 ? readTranscriptHistoryRecord({ id: input.id, userId: input.userId }) : null;
+    ],
+  );
+  return row ? mapTranscriptHistoryRecord(row) : null;
 }
 
-export function deleteTranscriptHistoryRecord(input: {
+export async function deleteTranscriptHistoryRecord(input: {
   id: string;
   userId: string;
-}): boolean {
-  const result = getTranscriptDb()
-    .prepare("DELETE FROM transcript_history_records WHERE user_id = ? AND id = ?")
-    .run(input.userId, input.id);
-  return result.changes > 0;
+}): Promise<boolean> {
+  const rowCount = await execute(
+    "DELETE FROM transcript_history_records WHERE user_id = $1 AND id = $2",
+    [input.userId, input.id],
+  );
+  return rowCount > 0;
 }
 
-export function insertTranscriptHistorySummary(input: {
+export async function insertTranscriptHistorySummary(input: {
   content: string;
   historyRecordId: string;
   id: string;
   promptId: string;
   promptTitle: string;
   userId: string;
-}): TranscriptHistorySummary {
+}): Promise<TranscriptHistorySummary> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_history_summaries (
-         id, history_record_id, user_id, prompt_id, prompt_title, content, created_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.id,
-      input.historyRecordId,
-      input.userId,
-      input.promptId,
-      input.promptTitle,
-      input.content,
-      now,
-    );
-  const summary = readTranscriptHistorySummary({
-    historyRecordId: input.historyRecordId,
-    id: input.id,
-    userId: input.userId,
-  });
-  if (!summary) {
-    throw new Error("AI 总结历史保存失败。");
+  const row = await queryRow<TranscriptHistorySummaryRow>(
+    `INSERT INTO transcript_history_summaries (
+       id, history_record_id, user_id, prompt_id, prompt_title, content, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, prompt_id, prompt_title, content, created_at`,
+    [input.id, input.historyRecordId, input.userId, input.promptId, input.promptTitle, input.content, now],
+  );
+  if (!row) {
+    throw new Error("转录总结保存失败。");
   }
-  return summary;
+  return mapTranscriptHistorySummary(row);
 }
 
-export function listTranscriptHistorySummaries(input: {
+export async function listTranscriptHistorySummaries(input: {
   historyRecordId: string;
   userId: string;
-}): TranscriptHistorySummary[] {
-  const rows = getTranscriptDb()
-    .prepare(
-      `SELECT id, prompt_id, prompt_title, content, created_at
-       FROM transcript_history_summaries
-       WHERE user_id = ? AND history_record_id = ?
-       ORDER BY created_at DESC`,
-    )
-    .all(input.userId, input.historyRecordId) as TranscriptHistorySummaryRow[];
+}): Promise<TranscriptHistorySummary[]> {
+  const rows = await queryRows<TranscriptHistorySummaryRow>(
+    `SELECT id, prompt_id, prompt_title, content, created_at
+     FROM transcript_history_summaries
+     WHERE user_id = $1 AND history_record_id = $2
+     ORDER BY created_at DESC`,
+    [input.userId, input.historyRecordId],
+  );
   return rows.map(mapTranscriptHistorySummary);
 }
 
-export function readTranscriptHistorySummary(input: {
+export async function readTranscriptHistorySummary(input: {
   historyRecordId: string;
   id: string;
   userId: string;
-}): TranscriptHistorySummary | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT id, prompt_id, prompt_title, content, created_at
-       FROM transcript_history_summaries
-       WHERE user_id = ? AND history_record_id = ? AND id = ?
-       LIMIT 1`,
-    )
-    .get(input.userId, input.historyRecordId, input.id) as TranscriptHistorySummaryRow | undefined;
+}): Promise<TranscriptHistorySummary | null> {
+  const row = await queryRow<TranscriptHistorySummaryRow>(
+    `SELECT id, prompt_id, prompt_title, content, created_at
+     FROM transcript_history_summaries
+     WHERE user_id = $1 AND history_record_id = $2 AND id = $3
+     LIMIT 1`,
+    [input.userId, input.historyRecordId, input.id],
+  );
   return row ? mapTranscriptHistorySummary(row) : null;
 }
 
-export function listTranscriptCustomPrompts(input: {
+export async function listTranscriptCustomPrompts(input: {
   userId: string;
-}): TranscriptCustomPrompt[] {
-  const rows = getTranscriptDb()
-    .prepare(
-      `SELECT id, user_id, title, description, prompt, created_at, updated_at
-       FROM transcript_custom_prompts
-       WHERE user_id = ?
-       ORDER BY created_at ASC`,
-    )
-    .all(input.userId) as TranscriptCustomPromptRow[];
+}): Promise<TranscriptCustomPrompt[]> {
+  const rows = await queryRows<TranscriptCustomPromptRow>(
+    `SELECT id, user_id, title, description, prompt, created_at, updated_at
+     FROM transcript_custom_prompts
+     WHERE user_id = $1
+     ORDER BY created_at ASC`,
+    [input.userId],
+  );
   return rows.map(mapTranscriptCustomPrompt);
 }
 
-export function insertTranscriptCustomPrompt(input: {
+export async function insertTranscriptCustomPrompt(input: {
   description?: string;
   id: string;
   prompt: string;
   title: string;
   userId: string;
-}): TranscriptCustomPrompt {
+}): Promise<TranscriptCustomPrompt> {
   const now = Date.now();
-  getTranscriptDb()
-    .prepare(
-      `INSERT INTO transcript_custom_prompts (
-         id, user_id, title, description, prompt, created_at, updated_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+  const row = await queryRow<TranscriptCustomPromptRow>(
+    `INSERT INTO transcript_custom_prompts (
+       id, user_id, title, description, prompt, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     RETURNING id, user_id, title, description, prompt, created_at, updated_at`,
+    [
       input.id,
       input.userId,
       input.title.trim(),
       input.description?.trim() || input.prompt.trim(),
       input.prompt.trim(),
       now,
-      now,
-    );
-
-  const prompt = readTranscriptCustomPrompt({ id: input.id, userId: input.userId });
-  if (!prompt) {
+    ],
+  );
+  if (!row) {
     throw new Error("自定义提示词保存失败。");
   }
-  return prompt;
+  return mapTranscriptCustomPrompt(row);
 }
 
-export function updateTranscriptCustomPrompt(input: {
+export async function updateTranscriptCustomPrompt(input: {
   id: string;
   prompt: string;
   title: string;
   userId: string;
-}): TranscriptCustomPrompt | null {
-  getTranscriptDb()
-    .prepare(
-      `UPDATE transcript_custom_prompts
-       SET title = ?, description = ?, prompt = ?, updated_at = ?
-       WHERE user_id = ? AND id = ?`,
-    )
-    .run(
+}): Promise<TranscriptCustomPrompt | null> {
+  const cleanPrompt = input.prompt.trim();
+  const row = await queryRow<TranscriptCustomPromptRow>(
+    `UPDATE transcript_custom_prompts
+     SET title = $1, description = $2, prompt = $3, updated_at = $4
+     WHERE user_id = $5 AND id = $6
+     RETURNING id, user_id, title, description, prompt, created_at, updated_at`,
+    [
       input.title.trim(),
-      input.prompt.trim(),
-      input.prompt.trim(),
+      cleanPrompt,
+      cleanPrompt,
       Date.now(),
       input.userId,
       input.id,
-    );
-  return readTranscriptCustomPrompt({ id: input.id, userId: input.userId });
+    ],
+  );
+  return row ? mapTranscriptCustomPrompt(row) : null;
 }
 
-export function deleteTranscriptCustomPrompt(input: {
+export async function deleteTranscriptCustomPrompt(input: {
   id: string;
   userId: string;
-}): boolean {
-  const result = getTranscriptDb()
-    .prepare("DELETE FROM transcript_custom_prompts WHERE user_id = ? AND id = ?")
-    .run(input.userId, input.id);
-  return result.changes > 0;
+}): Promise<boolean> {
+  const rowCount = await execute(
+    "DELETE FROM transcript_custom_prompts WHERE user_id = $1 AND id = $2",
+    [input.userId, input.id],
+  );
+  return rowCount > 0;
 }
 
-export function readTranscriptCustomPrompt(input: {
+export async function readTranscriptCustomPrompt(input: {
   id: string;
   userId: string;
-}): TranscriptCustomPrompt | null {
-  const row = getTranscriptDb()
-    .prepare(
-      `SELECT id, user_id, title, description, prompt, created_at, updated_at
-       FROM transcript_custom_prompts
-       WHERE user_id = ? AND id = ?
-       LIMIT 1`,
-    )
-    .get(input.userId, input.id) as TranscriptCustomPromptRow | undefined;
+}): Promise<TranscriptCustomPrompt | null> {
+  const row = await queryRow<TranscriptCustomPromptRow>(
+    `SELECT id, user_id, title, description, prompt, created_at, updated_at
+     FROM transcript_custom_prompts
+     WHERE user_id = $1 AND id = $2
+     LIMIT 1`,
+    [input.userId, input.id],
+  );
   return row ? mapTranscriptCustomPrompt(row) : null;
 }
 
 export function nextAsrQuotaResetAt(now = Date.now()): number {
   return startOfNextLocalDay(now);
-}
-
-function migrate(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS transcript_asr_tasks (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      work_key TEXT NOT NULL,
-      cache_key TEXT NOT NULL,
-      task_id TEXT NOT NULL,
-      object_key TEXT NOT NULL,
-      model TEXT,
-      audio_duration_seconds REAL NOT NULL DEFAULT 0,
-      history_record_id TEXT,
-      history_work_json TEXT,
-      status TEXT NOT NULL,
-      error_detail TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      completed_at INTEGER
-    );
-
-    CREATE INDEX IF NOT EXISTS transcript_asr_tasks_user_idx
-      ON transcript_asr_tasks(user_id, updated_at);
-
-    CREATE INDEX IF NOT EXISTS transcript_asr_tasks_user_cache_idx
-      ON transcript_asr_tasks(user_id, cache_key, status, updated_at);
-
-    CREATE TABLE IF NOT EXISTS transcript_asr_audio_cache (
-      user_id TEXT NOT NULL,
-      work_key TEXT NOT NULL,
-      object_key TEXT NOT NULL,
-      duration_seconds REAL NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY(user_id, work_key, object_key)
-    );
-
-    CREATE INDEX IF NOT EXISTS transcript_asr_audio_cache_user_work_idx
-      ON transcript_asr_audio_cache(user_id, work_key, updated_at);
-
-    CREATE TABLE IF NOT EXISTS transcript_asr_job_cancellations (
-      id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY(id, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS transcript_history_records (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      work_key TEXT NOT NULL,
-      work_id TEXT NOT NULL,
-      work_kind TEXT NOT NULL,
-      input_url TEXT NOT NULL,
-      final_url TEXT NOT NULL,
-      author_name TEXT,
-      original_title TEXT NOT NULL,
-      display_title TEXT NOT NULL,
-      duration_seconds REAL,
-      transcript_content TEXT NOT NULL,
-      transcript_segments_json TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS transcript_history_records_user_updated_idx
-      ON transcript_history_records(user_id, updated_at);
-
-    CREATE INDEX IF NOT EXISTS transcript_history_records_user_work_idx
-      ON transcript_history_records(user_id, work_key, updated_at);
-
-    CREATE TABLE IF NOT EXISTS transcript_history_summaries (
-      id TEXT PRIMARY KEY,
-      history_record_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      prompt_id TEXT NOT NULL,
-      prompt_title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      FOREIGN KEY(history_record_id) REFERENCES transcript_history_records(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS transcript_history_summaries_record_idx
-      ON transcript_history_summaries(user_id, history_record_id, created_at);
-
-    CREATE TABLE IF NOT EXISTS transcript_custom_prompts (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      title TEXT NOT NULL,
-      description TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS transcript_custom_prompts_user_created_idx
-      ON transcript_custom_prompts(user_id, created_at);
-  `);
-  ensureColumn(db, "transcript_asr_tasks", "model", "TEXT");
-  ensureColumn(db, "transcript_asr_tasks", "audio_duration_seconds", "REAL NOT NULL DEFAULT 0");
-  ensureColumn(db, "transcript_asr_tasks", "history_record_id", "TEXT");
-  ensureColumn(db, "transcript_asr_tasks", "history_work_json", "TEXT");
-}
-
-const HISTORY_RECORD_COLUMNS = `
-  id, user_id, work_key, work_id, work_kind, input_url, final_url,
-  author_name, original_title, display_title, duration_seconds,
-  transcript_content, transcript_segments_json, created_at, updated_at
-`;
-
-const ASR_TASK_COLUMNS = `
-  id, user_id, work_key, cache_key, task_id, object_key, model,
-  audio_duration_seconds, history_record_id, history_work_json,
-  status, error_detail, updated_at
-`;
-
-function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  if (!columns.some((item) => item.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
 }
 
 function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
@@ -771,7 +584,7 @@ function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
     errorDetail: row.error_detail ?? undefined,
     historyContext: mapAsrHistoryContext(row),
     id: row.id,
-    model: row.model ?? "",
+    model: row.model,
     objectKey: row.object_key,
     status: row.status,
     taskId: row.task_id,
@@ -782,17 +595,13 @@ function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
 }
 
 function mapAsrHistoryContext(row: StoredAsrTaskRow): StoredAsrHistoryContext | undefined {
-  if (!row.history_record_id || !row.history_work_json) {
+  if (!row.history_record_id || row.history_work === null || row.history_work === undefined) {
     return undefined;
   }
-  try {
-    return {
-      historyRecordId: row.history_record_id,
-      work: JSON.parse(row.history_work_json) as unknown,
-    };
-  } catch {
-    return undefined;
-  }
+  return {
+    historyRecordId: row.history_record_id,
+    work: parseJsonValue(row.history_work),
+  };
 }
 
 function mapTranscriptHistoryRecord(row: TranscriptHistoryRecordRow): TranscriptHistoryRecord {
@@ -806,7 +615,7 @@ function mapTranscriptHistoryRecord(row: TranscriptHistoryRecordRow): Transcript
     inputUrl: row.input_url,
     originalTitle: row.original_title,
     transcriptContent: row.transcript_content,
-    transcriptSegments: row.transcript_segments_json ? JSON.parse(row.transcript_segments_json) as unknown : undefined,
+    transcriptSegments: parseJsonValue(row.transcript_segments) ?? undefined,
     updatedAt: row.updated_at,
     userId: row.user_id,
     workId: row.work_id,
@@ -841,12 +650,28 @@ function normalizeHistoryTitle(title: string | undefined, fallbackUrl: string): 
   return title?.trim() || fallbackUrl;
 }
 
+function stringifyJson(value: unknown): string | null {
+  return value === undefined || value === null ? null : JSON.stringify(value);
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
 function startOfLocalDay(now: number): number {
-  const date = new Date(now);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return new Date(new Date(now).toLocaleString("en-US", { timeZone: DAILY_TRANSCRIPTION_QUOTA_TIME_ZONE }))
+    .setHours(0, 0, 0, 0);
 }
 
 function startOfNextLocalDay(now: number): number {
-  const date = new Date(now);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
+  const date = new Date(startOfLocalDay(now));
+  date.setDate(date.getDate() + 1);
+  return date.getTime();
 }

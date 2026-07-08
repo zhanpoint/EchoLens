@@ -28,7 +28,7 @@ type SummaryEvent =
   | { type: "error"; error: string; code?: string };
 
 export async function POST(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -39,7 +39,7 @@ export async function POST(request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  const record = readTranscriptHistoryRecord({ id, userId: user.id });
+  const record = await readTranscriptHistoryRecord({ id, userId: user.id });
   if (!record) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
@@ -77,7 +77,7 @@ function streamHistorySummary(input: {
         });
 
         if (result.ok) {
-          const summary = insertTranscriptHistorySummary({
+          const summary = await insertTranscriptHistorySummary({
             content: result.content,
             historyRecordId: input.historyRecordId,
             id: createHistorySummaryId(),

@@ -19,11 +19,11 @@ export async function POST(request: Request) {
 
     const email = parsed.data.email.toLowerCase();
     const purpose = parsed.data.purpose;
-    if (purpose === "signup" && emailExists(email)) {
+    if (purpose === "signup" && (await emailExists(email))) {
       throw new AuthError("邮箱已被注册。");
     }
 
-    if ((purpose === "login" || purpose === "reset") && !emailExists(email)) {
+    if ((purpose === "login" || purpose === "reset") && !(await emailExists(email))) {
       return authJson({ message: "如果邮箱已注册，验证码将发送到该邮箱。", expiresIn: 300 });
     }
 

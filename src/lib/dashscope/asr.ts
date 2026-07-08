@@ -5,7 +5,6 @@ import type { UploadedAsrAudio } from "@/lib/oss/asr-audio";
 import { streamQwenTranscriptPostprocess } from "@/lib/dashscope/transcript-postprocess";
 import {
   attachAsrTaskProviderTask,
-  isAsrJobCancellationRequested,
   markAsrTaskCanceled,
   markAsrTaskFailed,
   markAsrTaskRunning,
@@ -97,16 +96,13 @@ export async function submitDashScopeAsrJob(
     const normalizedOptions = normalizeDashScopeAsrOptions(options);
     const model = normalizedOptions.model;
     const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions);
-    const runningTask = readRunningAsrTask({ cacheKey, userId });
+    const runningTask = await readRunningAsrTask({ cacheKey, userId });
     if (runningTask) {
       return { status: "running", historyContext: runningTask.historyContext, jobId: runningTask.id };
     }
 
     const jobId = runtimeOptions.clientJobId ?? randomUUID();
     const historyContext = runtimeOptions.historyContext;
-    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
-      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
-    }
     const taskInput = {
       audioDurationSeconds: audio.durationSeconds ?? 0,
       cacheKey,
@@ -118,20 +114,11 @@ export async function submitDashScopeAsrJob(
       workKey,
     };
     if (audio.durationSeconds && audio.durationSeconds > 0) {
-      assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
+      await assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
     }
-    reserveAsrTask(taskInput);
-    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
-      markAsrTaskCanceled(jobId);
-      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
-    }
+    await reserveAsrTask(taskInput);
     const taskId = await submitDashScopeAsrTask(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
-    if (isAsrJobCancellationRequested({ id: jobId, userId })) {
-      markAsrTaskCanceled(jobId);
-      await cancelDashScopeAsrTask(taskId).catch(() => undefined);
-      return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
-    }
-    if (!attachAsrTaskProviderTask({ id: jobId, taskId })) {
+    if (!(await attachAsrTaskProviderTask({ id: jobId, taskId }))) {
       await cancelDashScopeAsrTask(taskId).catch(() => undefined);
       return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
     }
@@ -205,33 +192,33 @@ async function settleDashScopeAsrTask(
       },
     });
     if (result.ok) {
-      markAsrTaskSucceeded(job.id);
+      await markAsrTaskSucceeded(job.id);
       return { status: "successed", historyContext: job.historyContext, result };
     }
 
-    markAsrTaskFailed(job.id, result.detail);
+    await markAsrTaskFailed(job.id, result.detail);
     return { status: "failed", historyContext: job.historyContext, result };
   }
 
   if (status === "CANCELED") {
     const detail = formatDashScopeTaskFailure(status, taskPayload);
-    markAsrTaskCanceled(job.id, detail);
+    await markAsrTaskCanceled(job.id, detail);
     return { status: "canceled", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
   }
 
   if (status === "FAILED") {
     const detail = formatDashScopeTaskFailure(status, taskPayload);
-    markAsrTaskFailed(job.id, detail);
+    await markAsrTaskFailed(job.id, detail);
     return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
   }
 
   if (status === "PENDING" || status === "RUNNING") {
-    markAsrTaskRunning(job.id);
+    await markAsrTaskRunning(job.id);
     return { status: "running", historyContext: job.historyContext, jobId: job.id };
   }
 
   const detail = `DashScope ASR 返回未知任务状态：${status || "空状态"}`;
-  markAsrTaskFailed(job.id, detail);
+  await markAsrTaskFailed(job.id, detail);
   return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
 }
 
@@ -244,7 +231,7 @@ export async function refreshDashScopeAsrJobWithOptions(
   jobId: string,
   runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult | null> {
-  const job = readAsrTask({ id: jobId, userId });
+  const job = await readAsrTask({ id: jobId, userId });
   if (!job) {
     return null;
   }
@@ -257,7 +244,7 @@ export async function refreshDashScopeAsrJobWithOptions(
 }
 
 export async function cancelDashScopeAsrJob(userId: string, jobId: string): Promise<boolean> {
-  const job = readAsrTask({ id: jobId, userId });
+  const job = await readAsrTask({ id: jobId, userId });
   if (!job) {
     return false;
   }
@@ -265,7 +252,7 @@ export async function cancelDashScopeAsrJob(userId: string, jobId: string): Prom
     return true;
   }
 
-  markAsrTaskCanceled(job.id);
+  await markAsrTaskCanceled(job.id);
   if (!job.taskId.startsWith("pending:")) {
     await cancelDashScopeAsrTask(job.taskId).catch(() => undefined);
   }
@@ -534,8 +521,8 @@ function buildTranscriptCacheKey(
   return `${model}:asr-v5:${sha256(JSON.stringify([audioObjectKey, options]))}`;
 }
 
-function assertDailyAsrQuotaAvailable(userId: string, nextDurationSeconds: number): void {
-  const usedSeconds = readDailySucceededAsrDurationSeconds({ userId });
+async function assertDailyAsrQuotaAvailable(userId: string, nextDurationSeconds: number): Promise<void> {
+  const usedSeconds = await readDailySucceededAsrDurationSeconds({ userId });
   if (usedSeconds + nextDurationSeconds > DAILY_TRANSCRIPTION_QUOTA_SECONDS) {
     throw new DailyAsrQuotaExceededError(nextAsrQuotaResetAt());
   }

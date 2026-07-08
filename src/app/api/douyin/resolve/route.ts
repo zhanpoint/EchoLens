@@ -12,7 +12,7 @@ const ResolveSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }

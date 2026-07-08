@@ -17,7 +17,7 @@ const SummarySchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -30,7 +30,7 @@ export async function POST(request: Request) {
   return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
     let transcript = parsed.data.text;
     if (parsed.data.historyRecordId) {
-      const record = readTranscriptHistoryRecord({
+      const record = await readTranscriptHistoryRecord({
         id: parsed.data.historyRecordId,
         userId: user.id,
       });
@@ -78,7 +78,7 @@ function streamSummary(input: {
 
         if (result.ok) {
           const summary = input.historyRecordId && input.promptId && input.promptTitle
-            ? insertTranscriptHistorySummary({
+            ? await insertTranscriptHistorySummary({
                 content: result.content,
                 historyRecordId: input.historyRecordId,
                 id: createHistorySummaryId(),

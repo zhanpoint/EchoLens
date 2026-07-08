@@ -24,16 +24,16 @@ const PutSettingsSchema = z.object({
 });
 
 export async function GET(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
 
-  return NextResponse.json({ settings: readUserSettings(user.id) });
+  return NextResponse.json({ settings: await readUserSettings(user.id) });
 }
 
 export async function PUT(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -48,8 +48,8 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: "设置内容无效。" }, { status: 400 });
   }
 
-  upsertUserSetting(user.id, parsed.data.category, value.data);
-  return NextResponse.json({ settings: readUserSettings(user.id) });
+  await upsertUserSetting(user.id, parsed.data.category, value.data);
+  return NextResponse.json({ settings: await readUserSettings(user.id) });
 }
 
 function parseSettingsValue(

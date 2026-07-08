@@ -1,5 +1,3 @@
-import { ProxyAgent, type Dispatcher } from "undici";
-
 export type RetryableFetchInit = RequestInit & {
   duplex?: "half";
   retry?: {
@@ -13,7 +11,6 @@ export type RetryableFetchInit = RequestInit & {
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 5_000;
-const proxyAgents = new Map<string, Dispatcher>();
 
 export async function fetchWithRetry(
   url: string,
@@ -60,14 +57,8 @@ function fetchOnce(
   timeoutMs: number | undefined,
   externalSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
-  const dispatcher = readProxyDispatcher();
-  const requestInit = {
-    ...init,
-    ...(dispatcher ? { dispatcher } : {}),
-  } as RequestInit & { dispatcher?: Dispatcher; duplex?: "half" };
-
   if (!timeoutMs) {
-    return fetch(url, { ...requestInit, signal: externalSignal ?? undefined });
+    return fetch(url, { ...init, signal: externalSignal ?? undefined });
   }
 
   const controller = new AbortController();
@@ -76,28 +67,12 @@ function fetchOnce(
   externalSignal?.addEventListener("abort", abortExternal, { once: true });
 
   return fetch(url, {
-    ...requestInit,
+    ...init,
     signal: controller.signal,
   }).finally(() => {
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", abortExternal);
   });
-}
-
-function readProxyDispatcher(): Dispatcher | undefined {
-  const proxyUrl = process.env.SERVER_HTTP_PROXY?.trim();
-  if (!proxyUrl) {
-    return undefined;
-  }
-
-  const existing = proxyAgents.get(proxyUrl);
-  if (existing) {
-    return existing;
-  }
-
-  const agent = new ProxyAgent(proxyUrl);
-  proxyAgents.set(proxyUrl, agent);
-  return agent;
 }
 
 function isRetryableStatus(status: number): boolean {

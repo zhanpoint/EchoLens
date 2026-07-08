@@ -30,7 +30,7 @@ const DownloadQuerySchema = z.object({
 });
 
 export async function GET(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -64,7 +64,7 @@ export async function GET(request: Request) {
         userId: user.id,
         workKey,
       });
-      upsertAsrAudioCache({
+      await upsertAsrAudioCache({
         durationSeconds: audio.durationSeconds,
         objectKey: asrAudio.objectKey,
         userId: user.id,

@@ -25,7 +25,7 @@ vi.mock("@/lib/transcript/db", () => ({
 }));
 
 vi.mock("@/app/api/auth/_shared", () => ({
-  requireUser: vi.fn(() => ({ email: "test@example.com", id: "user-1", username: "test" })),
+  requireUser: vi.fn(async () => ({ email: "test@example.com", id: "user-1", username: "test" })),
 }));
 
 import { collectWorkMetadata } from "@/lib/douyin/detail";
@@ -56,11 +56,11 @@ describe("douyin download route", () => {
   beforeEach(() => {
     resetUserRouteConcurrencyForTest();
     vi.clearAllMocks();
-    requireUserMock.mockReturnValue({ email: "test@example.com", id: "user-1", username: "test" });
+    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
   });
 
   it("requires authentication before reading download parameters", async () => {
-    requireUserMock.mockReturnValue(NextResponse.json({ code: "UNAUTHENTICATED" }, { status: 401 }));
+    requireUserMock.mockResolvedValue(NextResponse.json({ code: "UNAUTHENTICATED" }, { status: 401 }));
 
     const response = await GET(new Request("https://echolens.dreamlog.xyz/api/douyin/download"));
 

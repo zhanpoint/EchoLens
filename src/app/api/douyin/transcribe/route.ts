@@ -82,7 +82,7 @@ type TranscribeStreamEvent =
   | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; status: "canceled" | "failed"; work?: z.infer<typeof WorkSchema> };
 
 export async function POST(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -143,7 +143,7 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -171,7 +171,7 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -252,7 +252,7 @@ function streamTranscribeOperation(
         const resultItem = transcriptionResult(result.result, options.fallbackAsrModel);
         const historyContext = parseHistoryContext(result.historyContext);
         const historyRecord = resultItem.content && historyContext && options.userId
-          ? saveTranscriptHistory({
+          ? await saveTranscriptHistory({
               result: resultItem,
               userId: options.userId,
               work: historyContext,
@@ -317,16 +317,16 @@ function parseHistoryContext(value: unknown): z.infer<typeof HistoryWorkSchema> 
   return parsed.success ? parsed.data : undefined;
 }
 
-function saveTranscriptHistory(input: {
+async function saveTranscriptHistory(input: {
   result: ExtractionResult;
   userId: string;
   work: z.infer<typeof HistoryWorkSchema>;
-}): TranscriptHistoryRecord | undefined {
+}): Promise<TranscriptHistoryRecord | undefined> {
   if (!input.result.content) {
     return undefined;
   }
 
-  return upsertTranscriptHistoryRecord({
+  return await upsertTranscriptHistoryRecord({
     authorName: input.work.authorName,
     durationSeconds: input.work.durationSeconds,
     finalUrl: input.work.finalUrl,

@@ -38,20 +38,20 @@ type RouteContext = {
 };
 
 export async function GET(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
 
   const { id } = await context.params;
-  const record = readTranscriptHistoryRecord({ id, userId: user.id });
+  const record = await readTranscriptHistoryRecord({ id, userId: user.id });
   if (!record) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
   return NextResponse.json({
     record,
-    summaries: listTranscriptHistorySummaries({
+    summaries: await listTranscriptHistorySummaries({
       historyRecordId: id,
       userId: user.id,
     }),
@@ -59,7 +59,7 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -70,13 +70,13 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  let record = readTranscriptHistoryRecord({ id, userId: user.id });
+  let record = await readTranscriptHistoryRecord({ id, userId: user.id });
   if (!record) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
   if (parsed.data.displayTitle !== undefined) {
-    record = renameTranscriptHistoryRecord({
+    record = await renameTranscriptHistoryRecord({
       displayTitle: parsed.data.displayTitle,
       id,
       userId: user.id,
@@ -84,7 +84,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   if (parsed.data.transcriptContent !== undefined) {
-    record = updateTranscriptHistoryRecordTranscript({
+    record = await updateTranscriptHistoryRecordTranscript({
       id,
       transcriptContent: parsed.data.transcriptContent,
       transcriptSegments: parsed.data.transcriptSegments,
@@ -100,13 +100,13 @@ export async function PATCH(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
 
   const { id } = await context.params;
-  const deleted = deleteTranscriptHistoryRecord({ id, userId: user.id });
+  const deleted = await deleteTranscriptHistoryRecord({ id, userId: user.id });
   if (!deleted) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }

@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronUp,
   Check,
+  CornerUpLeft,
   Copy,
   Download,
   ExternalLink,
@@ -47,6 +48,7 @@ import {
   type TextareaHTMLAttributes,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -293,6 +295,24 @@ function getAvatarInitial(user: CurrentUser): string {
   const source = (user.username || user.email).trim();
   const initial = Array.from(source)[0] ?? "?";
   return /^[a-z]$/i.test(initial) ? initial.toLocaleUpperCase("en-US") : initial;
+}
+
+function formatFriendlyDateTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    minute: "2-digit",
+    month: "2-digit",
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}年${values.month}月${values.day}日 ${values.hour}:${values.minute}`;
 }
 
 async function readApiPayload(response: Response, fallback: string): Promise<ApiPayload> {
@@ -1076,12 +1096,15 @@ export default function HomePage() {
     try {
       const detail = await fetchTranscriptHistoryDetail(id);
       setHistoryDetail(detail);
-      setResults([]);
-      setError(null);
       setHistoryDrawerOpen(false);
     } catch (loadError) {
       setHistoryError(readUserFacingError(loadError, "转录历史加载失败。"));
     }
+  }
+
+  function showLiveSession() {
+    setHistoryDetail(null);
+    setHistoryDrawerOpen(false);
   }
 
   function startNewLiveSession() {
@@ -1108,7 +1131,7 @@ export default function HomePage() {
     await deleteTranscriptHistory(id);
     setHistoryList((current) => current.filter((record) => record.id !== id));
     if (historyDetail?.record.id === id) {
-      startNewLiveSession();
+      showLiveSession();
     }
   }
 
@@ -1627,10 +1650,12 @@ export default function HomePage() {
           onNew={startNewLiveSession}
           onOpen={(id) => void openHistoryRecord(id)}
           onRename={(id, displayTitle) => void renameHistoryRecord(id, displayTitle)}
+          onReturnLive={showLiveSession}
           onSearch={setHistorySearchQuery}
           onToggle={() => setHistorySidebarOpen((open) => !open)}
           query={historySearchQuery}
           records={historyList}
+          showReturnLive={Boolean(historyDetail)}
         />
         <div
           className="content-scroll flex h-full min-w-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 sm:px-5 md:gap-7 md:py-10"
@@ -1998,10 +2023,12 @@ function TranscriptHistorySidebar({
   onNew,
   onOpen,
   onRename,
+  onReturnLive,
   onSearch,
   onToggle,
   query,
   records,
+  showReturnLive,
 }: {
   activeId?: string;
   error: string;
@@ -2013,10 +2040,12 @@ function TranscriptHistorySidebar({
   onNew: () => void;
   onOpen: (id: string) => void;
   onRename: (id: string, displayTitle: string) => void;
+  onReturnLive: () => void;
   onSearch: (query: string) => void;
   onToggle: () => void;
   query: string;
   records: TranscriptHistoryRecord[];
+  showReturnLive: boolean;
 }) {
   const content = (
     <div className="flex h-full min-h-0 flex-col px-2 py-2">
@@ -2050,6 +2079,16 @@ function TranscriptHistorySidebar({
           <Plus className="size-5 shrink-0 text-cyan" aria-hidden="true" />
           新建转录
         </button>
+        {showReturnLive ? (
+          <button
+            type="button"
+            onClick={onReturnLive}
+            className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-cyan transition hover:text-foreground active:scale-[0.99]"
+          >
+            <CornerUpLeft className="size-5 shrink-0" aria-hidden="true" />
+            返回当前转录
+          </button>
+        ) : null}
         <label className="flex h-10 items-center gap-3 rounded-md px-3 text-sm text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
           <Search className="size-5 shrink-0 text-cyan" aria-hidden="true" />
           <input
@@ -2114,6 +2153,26 @@ function TranscriptHistorySidebar({
             >
               <Plus className="size-5" aria-hidden="true" />
             </button>
+            {showReturnLive ? (
+              <button
+                type="button"
+                onClick={onReturnLive}
+                className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:text-foreground"
+                aria-label="返回当前转录"
+                title="返回当前转录"
+              >
+                <CornerUpLeft className="size-5" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onToggle}
+              className="inline-flex size-10 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1]"
+              aria-label="搜索历史"
+              title="搜索历史"
+            >
+              <Search className="size-5" aria-hidden="true" />
+            </button>
           </div>
         )}
       </aside>
@@ -2157,6 +2216,11 @@ function TranscriptHistoryItem({
     setEditing(false);
   }
 
+  function cancelEditing() {
+    setDraft(record.displayTitle);
+    setEditing(false);
+  }
+
   return (
     <div className={cn(
       "group mb-1 rounded-md transition",
@@ -2173,10 +2237,33 @@ function TranscriptHistoryItem({
           <input
             autoFocus
             value={draft}
-            onBlur={save}
             onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancelEditing();
+              }
+            }}
             className="h-8 min-w-0 flex-1 rounded bg-black/30 px-2 text-sm outline-none ring-1 ring-cyan/40"
           />
+          <button
+            type="button"
+            onClick={cancelEditing}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+            aria-label="取消修改历史名称"
+            title="取消"
+          >
+            <X className="size-3.5" aria-hidden="true" />
+          </button>
+          <button
+            type="submit"
+            disabled={!draft.trim()}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-cyan transition hover:bg-cyan/[0.1] disabled:cursor-not-allowed disabled:text-muted-foreground"
+            aria-label="保存历史名称"
+            title="保存"
+          >
+            <Check className="size-3.5" aria-hidden="true" />
+          </button>
         </form>
       ) : (
         <div className="flex min-w-0 items-center gap-1 px-1 py-1">
@@ -3847,6 +3934,7 @@ function TranscriptResultPanel({
   const [customPromptError, setCustomPromptError] = useState("");
   const [deletingCustomPromptId, setDeletingCustomPromptId] = useState<string | null>(null);
   const [editingCustomPrompt, setEditingCustomPrompt] = useState<CustomSummaryPrompt | null>(null);
+  const [focusedCustomPromptId, setFocusedCustomPromptId] = useState<string | null>(null);
   const [isSavingCustomPrompt, setIsSavingCustomPrompt] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
@@ -4336,11 +4424,10 @@ function TranscriptResultPanel({
       setCustomPrompts((current) => editingCustomPrompt
         ? current.map((item) => (item.id === customPrompt.id ? customPrompt : item))
         : [...current, customPrompt]);
+      setFocusedCustomPromptId(customPrompt.id);
+      setSummaryMenuOpen(true);
       setPromptDialogOpen(false);
       setEditingCustomPrompt(null);
-      if (!editingCustomPrompt) {
-        void summarize(customPrompt);
-      }
     } catch (error) {
       if (isAuthRequiredError(error)) {
         onAuthRequired();
@@ -4807,6 +4894,7 @@ function TranscriptResultPanel({
                     customPrompts={customPrompts}
                     deletingCustomPromptId={deletingCustomPromptId}
                     error={customPromptError}
+                    focusedCustomPromptId={focusedCustomPromptId}
                     builtInPrompts={SUMMARY_PROMPTS}
                     onCustomPrompt={() => {
                       setCustomPromptError("");
@@ -4821,7 +4909,10 @@ function TranscriptResultPanel({
                       setSummaryMenuOpen(false);
                       setPromptDialogOpen(true);
                     }}
-                    onSelect={(prompt) => void summarize(prompt)}
+                    onSelect={(prompt) => {
+                      setFocusedCustomPromptId(null);
+                      void summarize(prompt);
+                    }}
                   />
                 ) : null}
               </div>
@@ -5627,6 +5718,7 @@ function SummaryPromptMenu({
   customPrompts,
   deletingCustomPromptId,
   error,
+  focusedCustomPromptId,
   onDeleteCustomPrompt,
   onCustomPrompt,
   onEditCustomPrompt,
@@ -5636,6 +5728,7 @@ function SummaryPromptMenu({
   customPrompts: CustomSummaryPrompt[];
   deletingCustomPromptId?: string | null;
   error?: string;
+  focusedCustomPromptId?: string | null;
   onDeleteCustomPrompt: (prompt: CustomSummaryPrompt) => void;
   onCustomPrompt: () => void;
   onEditCustomPrompt: (prompt: CustomSummaryPrompt) => void;
@@ -5643,20 +5736,31 @@ function SummaryPromptMenu({
 }) {
   const [builtInOpen, setBuiltInOpen] = useState(true);
   const [customOpen, setCustomOpen] = useState(true);
+  const focusedCustomPromptRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!focusedCustomPromptId || !customOpen) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      focusedCustomPromptRef.current?.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [customOpen, customPrompts, focusedCustomPromptId]);
 
   return (
     <div className="mobile-popover w-auto overflow-hidden rounded-md border border-white/12 bg-[#171a27] shadow-2xl shadow-black/40 sm:w-[min(20rem,calc(100vw-2rem))]">
       <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
-        <div className="text-sm font-semibold text-foreground">提示词库</div>
+        <div className="text-base font-semibold text-foreground">提示词库</div>
         <button
           type="button"
           onClick={onCustomPrompt}
-          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.94]"
-          aria-label="添加自定义提示词"
-          title="添加自定义提示词"
+          className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.94]"
+          aria-label="新建提示词"
+          title="新建提示词"
         >
-          自定义提示词
-          <Plus className="size-3.5" aria-hidden="true" />
+          <Plus className="size-4" aria-hidden="true" />
         </button>
       </div>
       <div className="content-scroll max-h-[min(30rem,calc(100dvh-9rem))] overflow-auto py-1">
@@ -5681,16 +5785,22 @@ function SummaryPromptMenu({
           onToggle={() => setCustomOpen((value) => !value)}
         />
         {customOpen ? (
-          customPrompts.length ? customPrompts.map((prompt) => (
-            <CustomPromptMenuItem
-              deleting={deletingCustomPromptId === prompt.id}
-              key={prompt.id}
-              prompt={prompt}
-              onDelete={onDeleteCustomPrompt}
-              onEdit={onEditCustomPrompt}
-              onSelect={onSelect}
-            />
-          )) : (
+          customPrompts.length ? customPrompts.map((prompt) => {
+            const focused = focusedCustomPromptId === prompt.id;
+            return (
+              <CustomPromptMenuItem
+                deleting={deletingCustomPromptId === prompt.id}
+                itemRef={focused ? (node) => {
+                  focusedCustomPromptRef.current = node;
+                } : undefined}
+                key={prompt.id}
+                prompt={prompt}
+                onDelete={onDeleteCustomPrompt}
+                onEdit={onEditCustomPrompt}
+                onSelect={onSelect}
+              />
+            );
+          }) : (
             <div className="px-3 py-3 text-xs leading-5 text-muted-foreground">暂无自定义提示词</div>
           )
         ) : null}
@@ -5717,12 +5827,12 @@ function PromptMenuSectionHeader({
     <button
       type="button"
       onClick={onToggle}
-      className="flex h-9 w-full items-center justify-between gap-3 border-t border-white/10 px-3 text-left text-xs font-semibold text-muted-foreground transition first:border-t-0 hover:bg-white/[0.04] hover:text-foreground"
+      className="flex h-9 w-full items-center justify-between gap-3 border-t border-white/10 px-3 text-left text-sm font-semibold text-cyan transition first:border-t-0 hover:bg-cyan/[0.06] hover:text-cyan"
       aria-expanded={open}
     >
       <span>{title}</span>
       <span className="inline-flex items-center gap-1.5">
-        <span className="text-[11px] tabular-nums">{count}</span>
+        <span className="text-xs tabular-nums text-cyan/80">{count}</span>
         <ChevronDown className={cn("size-3.5 transition", open ? "rotate-180" : "")} aria-hidden="true" />
       </span>
     </button>
@@ -5742,8 +5852,8 @@ function PromptMenuItem({
       onClick={() => onSelect(prompt)}
       className="block w-full px-3 py-2.5 text-left transition hover:bg-cyan/[0.07] active:bg-cyan/[0.1]"
     >
-      <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
-      <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+      <div className="text-xs font-semibold leading-5 text-foreground">{prompt.title}</div>
+      <div className="mt-0.5 line-clamp-2 text-[11px] leading-5 text-muted-foreground">
         {prompt.description}
       </div>
     </button>
@@ -5752,26 +5862,31 @@ function PromptMenuItem({
 
 function CustomPromptMenuItem({
   deleting,
+  itemRef,
   onDelete,
   onEdit,
   onSelect,
   prompt,
 }: {
   deleting: boolean;
+  itemRef?: (node: HTMLDivElement | null) => void;
   onDelete: (prompt: CustomSummaryPrompt) => void;
   onEdit: (prompt: CustomSummaryPrompt) => void;
   onSelect: (prompt: SummaryPrompt) => void;
   prompt: CustomSummaryPrompt;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-1.5 transition hover:bg-cyan/[0.07]">
+    <div
+      ref={itemRef}
+      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-1.5 transition hover:bg-cyan/[0.07]"
+    >
       <button
         type="button"
         onClick={() => onSelect(prompt)}
         className="min-w-0 px-1.5 py-2.5 text-left active:bg-cyan/[0.1]"
       >
-        <div className="text-sm font-semibold leading-5 text-foreground">{prompt.title}</div>
-        <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+        <div className="text-xs font-semibold leading-5 text-foreground">{prompt.title}</div>
+        <div className="mt-0.5 line-clamp-2 text-[11px] leading-5 text-muted-foreground">
           {prompt.description}
         </div>
       </button>
@@ -5820,7 +5935,7 @@ function SummaryHistoryMenu({
           >
             <div className="truncate text-sm font-semibold text-foreground">{summary.promptTitle}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">
-              {new Date(summary.createdAt).toLocaleString()}
+              {formatFriendlyDateTime(summary.createdAt)}
             </div>
           </button>
         ))}
@@ -6202,14 +6317,16 @@ function CustomPromptDialog({
 }) {
   const [title, setTitle] = useState(initialTitle);
   const [prompt, setPrompt] = useState(initialPrompt);
+  const titleInputId = useId();
+  const promptInputId = useId();
   const canSave = title.trim().length > 0 && prompt.trim().length > 0;
   const actionText = mode === "edit" ? "更新" : "保存";
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:items-center sm:px-4 sm:py-6">
-      <div className="max-h-[calc(100dvh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-xl overflow-auto rounded-lg border border-white/20 bg-background p-4 shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h4 className="text-base font-semibold">{mode === "edit" ? "编辑自定义提示词" : "添加自定义提示词"}</h4>
+      <div className="max-h-[calc(100dvh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-lg overflow-auto rounded-lg border border-white/20 bg-background p-3 shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <label htmlFor={titleInputId} className="text-sm font-semibold text-foreground">提示词名称</label>
           <button
             type="button"
             onClick={onClose}
@@ -6221,28 +6338,27 @@ function CustomPromptDialog({
             <X className="size-4" />
           </button>
         </div>
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-foreground">标题</span>
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            className="h-10 w-full rounded-md border border-white/15 bg-black/20 px-3 text-sm outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
-            placeholder="请输入标题。"
-          />
-        </label>
-        <label className="mt-3 block">
-          <span className="mb-2 block text-sm font-medium text-foreground">描述</span>
+        <input
+          id={titleInputId}
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          className="h-9 w-full rounded-md border border-white/15 bg-black/20 px-3 text-sm outline-none transition placeholder:text-xs placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
+          placeholder="例如：投研纪要摘要"
+        />
+        <label htmlFor={promptInputId} className="mt-3 block">
+          <span className="mb-1.5 block text-sm font-semibold text-foreground">提示词内容</span>
           <textarea
+            id={promptInputId}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            className="h-36 w-full resize-none rounded-md border border-white/15 bg-black/20 p-3 text-sm leading-6 outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
-            placeholder="请输入描述。"
+            className="h-32 w-full resize-none rounded-md border border-white/15 bg-black/20 p-3 text-sm leading-6 outline-none transition placeholder:text-xs placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20"
+            placeholder="描述 AI 应如何总结当前转录内容，包括关注重点、输出结构和语气要求。"
           />
         </label>
         {error ? (
           <div className="mt-3 text-xs font-medium leading-5 text-amber">{error}</div>
         ) : null}
-        <div className="mt-4 grid gap-2.5 sm:flex sm:justify-end">
+        <div className="mt-3 grid gap-2.5 sm:flex sm:justify-end">
           <button
             type="button"
             onClick={onClose}

@@ -19,7 +19,7 @@ type RouteContext = {
 };
 
 export async function PATCH(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
@@ -30,7 +30,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  const prompt = updateTranscriptCustomPrompt({
+  const prompt = await updateTranscriptCustomPrompt({
     id,
     prompt: parsed.data.prompt,
     title: parsed.data.title,
@@ -44,13 +44,13 @@ export async function PATCH(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(request: Request, context: RouteContext) {
-  const user = requireUser(request);
+  const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
 
   const { id } = await context.params;
-  if (!deleteTranscriptCustomPrompt({ id, userId: user.id })) {
+  if (!(await deleteTranscriptCustomPrompt({ id, userId: user.id }))) {
     return NextResponse.json({ error: "自定义提示词不存在。" }, { status: 404 });
   }
 
