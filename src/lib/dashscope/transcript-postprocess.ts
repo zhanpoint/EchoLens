@@ -3,28 +3,8 @@ import {
   buildTranscriptPostprocessPrompt,
   type TimestampedPromptSegment,
 } from "@/lib/ai/prompts";
-import { fetchWithRetry } from "@/lib/http/retry";
-import { readSseJsonStream } from "@/lib/http/sse";
+import { streamQwenChat } from "@/lib/dashscope/chat";
 import type { TranscriptSegment } from "@/types/douyin";
-
-type DashScopeTranscriptPostprocessConfig = {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-};
-
-type DashScopeChatCompletionError = {
-  code?: number | string;
-  message?: string;
-};
-
-type DashScopeChatCompletionPayload = {
-  choices?: Array<{
-    delta?: { content?: unknown };
-    message?: { content?: unknown };
-  }>;
-  error?: DashScopeChatCompletionError;
-};
 
 type PostprocessedSegmentText = {
   id: number;
@@ -32,8 +12,6 @@ type PostprocessedSegmentText = {
 };
 
 export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen-transcript-postprocess-v2";
-
-const POSTPROCESS_REQUEST_TIMEOUT_MS = 120_000;
 
 export async function streamQwenTranscriptPostprocess(input: {
   content: string;
@@ -45,75 +23,13 @@ export async function streamQwenTranscriptPostprocess(input: {
     return { ok: false, code: "unavailable", detail: "没有可后处理的转录文本。" };
   }
 
-  try {
-    const config = readDashScopeTranscriptPostprocessConfig();
-    const prompt = buildTranscriptPostprocessPrompt(promptSegments);
-
-    const response = await callQwenTranscriptPostprocess(config, prompt, input.signal);
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as DashScopeChatCompletionPayload | null;
-      return readPostprocessFailure(response, payload) ?? {
-        ok: false,
-        code: "error",
-        detail: formatPostprocessError(response.status, undefined),
-      };
-    }
-    if (!response.body) {
-      return { ok: false, code: "unavailable", detail: "Qwen 转录后处理没有返回流式内容。" };
-    }
-
-    let output = "";
-    for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body)) {
-      throwIfAborted(input.signal);
-      if (payload.error) {
-        return {
-          ok: false,
-          code: "error",
-          detail: formatPostprocessError(response.status, payload.error),
-        };
-      }
-
-      const delta = payload.choices?.[0]?.delta?.content;
-      if (typeof delta === "string" && delta) {
-        output += delta;
-      }
-    }
-
-    return buildPostprocessedTranscript(promptSegments, input.segments, output);
-  } catch (error) {
-    return formatPostprocessThrownError(error);
+  const prompt = buildTranscriptPostprocessPrompt(promptSegments);
+  const result = await streamQwenChat({ prompt, signal: input.signal });
+  if (!result.ok) {
+    return result;
   }
-}
 
-async function callQwenTranscriptPostprocess(
-  config: DashScopeTranscriptPostprocessConfig,
-  prompt: string,
-  signal?: AbortSignal,
-): Promise<Response> {
-  return await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${config.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      stream: true,
-      stream_options: { include_usage: false },
-      temperature: 0,
-    }),
-    retry: {
-      attempts: 2,
-      timeoutMs: POSTPROCESS_REQUEST_TIMEOUT_MS,
-    },
-    signal,
-  });
+  return buildPostprocessedTranscript(promptSegments, input.segments, result.content);
 }
 
 function buildPromptSegments(transcript: { content: string; segments?: TranscriptSegment[] }): TimestampedPromptSegment[] {
@@ -205,105 +121,6 @@ function parsePostprocessedSegmentTexts(output: string, expectedLength: number):
   } catch {
     return null;
   }
-}
-
-function readDashScopeTranscriptPostprocessConfig(): DashScopeTranscriptPostprocessConfig {
-  const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("DASHSCOPE_API_KEY 未配置。");
-  }
-
-  return {
-    apiKey,
-    baseUrl: readDashScopeCompatibleBaseUrl(),
-    model: readRequiredEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL"),
-  };
-}
-
-function readDashScopeCompatibleBaseUrl(): string {
-  const baseUrl = process.env.DASHSCOPE_TRANSLATION_BASE_URL?.trim().replace(/\/+$/u, "");
-  if (!baseUrl) {
-    throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
-  }
-  return baseUrl;
-}
-
-function readRequiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`${name} 未配置。`);
-  }
-  return value;
-}
-
-function readPostprocessFailure(
-  response: Response,
-  payload: DashScopeChatCompletionPayload | null,
-): ProviderResult | null {
-  if (payload?.error) {
-    return {
-      ok: false,
-      code: response.status === 401 || response.status === 403 ? "not_configured" : "error",
-      detail: formatPostprocessError(response.status, payload.error),
-    };
-  }
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      code: response.status === 401 || response.status === 403 ? "not_configured" : "error",
-      detail: formatPostprocessError(response.status, undefined),
-    };
-  }
-
-  return null;
-}
-
-function formatPostprocessThrownError(error: unknown): ProviderResult {
-  if (isAbortError(error)) {
-    return { ok: false, code: "error", detail: "转录任务已放弃。" };
-  }
-  if (error instanceof Error) {
-    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL|TRANSCRIPT_POSTPROCESS_MODEL)/.test(error.message)) {
-      return { ok: false, code: "not_configured", detail: error.message };
-    }
-    if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {
-      return { ok: false, code: "unavailable", detail: "Qwen 转录后处理响应超时，请稍后再试。" };
-    }
-    return { ok: false, code: "error", detail: error.message };
-  }
-
-  return { ok: false, code: "error", detail: "Qwen 转录后处理失败。" };
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw new DOMException("Aborted", "AbortError");
-  }
-}
-
-function formatPostprocessError(
-  httpStatus: number,
-  error: DashScopeChatCompletionError | undefined,
-): string {
-  const status = error?.code ?? httpStatus;
-  const message = error?.message;
-
-  if (status === 401) {
-    return "DashScope 认证失败：请检查 DASHSCOPE_API_KEY 是否有效。";
-  }
-  if (status === 403) {
-    return "DashScope 拒绝访问：当前 API Key 没有 Qwen 转录后处理模型调用权限。";
-  }
-  if (status === 429) {
-    return "DashScope 请求过于频繁，请稍后重试。";
-  }
-
-  return message ?? `Qwen 转录后处理请求失败：HTTP ${httpStatus}`;
 }
 
 function roundSeconds(value: number): number {

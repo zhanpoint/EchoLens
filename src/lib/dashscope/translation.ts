@@ -1,6 +1,9 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
-import { fetchWithRetry } from "@/lib/http/retry";
-import { readSseJsonStream } from "@/lib/http/sse";
+import {
+  streamDashScopeChatCompletion,
+  type DashScopeChatCompletionError,
+  type DashScopeChatConfig,
+} from "@/lib/dashscope/chat";
 
 export type QwenMtTerm = {
   source: string;
@@ -29,25 +32,6 @@ type PreparedTranslationItem = QwenMtTranslationItem & {
   markerId: string;
 };
 
-type DashScopeTranslationConfig = {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-};
-
-type DashScopeChatCompletionError = {
-  code?: number | string;
-  message?: string;
-};
-
-type DashScopeChatCompletionPayload = {
-  choices?: Array<{
-    delta?: { content?: unknown };
-    message?: { content?: unknown };
-  }>;
-  error?: DashScopeChatCompletionError;
-};
-
 const QWEN_MT_REQUEST_TIMEOUT_MS = 90_000;
 const QWEN_MT_TEXT_LIMIT = 24_000;
 const QWEN_MT_REFERENCE_TEXT_LIMIT = 16_000;
@@ -73,33 +57,16 @@ export async function streamQwenMtText(input: {
 
     assertTranslationPayloadWithinLimit(text, options);
     const config = readDashScopeTranslationConfig();
-    const response = await callQwenMt(config, text, options);
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as DashScopeChatCompletionPayload | null;
-      return readQwenMtFailure(response, payload) ?? {
-        ok: false,
-        code: "error",
-        detail: formatQwenMtError(response.status, undefined),
-      };
-    }
-    if (!response.body) {
-      return { ok: false, code: "unavailable", detail: "Qwen-MT 没有返回流式内容。" };
-    }
-
-    let output = "";
-    for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body)) {
-      const delta = payload.choices?.[0]?.delta?.content;
-      if (typeof delta === "string" && delta) {
-        output += delta;
-        input.onDelta(delta);
-      }
-    }
-
-    if (!output.trim()) {
-      return { ok: false, code: "unavailable", detail: "Qwen-MT 没有返回可用译文。" };
-    }
-
-    return { ok: true, content: output.trim() };
+    return await streamDashScopeChatCompletion({
+      config,
+      prompt: text,
+      onDelta: input.onDelta,
+      timeoutMs: QWEN_MT_REQUEST_TIMEOUT_MS,
+      extraBody: { translation_options: options },
+      emptyBodyDetail: "Qwen-MT 没有返回流式内容。",
+      emptyContentDetail: "Qwen-MT 没有返回可用译文。",
+      formatError: formatQwenMtError,
+    });
   } catch (error) {
     return formatQwenMtThrownError(error);
   }
@@ -158,36 +125,6 @@ export async function translateQwenMtTextItems(input: {
     key: item.key,
     ok: false,
     detail: "翻译失败。",
-  });
-}
-
-async function callQwenMt(
-  config: DashScopeTranslationConfig,
-  text: string,
-  options: QwenMtTranslationOptions,
-): Promise<Response> {
-  return await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${config.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        {
-          role: "user",
-          content: text,
-        },
-      ],
-      stream: true,
-      stream_options: { include_usage: false },
-      translation_options: normalizeTranslationOptions(options),
-    }),
-    retry: {
-      attempts: 2,
-      timeoutMs: QWEN_MT_REQUEST_TIMEOUT_MS,
-    },
   });
 }
 
@@ -348,7 +285,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
-function readDashScopeTranslationConfig(): DashScopeTranslationConfig {
+function readDashScopeTranslationConfig(): DashScopeChatConfig {
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("DASHSCOPE_API_KEY 未配置。");
@@ -375,27 +312,6 @@ function readDashScopeTranslationBaseUrl(): string {
     throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
   }
   return baseUrl;
-}
-
-function readQwenMtFailure(
-  response: Response,
-  payload: DashScopeChatCompletionPayload | null,
-): ProviderResult | null {
-  if (payload?.error) {
-    return {
-      ok: false,
-      code: response.status === 401 || response.status === 403 ? "not_configured" : "error",
-      detail: formatQwenMtError(response.status, payload.error),
-    };
-  }
-  if (!response.ok) {
-    return {
-      ok: false,
-      code: response.status === 401 || response.status === 403 ? "not_configured" : "error",
-      detail: formatQwenMtError(response.status, undefined),
-    };
-  }
-  return null;
 }
 
 function formatQwenMtThrownError(error: unknown): ProviderResult {

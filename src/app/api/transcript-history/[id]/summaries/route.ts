@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
-import { streamSummarizeTranscript } from "@/lib/openrouter/provider";
+import { streamSummarizeTranscript } from "@/lib/dashscope/summary";
 import {
   insertTranscriptHistorySummary,
   readTranscriptHistoryRecord,
