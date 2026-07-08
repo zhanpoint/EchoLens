@@ -8,7 +8,7 @@ EchoLens 是一个单页面 Next.js 工具，用于从抖音分享链接识别�
 - 抖音详情接口用于读取作者、标题、封面和视频资源。
 - 视频作品走独立转录接口，音频会先用 ffmpeg 标准化为 16kHz 单声道 WAV，再上传到阿里云 OSS 生成公网签名 URL。默认 E1 使用 DashScope `qwen3-asr-flash-filetrans` 异步转录，E2 使用 `fun-asr` 异步转录。
 - 支持用户名、邮箱、密码和邮箱验证码注册，登录后才能访问核心抖音处理接口。
-- 用户身份、验证码哈希、会话、转录任务和转录历史数据保存在 PostgreSQL。应用启动时会确保当前业务实际使用的表结构存在，不再保留 SQLite 运行期代码。
+- 用户身份、验证码哈希、会话、转录任务和转录历史数据保存在 PostgreSQL。应用启动时会确保当前业务实际使用的表结构存在。
 
 ## 环境变量
 
@@ -70,12 +70,6 @@ npm run build
 
 ## 部署
 
-项目包含 GitHub Actions 自动部署流程：推送 `master` 分支后，CI 会先执行类型检查、Lint、测试和生产构建，再构建 Docker 镜像推送到 GHCR，最后通过 SSH 上传 `deploy/compose.yml` 并在服务器上用 Docker Compose 更新容器。生产入口建议使用 `deploy/nginx.echolens.conf` 反代到本机 `127.0.0.1:3000`，对外统一走 `80/443`。`deploy/compose.yml` 会启动应用容器和 PostgreSQL 17 容器，数据库名默认 `echolens`，数据写入 Docker 命名卷 `echolens-postgres`，应用通过 compose 内部服务名 `postgres` 访问数据库。
+项目包含 GitHub Actions 自动部署流程：推送 `master` 分支后，CI 会先执行类型检查、Lint、测试和生产构建，再构建 Docker 镜像推送到 GHCR，最后通过 SSH 上传 `deploy/compose.yml` 并在服务器上用 Docker Compose 更新容器。生产入口建议使用 `deploy/nginx.echolens.conf` 反代到本机 `127.0.0.1:3000`，对外统一走 `80/443`。`deploy/compose.yml` 会启动应用容器和 PostgreSQL 17 容器，数据库名默认 `echolens`，数据写入 Docker 命名卷 `echolens-postgres`，应用通过 compose 内部服务名 `postgres` 访问数据库。PostgreSQL 只绑定服务器本机 `127.0.0.1:5432`，用于 SSH 隧道访问，不对公网开放。
 
-从旧线上 SQLite 切换到线上 PostgreSQL 容器时，在服务器的 `deploy` 目录执行：
-
-```bash
-sh migrate-sqlite-auth-to-postgres.sh
-```
-
-脚本只迁移认证相关表：`users`、`sessions`、`email_codes`。迁移事务提交并校验成功后，脚本会删除旧 SQLite Docker volume `echolens-data`，或删除 `deploy/data/echolens.sqlite*` 并清理空目录；转录历史、转录任务、用户设置和其他旧业务数据不会导入 PostgreSQL。
+Navicat 查看线上 PostgreSQL 时使用 SSH 隧道：SSH 主机填服务器公网 IP，数据库连接填 `127.0.0.1:5432`、数据库 `echolens`、用户 `postgres`。不要直接把数据库 Host 填公网 IP 做无隧道连接。
