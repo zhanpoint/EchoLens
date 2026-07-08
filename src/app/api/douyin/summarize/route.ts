@@ -3,7 +3,6 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/openrouter/provider";
 import { insertTranscriptHistorySummary, readTranscriptHistoryRecord, type TranscriptHistorySummary } from "@/lib/transcript/db";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -27,27 +26,25 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "总结参数无效。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
-    let transcript = parsed.data.text;
-    if (parsed.data.historyRecordId) {
-      const record = await readTranscriptHistoryRecord({
-        id: parsed.data.historyRecordId,
-        userId: user.id,
-      });
-      if (!record) {
-        return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
-      }
-      transcript = record.transcriptContent;
-    }
-
-    return streamSummary({
-      historyRecordId: parsed.data.historyRecordId,
-      prompt: parsed.data.prompt,
-      promptId: parsed.data.promptId,
-      promptTitle: parsed.data.promptTitle,
-      transcript,
+  let transcript = parsed.data.text;
+  if (parsed.data.historyRecordId) {
+    const record = await readTranscriptHistoryRecord({
+      id: parsed.data.historyRecordId,
       userId: user.id,
     });
+    if (!record) {
+      return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
+    }
+    transcript = record.transcriptContent;
+  }
+
+  return streamSummary({
+    historyRecordId: parsed.data.historyRecordId,
+    prompt: parsed.data.prompt,
+    promptId: parsed.data.promptId,
+    promptTitle: parsed.data.promptTitle,
+    transcript,
+    userId: user.id,
   });
 }
 

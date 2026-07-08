@@ -6,7 +6,6 @@ import {
   translateQwenMtTextItems,
   type QwenMtTranslationOptions,
 } from "@/lib/dashscope/translation";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -53,9 +52,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "翻译参数无效。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:translate", async () => {
-    return streamTranslations(parsed.data.texts, parsed.data.translation_options);
-  });
+  return streamTranslations(parsed.data.texts, parsed.data.translation_options);
 }
 
 function streamTranslations(

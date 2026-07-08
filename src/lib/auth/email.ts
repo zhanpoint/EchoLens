@@ -58,7 +58,7 @@ export async function sendEmailCode(email: string, purpose: EmailCodePurpose): P
   }
 
   const code = generateEmailCode();
-  replaceEmailCode({
+  await replaceEmailCode({
     codeHash: hashEmailCode(email, purpose, code),
     email,
     expiresAt: Date.now() + EMAIL_CODE_TTL_SECONDS * 1000,

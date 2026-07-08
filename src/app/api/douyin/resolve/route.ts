@@ -3,7 +3,6 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { DouyinResolveError } from "@/lib/douyin/url";
 import { resolveInputWithMetadata } from "@/lib/douyin/work";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
 
@@ -22,19 +21,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "请输入抖音分享链接。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:resolve", async () => {
-    try {
-      const resolved = await resolveInputWithMetadata(parsed.data.input, { tolerateMetadataFailure: true });
+  try {
+    const resolved = await resolveInputWithMetadata(parsed.data.input, { tolerateMetadataFailure: true });
 
-      return NextResponse.json({
-        work: resolved.work,
-      });
-    } catch (error) {
-      if (error instanceof DouyinResolveError) {
-        return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
-      }
-
-      return NextResponse.json({ error: "识别链接失败。" }, { status: 500 });
+    return NextResponse.json({
+      work: resolved.work,
+    });
+  } catch (error) {
+    if (error instanceof DouyinResolveError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
     }
-  });
+
+    return NextResponse.json({ error: "识别链接失败。" }, { status: 500 });
+  }
 }

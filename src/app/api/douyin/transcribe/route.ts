@@ -14,7 +14,6 @@ import {
 } from "@/lib/dashscope/asr";
 import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
 import { upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 import {
   DOUYIN_KINDS,
   TRANSCRIPT_FEATURE,
@@ -92,54 +91,52 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "原声音频缓存未就绪，请等待缓存完成后再转录。" }, { status: 400 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:transcribe", async () => {
-    try {
-      const { audioObjectKey, audioUrl, work } = parsed.data;
-      if (!isManagedAsrAudioUrl({ objectKey: audioObjectKey, signedUrl: audioUrl })) {
-        return NextResponse.json({ error: "原声音频缓存地址无效，请重新缓存后再转录。" }, { status: 400 });
-      }
-
-      const asrOptions = buildAsrOptions(parsed.data);
-      return streamTranscribeOperation(
-        ({ onPostprocessStart }) => transcribeDashScopeAsr(
-          user.id,
-          buildWorkCacheKey(work),
-          {
-            durationSeconds: work.durationSeconds ?? 0,
-            objectKey: audioObjectKey,
-            signedUrl: audioUrl,
-          },
-          asrOptions,
-          {
-            postprocess: {
-              onStart: onPostprocessStart,
-            },
-            ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
-            ...(parsed.data.historyRecordId ? {
-              historyContext: {
-                historyRecordId: parsed.data.historyRecordId,
-                work,
-              },
-            } : {}),
-            signal: request.signal,
-          },
-        ),
-        {
-          fallbackAsrModel: asrOptions.model,
-          work,
-          userId: user.id,
-        },
-        request.signal,
-      );
-    } catch (error) {
-      return NextResponse.json(
-        {
-          error: error instanceof Error ? error.message : "转录失败。",
-        },
-        { status: 500 },
-      );
+  try {
+    const { audioObjectKey, audioUrl, work } = parsed.data;
+    if (!isManagedAsrAudioUrl({ objectKey: audioObjectKey, signedUrl: audioUrl })) {
+      return NextResponse.json({ error: "原声音频缓存地址无效，请重新缓存后再转录。" }, { status: 400 });
     }
-  });
+
+    const asrOptions = buildAsrOptions(parsed.data);
+    return streamTranscribeOperation(
+      ({ onPostprocessStart }) => transcribeDashScopeAsr(
+        user.id,
+        buildWorkCacheKey(work),
+        {
+          durationSeconds: work.durationSeconds ?? 0,
+          objectKey: audioObjectKey,
+          signedUrl: audioUrl,
+        },
+        asrOptions,
+        {
+          postprocess: {
+            onStart: onPostprocessStart,
+          },
+          ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
+          ...(parsed.data.historyRecordId ? {
+            historyContext: {
+              historyRecordId: parsed.data.historyRecordId,
+              work,
+            },
+          } : {}),
+          signal: request.signal,
+        },
+      ),
+      {
+        fallbackAsrModel: asrOptions.model,
+        work,
+        userId: user.id,
+      },
+      request.signal,
+    );
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : "转录失败。",
+      },
+      { status: 500 },
+    );
+  }
 }
 
 export async function GET(request: Request) {

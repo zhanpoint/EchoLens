@@ -7,7 +7,6 @@ import {
   readTranscriptHistoryRecord,
   type TranscriptHistorySummary,
 } from "@/lib/transcript/db";
-import { withUserRouteConcurrency } from "@/lib/user-concurrency";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -44,15 +43,13 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
-  return withUserRouteConcurrency(user.id, "douyin:summarize", async () => {
-    return streamHistorySummary({
-      historyRecordId: id,
-      prompt: parsed.data.prompt,
-      promptId: parsed.data.promptId,
-      promptTitle: parsed.data.promptTitle,
-      transcript: record.transcriptContent,
-      userId: user.id,
-    });
+  return streamHistorySummary({
+    historyRecordId: id,
+    prompt: parsed.data.prompt,
+    promptId: parsed.data.promptId,
+    promptTitle: parsed.data.promptTitle,
+    transcript: record.transcriptContent,
+    userId: user.id,
   });
 }
 

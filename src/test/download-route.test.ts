@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { resetUserRouteConcurrencyForTest } from "../lib/user-concurrency";
 
 vi.mock("@/lib/douyin/detail", () => ({
   collectWorkMetadata: vi.fn(),
@@ -54,7 +53,6 @@ async function writeTempMediaFile(content: string): Promise<string> {
 
 describe("douyin download route", () => {
   beforeEach(() => {
-    resetUserRouteConcurrencyForTest();
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
   });
