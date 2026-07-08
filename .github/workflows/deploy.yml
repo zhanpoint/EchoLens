@@ -176,6 +176,11 @@ jobs:
             exit 1
           fi
 
+          if ! grep -Eq '^POSTGRES_PASSWORD=.+' .env; then
+            echo "Missing POSTGRES_PASSWORD in $DEPLOY_PATH/.env. Set it before deploying PostgreSQL." >&2
+            exit 1
+          fi
+
           cat > .deploy.env <<EOF
           ECHOLENS_IMAGE=$IMAGE_REF
           ECHOLENS_PORT=$APP_PORT
@@ -184,19 +189,24 @@ jobs:
           GHCR_USERNAME="$(printf '%s' "$GHCR_USERNAME_B64" | base64 -d)"
           GHCR_TOKEN="$(printf '%s' "$GHCR_TOKEN_B64" | base64 -d)"
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-          docker compose --env-file .deploy.env -f compose.yml pull
-          docker compose --env-file .deploy.env -f compose.yml up -d --remove-orphans
+
+          compose() {
+            docker compose --env-file .env --env-file .deploy.env -f compose.yml "$@"
+          }
+
+          compose pull
+          compose up -d --remove-orphans
 
           for attempt in $(seq 1 30); do
             status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' echolens 2>/dev/null || true)"
             if [ "$status" = "healthy" ]; then
               docker image prune -f --filter "until=168h" >/dev/null
-              docker compose --env-file .deploy.env -f compose.yml ps
+              compose ps
               exit 0
             fi
             sleep 2
           done
 
-          docker compose --env-file .deploy.env -f compose.yml logs --tail=200 echolens
+          compose logs --tail=200 echolens
           exit 1
           REMOTE
