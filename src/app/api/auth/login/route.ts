@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { CodeSchema, EmailSchema, errorJson, PasswordSchema } from "@/app/api/auth/_shared";
-import { sendLoginNoticeEmail } from "@/lib/auth/email";
 import { loginUser, loginUserWithEmailCode, setSessionCookie } from "@/lib/auth/service";
 
 export const runtime = "nodejs";
@@ -42,7 +41,6 @@ export async function POST(request: Request) {
         });
     const response = NextResponse.json({ user });
     await setSessionCookie(response, user.id);
-    void sendLoginNoticeEmail(user.email, user.username).catch(() => undefined);
     return response;
   } catch (error) {
     return errorJson(error);

@@ -32,6 +32,8 @@ import {
   PanelLeft,
   Sparkles,
   Square,
+  SquarePen,
+  Star,
   Trash2,
   UserRound,
   Volume2,
@@ -53,6 +55,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -157,6 +160,15 @@ type LiveTranscribeSession = {
   jobId: string;
   persisted: boolean;
   workKey: string;
+};
+type CurrentTranscriptSnapshot = {
+  input: string;
+  lastResolvedInput: string;
+  liveHistorySummariesByRecordId: Record<string, TranscriptHistorySummary[]>;
+  liveTranscribeSession: LiveTranscribeSession | null;
+  results: ExtractionResult[];
+  userId: string;
+  work: ResolvedDouyinWork;
 };
 type CurrentUser = {
   email: string;
@@ -653,6 +665,27 @@ async function fetchTranscriptHistoryList(query = ""): Promise<TranscriptHistory
   return "records" in payload ? payload.records : [];
 }
 
+const TRANSCRIPT_HISTORY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+
+let transcriptHistoryCache: {
+  records: TranscriptHistoryRecord[];
+  refreshedAt: number;
+  userId: string;
+} | null = null;
+
+function updateTranscriptHistoryCache(
+  userId: string,
+  update: (records: TranscriptHistoryRecord[]) => TranscriptHistoryRecord[],
+): void {
+  if (transcriptHistoryCache?.userId === userId) {
+    transcriptHistoryCache = {
+      records: update(transcriptHistoryCache.records),
+      refreshedAt: Date.now(),
+      userId,
+    };
+  }
+}
+
 async function fetchTranscriptHistoryDetail(id: string): Promise<TranscriptHistoryDetail> {
   const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, { cache: "no-store" });
   const payload = await readApiPayload(response, "转录历史加载失败。") as ApiError | TranscriptHistoryDetail;
@@ -856,6 +889,34 @@ const TRAILING_URL_PUNCTUATION_PATTERN = /[)\]}.,!?;:，。！？；：、]+$/u;
 const TAG_PATTERN = /#\s*[\p{L}\p{N}_-]+/gu;
 const SOCIAL_TOKEN_PATTERN = /([#@][\p{L}\p{N}_-]+)/gu;
 const CLIPBOARD_INPUT_LIMIT = 5000;
+const USAGE_CONSENT_EVENT = "echolens:usage-consent";
+const USAGE_CONSENT_STORAGE_KEY = "echolens:usage-consent";
+let currentTranscriptCache: CurrentTranscriptSnapshot | null = null;
+
+function subscribeUsageConsent(onStoreChange: () => void): () => void {
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener(USAGE_CONSENT_EVENT, onStoreChange);
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener(USAGE_CONSENT_EVENT, onStoreChange);
+  };
+}
+
+function readUsageConsent(): boolean {
+  return window.localStorage.getItem(USAGE_CONSENT_STORAGE_KEY) === "true";
+}
+
+function readServerUsageConsent(): boolean {
+  return false;
+}
+
+function readCurrentTranscript(): CurrentTranscriptSnapshot | null {
+  return currentTranscriptCache;
+}
+
+function writeCurrentTranscript(snapshot: CurrentTranscriptSnapshot | null): void {
+  currentTranscriptCache = snapshot;
+}
 const SPEAKER_COUNT_MIN = 1;
 const SPEAKER_COUNT_MAX = 10;
 const SUBTITLE_MAX_CHARS_PER_CUE = 84;
@@ -967,15 +1028,19 @@ export default function HomePage() {
   const [results, setResults] = useState<ExtractionResult[]>([]);
   const [liveTranscribeSession, setLiveTranscribeSession] = useState<LiveTranscribeSession | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string } | null>(null);
   const [historyDetail, setHistoryDetail] = useState<TranscriptHistoryDetail | null>(null);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
-  const [historyError, setHistoryError] = useState("");
   const [historyList, setHistoryList] = useState<TranscriptHistoryRecord[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [historySidebarOpen, setHistorySidebarOpen] = useState(true);
   const [liveHistorySummariesByRecordId, setLiveHistorySummariesByRecordId] = useState<Record<string, TranscriptHistorySummary[]>>({});
-  const [hasAcceptedUsage, setHasAcceptedUsage] = useState(false);
+  const hasAcceptedUsage = useSyncExternalStore(
+    subscribeUsageConsent,
+    readUsageConsent,
+    readServerUsageConsent,
+  );
   const [isResolving, setIsResolving] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [asrModel, setAsrModel] = useState<AsrModelId>("e1");
@@ -991,11 +1056,19 @@ export default function HomePage() {
   const [lastResolvedInput, setLastResolvedInput] = useState("");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const historyListRequestIdRef = useRef(0);
+  const hasRestoredCurrentTranscriptRef = useRef(false);
   const isReadingClipboardRef = useRef(false);
   const resolveRequestIdRef = useRef(0);
   const transcribeAbortControllerRef = useRef<AbortController | null>(null);
   const transcribeRequestIdRef = useRef(0);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const closeUserMenu = useCallback(() => {
+    setUserMenuOpen(false);
+  }, []);
+  const showToast = useCallback((message: string) => {
+    setToast({ message });
+  }, []);
   const redirectToLogin = useCallback(() => {
     setError(null);
     const next = typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
@@ -1010,6 +1083,62 @@ export default function HomePage() {
   const displayWork = activeKind ? work : null;
   const activeWorkKey = displayWork ? getWorkKey(displayWork) : "";
   const activeLiveSession = liveTranscribeSession?.workKey === activeWorkKey ? liveTranscribeSession : null;
+
+  const restoreCurrentTranscript = useCallback((snapshot: CurrentTranscriptSnapshot | null) => {
+    if (!snapshot) {
+      setInput("");
+      setLastResolvedInput("");
+      setLiveHistorySummariesByRecordId({});
+      setLiveTranscribeSession(null);
+      setResults([]);
+      setWork(null);
+      return;
+    }
+    setInput(snapshot.input);
+    setLastResolvedInput(snapshot.lastResolvedInput);
+    setLiveHistorySummariesByRecordId(snapshot.liveHistorySummariesByRecordId);
+    setLiveTranscribeSession(snapshot.liveTranscribeSession);
+    setResults(snapshot.results);
+    setWork(snapshot.work);
+  }, []);
+
+  useEffect(() => {
+    if (currentUser === undefined) {
+      return;
+    }
+
+    const restoreTimer = window.setTimeout(() => {
+      const snapshot = readCurrentTranscript();
+      const navigationInput = new URL(window.location.href).searchParams.get("transcribe")?.trim();
+      if (snapshot && currentUser?.id !== snapshot.userId) {
+        writeCurrentTranscript(null);
+      } else if (!navigationInput) {
+        restoreCurrentTranscript(snapshot);
+      }
+      hasRestoredCurrentTranscriptRef.current = true;
+    }, 0);
+    return () => window.clearTimeout(restoreTimer);
+  }, [currentUser, restoreCurrentTranscript]);
+
+  useEffect(() => {
+    if (!hasRestoredCurrentTranscriptRef.current || !currentUser || !work || !lastResolvedInput) {
+      return;
+    }
+    const currentSummaries = liveTranscribeSession
+      ? liveHistorySummariesByRecordId[liveTranscribeSession.historyRecordId] ?? []
+      : [];
+    writeCurrentTranscript({
+      input,
+      lastResolvedInput,
+      liveHistorySummariesByRecordId: liveTranscribeSession
+        ? { [liveTranscribeSession.historyRecordId]: currentSummaries }
+        : {},
+      liveTranscribeSession,
+      results,
+      userId: currentUser.id,
+      work,
+    });
+  }, [currentUser, input, lastResolvedInput, liveHistorySummariesByRecordId, liveTranscribeSession, results, work]);
   const originalAudioCache = activeKind === "video" && cachedAssets.originalAudio?.workKey === activeWorkKey
     ? cachedAssets.originalAudio
     : undefined;
@@ -1082,39 +1211,79 @@ export default function HomePage() {
     return false;
   }, [currentUser, redirectToLogin]);
 
+  useEffect(() => {
+    if (!toast) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setToast(null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
   const loadHistoryList = useCallback(async (query = historySearchQuery) => {
+    const requestId = ++historyListRequestIdRef.current;
     if (!currentUser) {
       setHistoryList([]);
       return;
     }
 
-    setHistoryLoading(true);
-    setHistoryError("");
+    const normalizedQuery = query.trim();
+    const cachedHistory = !normalizedQuery && transcriptHistoryCache?.userId === currentUser.id
+      ? transcriptHistoryCache
+      : null;
+    if (cachedHistory) {
+      setHistoryList(cachedHistory.records);
+      setHistoryLoading(false);
+      if (Date.now() - cachedHistory.refreshedAt < TRANSCRIPT_HISTORY_CACHE_TTL_MS) {
+        return;
+      }
+    }
+
+    const isBackgroundRefresh = Boolean(cachedHistory);
+    if (!isBackgroundRefresh) {
+      setHistoryLoading(true);
+    }
+
     try {
-      setHistoryList(await fetchTranscriptHistoryList(query));
+      const records = await fetchTranscriptHistoryList(normalizedQuery);
+      if (!normalizedQuery) {
+        transcriptHistoryCache = {
+          records,
+          refreshedAt: Date.now(),
+          userId: currentUser.id,
+        };
+      }
+      if (requestId !== historyListRequestIdRef.current) {
+        return;
+      }
+      setHistoryList(records);
     } catch (loadError) {
+      if (requestId !== historyListRequestIdRef.current) {
+        return;
+      }
       if (isAuthRequiredError(loadError)) {
         redirectToLogin();
         return;
       }
-      setHistoryError(readUserFacingError(loadError, "转录历史加载失败。"));
+      showToast(readUserFacingError(loadError, "转录历史加载失败。"));
     } finally {
-      setHistoryLoading(false);
+      if (!isBackgroundRefresh && requestId === historyListRequestIdRef.current) {
+        setHistoryLoading(false);
+      }
     }
-  }, [currentUser, historySearchQuery, redirectToLogin]);
+  }, [currentUser, historySearchQuery, redirectToLogin, showToast]);
 
   async function openHistoryRecord(id: string) {
     if (!ensureAuthenticated()) {
       return;
     }
 
-    setHistoryError("");
     try {
       const detail = await fetchTranscriptHistoryDetail(id);
       setHistoryDetail(detail);
       setHistoryDrawerOpen(false);
     } catch (loadError) {
-      setHistoryError(readUserFacingError(loadError, "转录历史加载失败。"));
+      showToast(readUserFacingError(loadError, "转录历史加载失败。"));
     }
   }
 
@@ -1124,7 +1293,9 @@ export default function HomePage() {
   }
 
   function startNewLiveSession() {
+    writeCurrentTranscript(null);
     setHistoryDetail(null);
+    setLiveHistorySummariesByRecordId({});
     setLiveTranscribeSession(null);
     setHistoryDrawerOpen(false);
     setError(null);
@@ -1136,18 +1307,33 @@ export default function HomePage() {
   }
 
   async function renameHistoryRecord(id: string, displayTitle: string) {
-    const nextRecord = await renameTranscriptHistory(id, displayTitle);
-    setHistoryList((current) => current.map((record) => record.id === id ? nextRecord : record));
-    setHistoryDetail((current) =>
-      current?.record.id === id ? { ...current, record: nextRecord } : current
-    );
+    try {
+      const nextRecord = await renameTranscriptHistory(id, displayTitle);
+      setHistoryList((current) => current.map((record) => record.id === id ? nextRecord : record));
+      if (currentUser) {
+        updateTranscriptHistoryCache(currentUser.id, (records) =>
+          records.map((record) => record.id === id ? nextRecord : record));
+      }
+      setHistoryDetail((current) =>
+        current?.record.id === id ? { ...current, record: nextRecord } : current
+      );
+    } catch (renameError) {
+      showToast(readUserFacingError(renameError, "历史记录重命名失败。"));
+    }
   }
 
   async function removeHistoryRecord(id: string) {
-    await deleteTranscriptHistory(id);
-    setHistoryList((current) => current.filter((record) => record.id !== id));
-    if (historyDetail?.record.id === id) {
-      showLiveSession();
+    try {
+      await deleteTranscriptHistory(id);
+      setHistoryList((current) => current.filter((record) => record.id !== id));
+      if (currentUser) {
+        updateTranscriptHistoryCache(currentUser.id, (records) => records.filter((record) => record.id !== id));
+      }
+      if (historyDetail?.record.id === id) {
+        showLiveSession();
+      }
+    } catch (deleteError) {
+      showToast(readUserFacingError(deleteError, "历史记录删除失败。"));
     }
   }
 
@@ -1216,10 +1402,14 @@ export default function HomePage() {
   }
 
   function upsertHistoryListItem(record: TranscriptHistoryRecord) {
-    setHistoryList((current) => [
+    const upsert = (current: TranscriptHistoryRecord[]) => [
       record,
       ...current.filter((item) => item.id !== record.id),
-    ].sort((first, second) => second.updatedAt - first.updatedAt));
+    ].sort((first, second) => second.updatedAt - first.updatedAt);
+    setHistoryList(upsert);
+    if (currentUser) {
+      updateTranscriptHistoryCache(currentUser.id, upsert);
+    }
   }
 
   function updateSpecialWordFilterEnabled(checked: boolean) {
@@ -1282,26 +1472,26 @@ export default function HomePage() {
       return;
     }
 
-    function closeUserMenu(event: PointerEvent) {
+    function closeUserMenuOnPointerDown(event: PointerEvent) {
       if (userMenuRef.current?.contains(event.target as Node)) {
         return;
       }
-      setUserMenuOpen(false);
+      closeUserMenu();
     }
 
     function closeUserMenuOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setUserMenuOpen(false);
+        closeUserMenu();
       }
     }
 
-    document.addEventListener("pointerdown", closeUserMenu);
+    document.addEventListener("pointerdown", closeUserMenuOnPointerDown);
     document.addEventListener("keydown", closeUserMenuOnEscape);
     return () => {
-      document.removeEventListener("pointerdown", closeUserMenu);
+      document.removeEventListener("pointerdown", closeUserMenuOnPointerDown);
       document.removeEventListener("keydown", closeUserMenuOnEscape);
     };
-  }, [userMenuOpen]);
+  }, [closeUserMenu, userMenuOpen]);
 
   const resolveInput = useCallback(async (value: string, options?: { showLinkHint?: boolean; silent?: boolean }) => {
     const valueToResolve = value.trim();
@@ -1342,6 +1532,7 @@ export default function HomePage() {
       }
       const resolvedWorkKey = getWorkKey(payload.work);
       if (resolvedWorkKey !== activeWorkKey) {
+        setLiveHistorySummariesByRecordId({});
         setLiveTranscribeSession(null);
       }
       setLastResolvedInput(valueToResolve);
@@ -1371,6 +1562,23 @@ export default function HomePage() {
   }, [activeWorkKey, ensureAuthenticated, redirectToLogin]);
 
   useEffect(() => {
+    const url = new URL(window.location.href);
+    const navigationInput = url.searchParams.get("transcribe")?.trim();
+    if (!navigationInput) {
+      return;
+    }
+
+    // The URL is an external input that initializes this controlled field once.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInput(navigationInput);
+    url.searchParams.delete("transcribe");
+    const timer = window.setTimeout(() => {
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
     let isActive = true;
 
     async function fillFromClipboard() {
@@ -1382,7 +1590,7 @@ export default function HomePage() {
       const clipboard = await readClipboardDouyinInput();
       isReadingClipboardRef.current = false;
 
-      if (isActive && clipboard && !isSameDouyinInput(input, clipboard)) {
+      if (isActive && !work && clipboard && !isSameDouyinInput(input, clipboard)) {
         setInput(clipboard.text);
       }
     }
@@ -1403,7 +1611,7 @@ export default function HomePage() {
       window.removeEventListener("keydown", retryFromClipboard, { capture: true });
       document.removeEventListener("visibilitychange", retryFromClipboard);
     };
-  }, [input]);
+  }, [input, work]);
 
   useEffect(() => {
     if (!hasAcceptedUsage || !normalizedInput || normalizedInput === lastResolvedInput || !extractDouyinInput(normalizedInput)) {
@@ -1528,7 +1736,12 @@ export default function HomePage() {
   }
 
   function updateUsageConsent(value: boolean) {
-    setHasAcceptedUsage(value);
+    if (value) {
+      window.localStorage.setItem(USAGE_CONSENT_STORAGE_KEY, "true");
+    } else {
+      window.localStorage.removeItem(USAGE_CONSENT_STORAGE_KEY);
+    }
+    window.dispatchEvent(new Event(USAGE_CONSENT_EVENT));
     if (value && error === "请先确认仅用于个人学习和非商业用途，并尊重原作者版权。") {
       setError(null);
     }
@@ -1616,7 +1829,6 @@ export default function HomePage() {
           });
           persistedSession = { historyRecordId: record.id, jobId: "", persisted: true, workKey: historyWorkKey };
         }
-        void loadHistoryList("");
         setLastResolvedInput(normalizedInput);
         setLiveTranscribeSession((current) => persistedSession ?? (current ? { ...current, jobId: "" } : current));
         setTranscribeStatusMessage("");
@@ -1649,11 +1861,13 @@ export default function HomePage() {
   }
 
   function clearInput() {
+    writeCurrentTranscript(null);
     resolveRequestIdRef.current += 1;
     transcribeRequestIdRef.current += 1;
     setLiveTranscribeSession(null);
     setTranscribeStatusMessage("");
     setHistoryDetail(null);
+    setLiveHistorySummariesByRecordId({});
     setInput("");
     setWork(null);
     setResults([]);
@@ -1662,18 +1876,20 @@ export default function HomePage() {
   }
 
   async function logout() {
-    setUserMenuOpen(false);
+    closeUserMenu();
     await fetch("/api/auth/logout", { method: "POST" });
+    writeCurrentTranscript(null);
+    transcriptHistoryCache = null;
     setCurrentUser(null);
     router.refresh();
   }
 
   return (
     <main className="app-shell h-[100dvh] overflow-hidden bg-background text-foreground">
+      {toast ? <TopErrorToast message={toast.message} onDismiss={() => setToast(null)} /> : null}
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
           activeId={historyDetail?.record.id}
-          error={historyError}
           isDrawerOpen={historyDrawerOpen}
           isOpen={historySidebarOpen}
           isLoading={historyLoading}
@@ -1719,10 +1935,16 @@ export default function HomePage() {
               <div ref={userMenuRef} className="relative">
                 <button
                   type="button"
-                  onClick={() => setUserMenuOpen((open) => !open)}
+                  onClick={() => {
+                    if (userMenuOpen) {
+                      closeUserMenu();
+                      return;
+                    }
+                    setUserMenuOpen(true);
+                  }}
                   className="inline-flex size-11 select-none items-center justify-center rounded-full border border-white/10 bg-muted text-base font-semibold text-foreground shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06)] transition hover:border-cyan/35 hover:bg-cyan/[0.12] hover:text-cyan active:scale-[0.96]"
                   aria-expanded={userMenuOpen}
-                  aria-haspopup="menu"
+                  aria-haspopup="dialog"
                   aria-label={`${currentUser.username} 用户菜单`}
                   title={currentUser.username}
                 >
@@ -1732,15 +1954,16 @@ export default function HomePage() {
                 <aside
                   aria-hidden={!userMenuOpen}
                   className={cn(
-                    "fixed right-0 top-0 z-40 flex h-[100dvh] w-[min(20rem,calc(100vw-1rem))] flex-col border-l border-white/12 bg-background/95 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] shadow-2xl shadow-black/40 backdrop-blur-xl transition duration-200 ease-out",
+                    "absolute right-0 top-12 z-40 flex max-h-[min(36rem,calc(100dvh-5rem))] w-[min(18rem,calc(100vw-1rem))] flex-col overflow-hidden rounded-lg border border-white/12 bg-background/95 p-2 shadow-2xl shadow-black/45 backdrop-blur-xl transition duration-150 ease-out",
                     userMenuOpen
-                      ? "pointer-events-auto translate-x-0 opacity-100"
-                      : "pointer-events-none translate-x-full opacity-0",
+                      ? "pointer-events-auto translate-y-0 opacity-100"
+                      : "pointer-events-none -translate-y-1 opacity-0",
                   )}
-                  role="menu"
+                  aria-label="用户菜单"
+                  role="dialog"
                 >
-                  <div className="mb-5 flex items-center gap-3 border-b border-white/10 pb-4">
-                    <span className="inline-flex size-11 shrink-0 select-none items-center justify-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-base font-semibold text-cyan">
+                  <div className="mb-2 flex items-center gap-2 border-b border-white/10 px-2 pb-2 pt-1">
+                    <span className="inline-flex size-9 shrink-0 select-none items-center justify-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-sm font-semibold text-cyan">
                       {getAvatarInitial(currentUser)}
                     </span>
                     <div className="min-w-0 flex-1">
@@ -1749,21 +1972,31 @@ export default function HomePage() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => setUserMenuOpen(false)}
-                      className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan active:scale-[0.96]"
-                      aria-label="关闭用户面板"
-                      title="关闭用户面板"
+                      onClick={closeUserMenu}
+                      className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan active:scale-[0.96]"
+                      aria-label="关闭用户菜单"
+                      title="关闭用户菜单"
                     >
                       <X className="size-4" aria-hidden="true" />
                     </button>
                   </div>
 
-                  <div className="grid gap-1">
+                  <div className="grid gap-0.5 py-1">
+                    <Link
+                      href="/settings"
+                      onClick={closeUserMenu}
+                      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] font-semibold text-foreground transition hover:bg-white/8 hover:text-cyan active:scale-[0.98]"
+                    >
+                      <Settings className="size-4 text-cyan" aria-hidden="true" />
+                      设置
+                    </Link>
+                  </div>
+
+                  <div className="mt-1 border-t border-white/10 pt-1">
                     <button
                       type="button"
                       onClick={() => void logout()}
-                      className="flex h-10 w-full items-center gap-2 rounded-md px-3 text-sm font-semibold text-destructive transition hover:bg-destructive/10 active:scale-[0.98]"
-                      role="menuitem"
+                      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] font-semibold text-destructive transition hover:bg-destructive/10 active:scale-[0.98]"
                     >
                       <LogOut className="size-4" aria-hidden="true" />
                       退出登录
@@ -1818,7 +2051,7 @@ export default function HomePage() {
           <div className="order-2 flex flex-col gap-3 md:order-1 md:flex-row md:items-center">
             <div
               className={cn(
-                "flex min-h-14 flex-1 items-center gap-3 rounded-md border bg-black/20 px-4 transition",
+                "flex h-11 flex-1 items-center gap-3 rounded-md border bg-black/20 px-4 transition",
                 hasAcceptedUsage
                   ? "border-cyan/35 focus-within:border-cyan/80 focus-within:ring-2 focus-within:ring-cyan/20"
                   : "border-white/25",
@@ -1837,7 +2070,7 @@ export default function HomePage() {
                 value={input}
                 onChange={(event) => updateInput(event.target.value)}
                 disabled={!hasAcceptedUsage}
-                className="h-12 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 placeholder={hasAcceptedUsage ? "粘贴抖音作品的分享链接或者地址。" : "请先勾选使用确认。"}
               />
               {input ? (
@@ -1855,7 +2088,7 @@ export default function HomePage() {
             <button
               type="submit"
               disabled={!hasAcceptedUsage || isResolving || !normalizedInput}
-              className="inline-flex h-12 w-full items-center justify-center rounded-md border border-cyan/65 bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition duration-150 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:translate-y-0 disabled:border-transparent disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
+              className="inline-flex h-11 w-full items-center justify-center rounded-md border border-cyan/65 bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition duration-150 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:translate-y-0 disabled:border-transparent disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
             >
               {isResolving ? "检测中" : "智能检测"}
             </button>
@@ -2048,9 +2281,31 @@ function LegalNoticeFooter() {
   );
 }
 
+function TopErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-[max(1rem,env(safe-area-inset-top))] z-[60] flex justify-center px-4">
+      <div
+        className="pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-md border border-destructive/35 bg-background/95 px-4 py-3 text-sm text-foreground shadow-2xl shadow-black/40 backdrop-blur-xl motion-safe:animate-[toast-enter_180ms_ease-out]"
+        role="alert"
+      >
+        <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+        <span className="min-w-0 flex-1 leading-5">{message}</span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.96]"
+          aria-label="关闭提示"
+          title="关闭"
+        >
+          <X className="size-3.5" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TranscriptHistorySidebar({
   activeId,
-  error,
   isDrawerOpen,
   isLoading,
   isOpen,
@@ -2067,7 +2322,6 @@ function TranscriptHistorySidebar({
   showReturnLive,
 }: {
   activeId?: string;
-  error: string;
   isDrawerOpen: boolean;
   isLoading: boolean;
   isOpen: boolean;
@@ -2086,7 +2340,13 @@ function TranscriptHistorySidebar({
   const content = (
     <div className="flex h-full min-h-0 flex-col px-1.5 py-2">
       <div className="mb-4 flex h-9 items-center justify-between px-1">
-        <span className="text-[13px] font-semibold text-foreground">转录历史</span>
+        <Image
+          src="/echolens-logo.svg"
+          alt="EchoLens"
+          width={36}
+          height={32}
+          className="h-8 w-9 object-contain"
+        />
         <button
           type="button"
           onClick={onToggle}
@@ -2122,7 +2382,7 @@ function TranscriptHistorySidebar({
           onClick={onNew}
           className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
         >
-          <Plus className="size-4 shrink-0 text-cyan" aria-hidden="true" />
+          <SquarePen className="size-4 shrink-0 text-cyan" aria-hidden="true" />
           新建转录
         </button>
         <label className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
@@ -2135,9 +2395,17 @@ function TranscriptHistorySidebar({
           />
         </label>
       </div>
-      <div className="mt-6 px-2.5 text-[13px] font-semibold text-foreground">最近</div>
+      <div className="mt-4 border-t border-white/10 pt-2">
+        <Link
+          href="/douyin/favorites"
+          className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
+        >
+          <Star className="size-4 shrink-0 text-amber" aria-hidden="true" />
+          收藏与关注
+        </Link>
+      </div>
+      <div className="mt-5 px-2.5 text-[13px] font-semibold text-foreground">最近</div>
       <div className="content-scroll mt-2 min-h-0 flex-1 overflow-auto pb-3">
-        {error ? <div className="px-2 py-2 text-xs text-amber">{error}</div> : null}
         {isLoading ? (
           <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin text-cyan" />
@@ -2198,7 +2466,7 @@ function TranscriptHistorySidebar({
               aria-label="新建转录"
               title="新建转录"
             >
-              <Plus className="size-4" aria-hidden="true" />
+              <SquarePen className="size-4" aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -2209,6 +2477,14 @@ function TranscriptHistorySidebar({
             >
               <Search className="size-4" aria-hidden="true" />
             </button>
+            <Link
+              href="/douyin/favorites"
+              className="mt-1 inline-flex size-8 items-center justify-center rounded-md text-amber transition hover:bg-amber/[0.1]"
+              aria-label="收藏与关注"
+              title="收藏与关注"
+            >
+              <Star className="size-4" aria-hidden="true" />
+            </Link>
           </div>
         )}
       </aside>

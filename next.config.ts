@@ -1,10 +1,16 @@
 import type { NextConfig } from "next";
+import { networkInterfaces } from "node:os";
+
+const localDevOrigins = Object.values(networkInterfaces())
+  .flatMap((addresses) => addresses ?? [])
+  .filter((address) => address.family === "IPv4" && !address.internal)
+  .map((address) => address.address);
 
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
-  allowedDevOrigins: ["172.16.100.121", "*.local"],
+  allowedDevOrigins: localDevOrigins,
   async headers() {
     const securityHeaders = [
       { key: "X-Content-Type-Options", value: "nosniff" },

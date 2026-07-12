@@ -1,0 +1,175 @@
+import { randomBytes } from "node:crypto";
+import { fetchWithRetry } from "@/lib/http/retry";
+import { signDouyinUrl } from "./xbogus";
+
+export const DOUYIN_BASE_URL = "https://www.douyin.com";
+
+const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
+const REQUEST_TIMEOUT_MS = 15_000;
+
+export class DouyinApiError extends Error {
+  constructor(
+    message: string,
+    readonly code: "INVALID_COOKIE" | "LOGIN_REQUIRED" | "UPSTREAM_ERROR",
+  ) {
+    super(message);
+  }
+}
+
+export type DouyinWebClient = {
+  getSelfProfile(attempts?: number): Promise<Record<string, unknown>>;
+  query(): Record<string, string>;
+  request(
+    path: string,
+    params: Record<string, string | number>,
+    attempts?: number,
+  ): Promise<Record<string, unknown>>;
+};
+
+export function createDouyinWebClient(value: string): DouyinWebClient {
+  const cookie = normalizeCookie(value);
+  const cookieMap = parseCookie(cookie);
+  if (!cookie || !hasLoginCookie(cookieMap)) {
+    throw new DouyinApiError("访问凭证不完整，请重新获取。", "INVALID_COOKIE");
+  }
+
+  const headers = {
+    accept: "application/json, text/plain, */*",
+    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    cookie,
+    referer: "https://www.douyin.com/user/self",
+    "user-agent": DEFAULT_USER_AGENT,
+  };
+
+  async function request(
+    path: string,
+    params: Record<string, string | number>,
+    attempts = 3,
+  ): Promise<Record<string, unknown>> {
+    const url = new URL(path, DOUYIN_BASE_URL);
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, String(value));
+    }
+
+    const signed = signDouyinUrl(url.toString(), DEFAULT_USER_AGENT);
+    const response = await fetchWithRetry(signed.url, {
+      cache: "no-store",
+      headers: { ...headers, "user-agent": signed.userAgent },
+      retry: { attempts, timeoutMs: REQUEST_TIMEOUT_MS },
+    });
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw new DouyinApiError("抖音接口暂时不可用，请稍后重试。", "UPSTREAM_ERROR");
+    }
+    if (!text.trim()) {
+      throw new DouyinApiError("访问凭证无效或已触发抖音验证，请重新获取。", "LOGIN_REQUIRED");
+    }
+
+    const payload = parseJson(text);
+    if (!payload) {
+      throw new DouyinApiError("抖音响应格式异常。", "UPSTREAM_ERROR");
+    }
+    if (isLoginRequired(payload)) {
+      throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED");
+    }
+    return payload;
+  }
+
+  function query(): Record<string, string> {
+    return {
+      device_platform: "webapp",
+      aid: "6383",
+      channel: "channel_pc_web",
+      update_version_code: "170400",
+      pc_client_type: "1",
+      pc_libra_divert: "Windows",
+      cookie_enabled: "true",
+      screen_width: "1536",
+      screen_height: "864",
+      browser_language: "zh-CN",
+      browser_platform: "Win32",
+      browser_name: "Chrome",
+      browser_version: "139.0.0.0",
+      browser_online: "true",
+      engine_name: "Blink",
+      engine_version: "139.0.0.0",
+      os_name: "Windows",
+      os_version: "10",
+      cpu_core_num: "16",
+      device_memory: "8",
+      platform: "PC",
+      downlink: "10",
+      effective_type: "4g",
+      round_trip_time: "200",
+      support_h265: "1",
+      support_dash: "1",
+      uifid: "",
+      msToken: cookieMap.msToken || randomBytes(80).toString("base64url"),
+    };
+  }
+
+  return {
+    async getSelfProfile(attempts = 3) {
+      return readRecord((await request("/aweme/v1/web/user/profile/self/", query(), attempts)).user);
+    },
+    query,
+    request,
+  };
+}
+
+export function normalizeCookie(value: string): string {
+  return value
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
+function parseCookie(cookie: string): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const part of cookie.split(";")) {
+    const index = part.indexOf("=");
+    if (index <= 0) {
+      continue;
+    }
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key && value) {
+      entries[key] = value;
+    }
+  }
+  return entries;
+}
+
+function hasLoginCookie(cookies: Record<string, string>): boolean {
+  return Boolean(cookies.sessionid || cookies.sessionid_ss || cookies.sid_guard || cookies.sid_tt);
+}
+
+function isLoginRequired(payload: Record<string, unknown>): boolean {
+  const statusCode = Number(payload.status_code ?? 0);
+  const message = String(payload.status_msg ?? "");
+  const loginTip = payload.not_login_module;
+  return statusCode === 2483 ||
+    message.includes("请先登录") ||
+    Boolean(loginTip && typeof loginTip === "object");
+}
+
+function parseJson(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return readRecord(parsed, null);
+  } catch {
+    return null;
+  }
+}
+
+function readRecord(value: unknown): Record<string, unknown>;
+function readRecord(value: unknown, fallback: null): Record<string, unknown> | null;
+function readRecord(value: unknown, fallback: Record<string, unknown> | null = {}): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : fallback;
+}

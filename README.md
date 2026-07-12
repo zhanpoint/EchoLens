@@ -37,6 +37,7 @@ POSTGRES_POOL_MAX="10"
 FFMPEG_PATH=""
 AUTH_SESSION_SECRET=""
 AUTH_EMAIL_CODE_SECRET=""
+DATA_ENCRYPTION_KEY=""
 SMTP_HOST="smtpdm.aliyun.com"
 SMTP_PORT="465"
 SMTP_USER="notify@echolens.dreamlog.xyz"
@@ -46,7 +47,7 @@ SMTP_USE_SSL="true"
 SMTP_USE_TLS="false"
 ```
 
-`AUTH_SESSION_SECRET` 用于签名登录 Cookie，`AUTH_EMAIL_CODE_SECRET` 用于哈希邮箱验证码，生产环境必须使用 32 位以上随机字符串并保存在服务器 `.env`。如果这些密钥泄露，需要重新生成并替换。`DATABASE_URL` 是本地开发连接 PostgreSQL 的连接串，默认 `postgres://postgres:333444@localhost:5432/postgres`；线上 Docker Compose 会用 `POSTGRES_DB=echolens`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 生成容器内连接串并访问 `postgres:5432`。`POSTGRES_POOL_MAX` 控制服务端连接池上限。SMTP 用于注册验证码、重置密码验证码和登录提醒发送。`FFMPEG_PATH` 可指定服务器上的 ffmpeg 可执行文件路径，留空时使用随包安装的 ffmpeg。
+`AUTH_SESSION_SECRET` 用于签名登录 Cookie，`AUTH_EMAIL_CODE_SECRET` 用于哈希邮箱验证码，`DATA_ENCRYPTION_KEY` 用于加密抖音访问凭证。生产环境必须分别配置 32 位以上的随机字符串并保存在服务器 `.env`，不得提交到代码仓库；密钥泄露后应立即轮换。`DATABASE_URL` 是本地开发连接 PostgreSQL 的连接串，默认 `postgres://postgres:333444@localhost:5432/postgres`；线上 Docker Compose 会用 `POSTGRES_DB=echolens`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 生成容器内连接串并访问 `postgres:5432`。`POSTGRES_POOL_MAX` 控制服务端连接池上限。SMTP 用于注册验证码、重置密码验证码和登录提醒发送。`FFMPEG_PATH` 可指定服务器上的 ffmpeg 可执行文件路径，留空时使用随包安装的 ffmpeg。
 
 视频音频转录使用 DashScope。`DASHSCOPE_BASE_URL` 使用百炼业务空间对应地域的 `/api/v1` 地址，`DASHSCOPE_ASR_MODEL_E1` 和 `DASHSCOPE_ASR_MODEL_E2` 分别配置 E1/E2 的真实转录模型。E1 与 E2 都走 DashScope 异步转录任务，单个音频文件大小不超过 2GB、时长不超过 12 小时；E1 固定开启情感识别和时间戳，句级时间戳使用 `enable_words: false`，不支持说话人分离和敏感词过滤；E2 支持说话人分离和敏感词过滤。翻译使用 `DASHSCOPE_TRANSLATION_BASE_URL` 的 OpenAI 兼容 `/compatible-mode/v1` 地址和 `DASHSCOPE_TRANSLATION_MODEL`，默认 `qwen-mt-flash`。转录后处理和 AI 总结共用 `DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL`。转录任务和历史记录会写入 PostgreSQL，并尽力删除临时 OSS 对象。OSS 生命周期规则仍建议保留，用于清理异常中断时遗留的 `echolens/asr/` 临时文件。
 

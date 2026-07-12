@@ -165,6 +165,8 @@ const SCHEMA_STATEMENTS = [
       PRIMARY KEY (user_id, category)
     )`,
   "CREATE INDEX IF NOT EXISTS user_settings_user_id_idx ON user_settings(user_id)",
+  "DROP TABLE IF EXISTS douyin_favorites_cache",
+  "DROP TABLE IF EXISTS douyin_following_cache",
   `CREATE TABLE IF NOT EXISTS transcript_asr_audio_cache (
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       work_key text NOT NULL,

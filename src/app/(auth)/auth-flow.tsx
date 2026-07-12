@@ -16,6 +16,8 @@ import {
   UserRound,
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { ShineBorder } from "@/components/ui/shine-border";
+import { getEmailError, getPasswordError, getUsernameError } from "@/lib/auth/policy";
 import { cn } from "@/lib/utils";
 
 type AuthMode = "forgot" | "login" | "register";
@@ -55,14 +57,11 @@ const initialState: FormState = {
 };
 
 const AUTH_DESCRIPTION = "为您提供个性化服务和更好的体验。";
-const MODE_COPY: Record<AuthMode, { body: string; title: string }> = {
-  forgot: { body: AUTH_DESCRIPTION, title: "重置密码" },
+const MODE_COPY: Record<AuthMode, { body?: string; title: string }> = {
+  forgot: { title: "重置密码" },
   login: { body: AUTH_DESCRIPTION, title: "登录" },
   register: { body: AUTH_DESCRIPTION, title: "注册" },
 };
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const USERNAME_PATTERN = /^[\p{L}\p{N}_-]{3,24}$/u;
 
 export function AuthFlow({ mode }: { mode: AuthMode }) {
   const router = useRouter();
@@ -81,7 +80,7 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
   const canSendCode = useMemo(
     () =>
       (mode === "register" || mode === "forgot" || loginMethod === "code") &&
-      !validateEmail(form.email) &&
+      !getEmailError(form.email) &&
       cooldown <= 0 &&
       !sendingCode,
     [cooldown, form.email, loginMethod, mode, sendingCode],
@@ -228,9 +227,10 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
           <span className="text-lg font-semibold">EchoLens</span>
         </Link>
 
-        <div className="mx-auto flex min-h-[100dvh] w-full max-w-2xl items-start justify-center px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-24 sm:items-center sm:px-6 sm:py-20">
+        <div className="mx-auto flex min-h-[100dvh] w-full max-w-xl items-start justify-center px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-24 sm:items-center sm:px-6 sm:py-16">
           <section className="flex w-full items-center justify-center">
-            <div className="relative w-full max-w-lg rounded-lg border border-white/12 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.07),rgb(255_255_255_/_0.035))] p-5 shadow-[0_24px_80px_rgb(0_0_0_/_0.34),inset_0_1px_0_rgb(255_255_255_/_0.08)] backdrop-blur-xl sm:p-6">
+            <div className="relative w-full max-w-md rounded-lg border border-white/12 bg-[linear-gradient(180deg,rgb(255_255_255_/_0.07),rgb(255_255_255_/_0.035))] p-[clamp(1rem,2.2vh,1.25rem)] shadow-[0_24px_80px_rgb(0_0_0_/_0.34),inset_0_1px_0_rgb(255_255_255_/_0.08)] backdrop-blur-xl">
+              <ShineBorder duration={12} shineColor={["#22d3ee", "#8b5cf6", "#f59e0b"]} />
               <button
                 type="button"
                 onClick={goBack}
@@ -241,12 +241,12 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                 <ArrowLeft className="size-6" aria-hidden="true" strokeWidth={2.35} />
               </button>
 
-              <div className="mb-6 text-center">
+              <div className="mb-[clamp(1rem,2.2vh,1.25rem)] text-center">
                 <h2 className="text-2xl font-semibold tracking-tight text-foreground">{copy.title}</h2>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">{copy.body}</p>
+                {copy.body ? <p className="mt-1.5 text-sm leading-5 text-muted-foreground">{copy.body}</p> : null}
               </div>
 
-              <form onSubmit={submit} className="grid gap-4">
+              <form onSubmit={submit} className="grid gap-[clamp(0.75rem,1.6vh,0.875rem)]">
                 {mode === "register" ? (
                   <TextField
                     autoComplete="username"
@@ -285,7 +285,7 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                       />
                     )}
                   </>
-                ) : (
+                ) : mode === "forgot" ? (
                   <TextField
                     autoComplete="email"
                     error={fieldError("email")}
@@ -296,7 +296,7 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                     type="email"
                     value={form.email}
                   />
-                )}
+                ) : null}
 
                 {mode !== "login" || loginMethod === "password" ? (
                   <PasswordField
@@ -317,6 +317,19 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                     onChange={(value) => update("confirmPassword", value)}
                     placeholder="再次输入密码"
                     value={form.confirmPassword}
+                  />
+                ) : null}
+
+                {mode === "register" ? (
+                  <TextField
+                    autoComplete="email"
+                    error={fieldError("email")}
+                    icon={<Mail className="size-4" />}
+                    label="邮箱"
+                    onChange={(value) => update("email", value)}
+                    placeholder="name@example.com"
+                    type="email"
+                    value={form.email}
                   />
                 ) : null}
 
@@ -343,14 +356,14 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
                   </div>
                 )}
 
-                {error ? <p className="rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-red-200">{error}</p> : null}
+                {error ? <p className="rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-red-200">{error}</p> : null}
                 {notice ? <p className="rounded-md border border-cyan/20 bg-cyan/[0.08] px-3 py-2 text-sm text-cyan">{notice}</p> : null}
 
                 <button
                   type="submit"
                   disabled={loading || !canSubmit}
                   className={cn(
-                    "mt-1 inline-flex h-11 items-center justify-center gap-2 rounded-md px-4 text-sm font-semibold transition active:scale-[0.98]",
+                    "mt-0.5 inline-flex h-10 items-center justify-center gap-2 rounded-md px-4 text-sm font-semibold transition active:scale-[0.98]",
                     canSubmit
                       ? "bg-cyan text-black hover:brightness-110 disabled:cursor-wait disabled:opacity-65"
                       : "cursor-not-allowed border border-white/12 bg-muted text-muted-foreground",
@@ -465,11 +478,11 @@ function TextField({
   value: string;
 }) {
   return (
-    <label className="grid gap-2">
+    <label className="grid gap-1.5">
       <span className="text-sm font-semibold text-foreground">{label}</span>
       <span
         className={cn(
-          "flex h-11 items-center gap-2 rounded-md border bg-white/[0.055] px-3 text-muted-foreground transition focus-within:ring-2",
+          "flex h-10 items-center gap-2 rounded-md border bg-white/[0.055] px-3 text-muted-foreground transition focus-within:ring-2",
           error
             ? "border-destructive/65 focus-within:border-destructive/80 focus-within:ring-destructive/15"
             : "border-white/15 focus-within:border-cyan/60 focus-within:ring-cyan/15",
@@ -508,11 +521,11 @@ function PasswordField({
 }) {
   const [visible, setVisible] = useState(false);
   return (
-    <label className="grid gap-2">
+    <label className="grid gap-1.5">
       <span className="text-sm font-semibold text-foreground">{label}</span>
       <span
         className={cn(
-          "flex h-11 items-center gap-2 rounded-md border bg-white/[0.055] px-3 text-muted-foreground transition focus-within:ring-2",
+          "flex h-10 items-center gap-2 rounded-md border bg-white/[0.055] px-3 text-muted-foreground transition focus-within:ring-2",
           error
             ? "border-destructive/65 focus-within:border-destructive/80 focus-within:ring-destructive/15"
             : "border-white/15 focus-within:border-cyan/60 focus-within:ring-cyan/15",
@@ -561,13 +574,13 @@ function CodeField({
   sending: boolean;
 }) {
   return (
-    <label className="grid gap-2">
+    <label className="grid gap-1.5">
       <span className="text-sm font-semibold text-foreground">邮箱验证码</span>
       <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <input
           autoComplete="one-time-code"
           className={cn(
-            "auth-input h-11 min-w-0 rounded-md border bg-white/[0.055] px-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:ring-2",
+            "auth-input h-10 min-w-0 rounded-md border bg-white/[0.055] px-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/70 focus:ring-2",
             error
               ? "border-destructive/65 focus:border-destructive/80 focus:ring-destructive/15"
               : "border-white/15 focus:border-cyan/60 focus:ring-cyan/15",
@@ -584,7 +597,7 @@ function CodeField({
           onClick={onSend}
           disabled={!canSend}
           className={cn(
-            "inline-flex h-11 w-full items-center justify-center gap-2 rounded-md border border-white/12 bg-white/[0.065] px-3 text-sm font-semibold text-foreground transition hover:border-cyan/35 hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 sm:w-auto sm:min-w-28",
+            "inline-flex h-10 w-full items-center justify-center gap-2 whitespace-nowrap rounded-md border border-white/12 bg-white/[0.065] px-3 text-sm font-semibold text-foreground transition hover:border-cyan/35 hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-55 sm:w-auto sm:min-w-24",
             sending ? "disabled:cursor-wait" : "",
           )}
         >
@@ -599,7 +612,7 @@ function CodeField({
 
 function LegalConsent({ checked, onChange }: { checked: boolean; onChange: (value: boolean) => void }) {
   return (
-    <label className="flex min-w-0 cursor-pointer items-center gap-2 text-xs leading-5 text-muted-foreground">
+    <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[0.6875rem] leading-4 text-muted-foreground">
       <span className="relative shrink-0">
         <input
           checked={checked}
@@ -635,19 +648,19 @@ function getFieldErrors(
   const errors: Partial<Record<FieldName, string>> = {};
 
   if (mode === "register") {
-    errors.username = validateUsername(form.username);
+    errors.username = getUsernameError(form.username);
   }
 
   if (mode === "login" && loginMethod === "password") {
     errors.identifier = validateIdentifier(form.identifier);
-    errors.password = validateLoginPassword(form.password);
+    errors.password = getPasswordError(form.password);
   } else {
-    errors.email = validateEmail(form.email);
+    errors.email = getEmailError(form.email);
     errors.code = validateCode(form.code);
   }
 
   if (mode !== "login") {
-    errors.password = validateStrongPassword(form.password);
+    errors.password = getPasswordError(form.password);
     errors.confirmPassword = validateConfirmPassword(form.confirmPassword, form.password);
   }
 
@@ -656,68 +669,15 @@ function getFieldErrors(
   >;
 }
 
-function validateUsername(value: string): string | undefined {
-  const username = value.trim();
-  if (!username) {
-    return "请输入用户名。";
-  }
-  if (!USERNAME_PATTERN.test(username)) {
-    return "用户名需为 3 到 24 位，可包含中文、字母、数字、下划线或短横线。";
-  }
-}
-
 function validateIdentifier(value: string): string | undefined {
   const identifier = value.trim();
   if (!identifier) {
     return "请输入用户名或邮箱。";
   }
   if (identifier.includes("@")) {
-    return validateEmail(identifier);
+    return getEmailError(identifier);
   }
-  if (!USERNAME_PATTERN.test(identifier)) {
-    return "用户名需为 3 到 24 位，可包含中文、字母、数字、下划线或短横线。";
-  }
-}
-
-function validateEmail(value: string): string | undefined {
-  const email = value.trim();
-  if (!email) {
-    return "请输入邮箱。";
-  }
-  if (email.length > 254 || !EMAIL_PATTERN.test(email)) {
-    return "请输入有效邮箱地址。";
-  }
-}
-
-function validateLoginPassword(value: string): string | undefined {
-  if (!value) {
-    return "请输入密码。";
-  }
-  if (value.length > 128) {
-    return "密码不能超过 128 个字符。";
-  }
-}
-
-function validateStrongPassword(value: string): string | undefined {
-  if (!value) {
-    return "请输入密码。";
-  }
-  if (value.length < 8) {
-    return "密码至少需要 8 个字符。";
-  }
-  if (value.length > 128) {
-    return "密码不能超过 128 个字符。";
-  }
-  const typeCount = [
-    /[a-z]/.test(value),
-    /[A-Z]/.test(value),
-    /\d/.test(value),
-    /[^A-Za-z0-9]/.test(value),
-  ].filter(Boolean).length;
-
-  if (typeCount < 3) {
-    return "密码需包含至少 3 种字符类型。";
-  }
+  return getUsernameError(identifier);
 }
 
 function validateConfirmPassword(value: string, password: string): string | undefined {
@@ -812,8 +772,11 @@ function readNetworkError(error: unknown): string {
 
 function formatRequestError(status: number, code: string | undefined): string {
   if (status === 401) {
-    if (code === "ACCOUNT_NOT_FOUND") {
-      return "账号不存在，请检查用户名或邮箱，或先注册账号。";
+    if (code === "USERNAME_NOT_FOUND") {
+      return "该用户名不存在，请检查后重试。";
+    }
+    if (code === "EMAIL_NOT_FOUND") {
+      return "该邮箱尚未注册，请先注册账号。";
     }
     if (code === "INVALID_PASSWORD") {
       return "密码错误，请重新输入，或使用“忘记密码”重置。";
@@ -821,6 +784,9 @@ function formatRequestError(status: number, code: string | undefined): string {
     return "登录状态无效，请重新登录。";
   }
   if (status === 400) {
+    if (code === "INVALID_IDENTIFIER" || code === "INVALID_PASSWORD_FORMAT") {
+      return "用户名、邮箱或密码格式不符合要求，请检查后重试。";
+    }
     return "提交信息不完整或格式不正确，请检查后重试。";
   }
   if (status === 429) {

@@ -17,19 +17,4 @@ describe("auth email templates", () => {
     expect(content.html).toContain("123456");
     expect(content.text).toContain("验证码: 123456");
   });
-
-  it("renders login notice without exposing unsafe HTML", () => {
-    const content = buildAuthEmailContent({
-      copy: {
-        description: "你的 EchoLens 账户刚刚完成登录。如果不是你本人操作，请尽快重置密码。",
-        subject: "EchoLens - 登录提醒",
-        title: "登录提醒",
-      },
-      username: "<admin>",
-    });
-
-    expect(content.html).toContain("&lt;admin&gt;");
-    expect(content.html).not.toContain("<admin>");
-    expect(content.text).toContain("登录账户: <admin>");
-  });
 });

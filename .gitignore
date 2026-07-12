@@ -19,6 +19,8 @@
 
 # production
 /build
+/dist
+/public/downloads/*.exe
 
 # misc
 .DS_Store
@@ -53,6 +55,8 @@ next-env.d.ts
 # 测试文件
 /src/test/*
 !/src/test/auth-db.test.ts
+!/src/test/douyin-favorites.test.ts
 !/src/test/postgres-test-utils.ts
 !/src/test/postgres.test.ts
 !/src/test/transcript-db.test.ts
+!/src/test/user-settings-route.test.ts

@@ -26,3 +26,24 @@ export function uniqueMediaReferences(urls: string[]): string[] {
     ),
   );
 }
+
+export function readDouyinAvatarUrl(user: Record<string, unknown>): string {
+  for (const key of ["avatar_thumb", "avatar_medium", "avatar_larger"] as const) {
+    const source = readRecord(user[key]);
+    const urls = Array.isArray(source.url_list) ? source.url_list : [];
+    const url = urls.find(
+      (value): value is string =>
+        typeof value === "string" && /^https?:\/\//i.test(value.trim()),
+    );
+    if (url) {
+      return url.trim();
+    }
+  }
+  return "";
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}

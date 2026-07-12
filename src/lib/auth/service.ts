@@ -11,7 +11,8 @@ import {
   updateUserPassword,
 } from "@/lib/auth/db";
 import { verifyEmailCode } from "@/lib/auth/email";
-import { hashPassword, validatePassword, verifyPassword } from "@/lib/auth/password";
+import { hashPassword, verifyPassword } from "@/lib/auth/password";
+import { getEmailError, getUsernameError, validatePassword } from "@/lib/auth/policy";
 import {
   createSessionCookieValue,
   readSessionCookieValue,
@@ -72,12 +73,18 @@ export async function loginUser(input: {
 }): Promise<AuthUser> {
   assertLegalAccepted(input.acceptedLegal);
   const identifier = input.identifier.trim();
+  const identifierError = identifier.includes("@") ? getEmailError(identifier) : getUsernameError(identifier);
+  if (identifierError) {
+    throw new AuthError(identifierError, 400, "INVALID_IDENTIFIER");
+  }
+  assertPassword(input.password, "INVALID_PASSWORD_FORMAT");
+
   const user = await findUserByIdentifier(identifier);
   if (!user) {
     throw new AuthError(
       identifier.includes("@") ? "该邮箱尚未注册，请先注册账号。" : "该用户名不存在，请检查后重试。",
       401,
-      "ACCOUNT_NOT_FOUND",
+      identifier.includes("@") ? "EMAIL_NOT_FOUND" : "USERNAME_NOT_FOUND",
     );
   }
   if (!(await verifyPassword(input.password, user.password_hash))) {
@@ -168,10 +175,10 @@ export async function deleteCurrentSessionFromRequest(request: Request): Promise
   }
 }
 
-export function assertPassword(password: string): void {
+export function assertPassword(password: string, code = "AUTH_ERROR"): void {
   const validation = validatePassword(password);
   if (!validation.valid) {
-    throw new AuthError(validation.errors[0] ?? "密码强度不足。");
+    throw new AuthError(validation.errors[0] ?? "密码强度不足。", 400, code);
   }
 }
 
@@ -191,8 +198,9 @@ async function readCurrentUserFromCookieValue(value: string | undefined): Promis
 
 function normalizeUsername(username: string): string {
   const normalized = username.trim();
-  if (!/^[\p{L}\p{N}_-]{3,24}$/u.test(normalized)) {
-    throw new AuthError("用户名需为 3 到 24 位，可包含中文、字母、数字、下划线或短横线。");
+  const error = getUsernameError(normalized);
+  if (error) {
+    throw new AuthError(error);
   }
   return normalized;
 }

@@ -18,23 +18,17 @@ const LOGO_CID = "echolens-logo";
 
 export type EmailCodePurpose = "login" | "reset" | "signup";
 
-type AuthEmailKind = EmailCodePurpose | "loginNotice";
 type AuthEmailCopy = {
   description: string;
   subject: string;
   title: string;
 };
 
-const AUTH_EMAIL_COPY: Record<AuthEmailKind, AuthEmailCopy> = {
+const AUTH_EMAIL_COPY: Record<EmailCodePurpose, AuthEmailCopy> = {
   login: {
     description: "你正在登录 EchoLens，请使用以下验证码完成验证。",
     subject: "EchoLens - 登录验证码",
     title: "登录验证码",
-  },
-  loginNotice: {
-    description: "你的 EchoLens 账户刚刚完成登录。如果不是你本人操作，请尽快重置密码。",
-    subject: "EchoLens - 登录提醒",
-    title: "登录提醒",
   },
   reset: {
     description: "你正在重置 EchoLens 账户密码，请使用以下验证码完成验证。",
@@ -67,17 +61,6 @@ export async function sendEmailCode(email: string, purpose: EmailCodePurpose): P
   });
 
   await sendVerificationEmail(email, code, purpose);
-}
-
-export async function sendLoginNoticeEmail(email: string, username: string): Promise<void> {
-  if (!hasSmtpConfig()) {
-    return;
-  }
-  await sendAuthEmail({
-    copy: AUTH_EMAIL_COPY.loginNotice,
-    email,
-    username,
-  });
 }
 
 export async function verifyEmailCode(email: string, purpose: EmailCodePurpose, code: string): Promise<boolean> {
@@ -133,10 +116,9 @@ async function sendVerificationEmail(email: string, code: string, purpose: Email
 }
 
 async function sendAuthEmail(input: {
-  code?: string;
+  code: string;
   copy: AuthEmailCopy;
   email: string;
-  username?: string;
 }): Promise<void> {
   const config = readSmtpConfig();
   const transporter = nodemailer.createTransport({
@@ -162,10 +144,6 @@ async function sendAuthEmail(input: {
     text: content.text,
     to: input.email,
   });
-}
-
-export function hasSmtpConfig(): boolean {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD);
 }
 
 function readSmtpConfig(): {
@@ -212,23 +190,18 @@ function readLogoAttachment(): { cid: string; filename: string; path: string }[]
 }
 
 export function buildAuthEmailContent(input: {
-  code?: string;
+  code: string;
   copy: AuthEmailCopy;
-  username?: string;
 }): { html: string; text: string } {
   const safeTitle = escapeHtml(input.copy.title);
   const safeDescription = escapeHtml(input.copy.description);
-  const safeUsername = input.username ? escapeHtml(input.username) : "";
-  const codeBlock = input.code
-    ? `<div style="text-align:center;margin:30px 0;">
+  const safeCode = escapeHtml(input.code);
+  const codeBlock = `<div style="text-align:center;margin:30px 0;">
                 <div style="display:inline-block;padding:18px 34px;border-radius:12px;background:#111827;color:#20efd0;font-size:32px;font-weight:800;letter-spacing:8px;font-family:'Courier New',monospace;">
-                  ${escapeHtml(input.code)}
+                  ${safeCode}
                 </div>
               </div>
-              <p style="margin:24px 0 0;color:#64748b;font-size:14px;line-height:1.7;text-align:center;">此验证码 5 分钟内有效</p>`
-    : `<div style="margin:28px 0;padding:20px 24px;border-radius:12px;background:#f1f5f9;color:#0f172a;font-size:15px;line-height:1.8;text-align:center;">
-                ${safeUsername ? `登录账户：<strong>${safeUsername}</strong><br />` : ""}如非本人操作，请立即重置密码
-              </div>`;
+              <p style="margin:24px 0 0;color:#64748b;font-size:14px;line-height:1.7;text-align:center;">此验证码 5 分钟内有效</p>`;
 
   return {
     html: `<!DOCTYPE html>
@@ -268,9 +241,9 @@ export function buildAuthEmailContent(input: {
 
 ${input.copy.description}
 
-${input.code ? `验证码: ${input.code}` : input.username ? `登录账户: ${input.username}` : "登录提醒"}
+验证码: ${input.code}
 
-${input.code ? "此验证码 5 分钟内有效，请勿泄露给他人。" : "如果不是你本人登录，请立即重置密码并检查邮箱安全。"}
+此验证码 5 分钟内有效，请勿泄露给他人。
 
 如果这不是你的操作，请忽略此邮件。
 

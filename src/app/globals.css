@@ -32,6 +32,21 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) * 1.4);
   --radius-2xl: calc(var(--radius) * 1.8);
+  --animate-shine: shine var(--duration) infinite linear;
+}
+
+@keyframes shine {
+  0% {
+    background-position: 0% 0%;
+  }
+
+  50% {
+    background-position: 100% 100%;
+  }
+
+  100% {
+    background-position: 0% 0%;
+  }
 }
 
 :root {
@@ -218,6 +233,19 @@ body::-webkit-scrollbar-button {
 
 .content-scroll::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+.echolens-themed-select {
+  color-scheme: light;
+}
+
+.dark .echolens-themed-select {
+  color-scheme: dark;
+}
+
+.echolens-themed-select option {
+  background-color: var(--surface);
+  color: var(--foreground);
 }
 
 .summary-markdown {
@@ -479,6 +507,17 @@ body::-webkit-scrollbar-button {
 
   to {
     background-position: 0% 0;
+  }
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
