@@ -16,7 +16,7 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@radix-ui/react-select": "^2.3.3",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.17.0",
+    "lucide-react": "^1.24.0",
     "next": "16.2.7",
     "nodemailer": "^9.0.1",
     "pg": "^8.22.0",
