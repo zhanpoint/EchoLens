@@ -50,8 +50,5 @@ function readEncryptionKey(): Buffer {
   if (secret && secret.length >= 32) {
     return createHash("sha256").update(secret).digest();
   }
-  if (process.env.NODE_ENV !== "production") {
-    return createHash("sha256").update("echolens-local-development-data-key").digest();
-  }
-  throw new Error("DATA_ENCRYPTION_KEY must be at least 32 characters in production.");
+  throw new Error("DATA_ENCRYPTION_KEY must be at least 32 characters.");
 }
