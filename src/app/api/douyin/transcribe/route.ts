@@ -12,6 +12,7 @@ import {
   type DashScopeAsrModelProfile,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
+import { runWithTranscriptPostprocessOptions } from "@/lib/dashscope/transcript-postprocess";
 import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
 import { upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
 import {
@@ -61,11 +62,14 @@ const TranscribeSchema = z.object({
   model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE]).optional(),
   specialWordFilter: SpecialWordFilterSchema.optional(),
   speakerCount: z.coerce.number().int().min(1).max(10).optional(),
+  thinkingEnabled: z.boolean().optional(),
   work: WorkSchema,
 }).strict();
 
 const ReadJobSchema = z.object({
   jobId: z.string().min(1).max(128),
+  thinking: z.enum(["0", "1"]).optional(),
+  title: z.string().max(2000).optional(),
 }).strict();
 
 type TranscribeStreamEvent =
@@ -99,28 +103,34 @@ export async function POST(request: Request) {
 
     const asrOptions = buildAsrOptions(parsed.data);
     return streamTranscribeOperation(
-      ({ onPostprocessStart }) => transcribeDashScopeAsr(
-        user.id,
-        buildWorkCacheKey(work),
+      ({ onPostprocessStart }) => runWithTranscriptPostprocessOptions(
         {
-          durationSeconds: work.durationSeconds ?? 0,
-          objectKey: audioObjectKey,
-          signedUrl: audioUrl,
+          thinkingEnabled: parsed.data.thinkingEnabled,
+          title: work.title,
         },
-        asrOptions,
-        {
-          postprocess: {
-            onStart: onPostprocessStart,
+        () => transcribeDashScopeAsr(
+          user.id,
+          buildWorkCacheKey(work),
+          {
+            durationSeconds: work.durationSeconds ?? 0,
+            objectKey: audioObjectKey,
+            signedUrl: audioUrl,
           },
-          ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
-          ...(parsed.data.historyRecordId ? {
-            historyContext: {
-              historyRecordId: parsed.data.historyRecordId,
-              work,
+          asrOptions,
+          {
+            postprocess: {
+              onStart: onPostprocessStart,
             },
-          } : {}),
-          signal: request.signal,
-        },
+            ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
+            ...(parsed.data.historyRecordId ? {
+              historyContext: {
+                historyRecordId: parsed.data.historyRecordId,
+                work,
+              },
+            } : {}),
+            signal: request.signal,
+          },
+        ),
       ),
       {
         fallbackAsrModel: asrOptions.model,
@@ -148,18 +158,26 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const parsed = ReadJobSchema.safeParse({
     jobId: url.searchParams.get("jobId"),
+    thinking: url.searchParams.get("thinking") ?? undefined,
+    title: url.searchParams.get("title") ?? undefined,
   });
   if (!parsed.success) {
     return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
   }
 
   return streamTranscribeOperation(
-    ({ onPostprocessStart }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
-      postprocess: {
-        onStart: onPostprocessStart,
+    ({ onPostprocessStart }) => runWithTranscriptPostprocessOptions(
+      {
+        thinkingEnabled: parsed.data.thinking === "1",
+        title: parsed.data.title,
       },
-      signal: request.signal,
-    }),
+      () => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+        postprocess: {
+          onStart: onPostprocessStart,
+        },
+        signal: request.signal,
+      }),
+    ),
     {
       userId: user.id,
     },

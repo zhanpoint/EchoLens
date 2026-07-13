@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
   AudioLines,
+  Brain,
   ChevronDown,
   ChevronUp,
   Check,
@@ -35,6 +36,7 @@ import {
   SquarePen,
   Star,
   Trash2,
+  type LucideIcon,
   UserRound,
   Volume2,
   X,
@@ -159,7 +161,12 @@ type LiveTranscribeSession = {
   historyRecordId: string;
   jobId: string;
   persisted: boolean;
+  thinkingEnabled?: boolean;
   workKey: string;
+};
+type TranscriptPostprocessControls = {
+  thinkingEnabled: boolean;
+  title?: string;
 };
 type CurrentTranscriptSnapshot = {
   input: string;
@@ -1006,6 +1013,10 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function getPostprocessStatusMessage(thinkingEnabled: boolean): string {
+  return `正在${thinkingEnabled ? "思考" : "极速"}优化转录结果...`;
+}
+
 function historyRecordToResult(record: TranscriptHistoryRecord): ExtractionResult {
   return {
     feature: TRANSCRIPT_FEATURE,
@@ -1044,6 +1055,7 @@ export default function HomePage() {
   const [isResolving, setIsResolving] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [asrModel, setAsrModel] = useState<AsrModelId>("e1");
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [qwenAsrItnEnabled, setQwenAsrItnEnabled] = useState(false);
   const [speakerDiarizationEnabled, setSpeakerDiarizationEnabled] = useState(false);
   const [speakerCount, setSpeakerCount] = useState("");
@@ -1090,6 +1102,7 @@ export default function HomePage() {
       setLastResolvedInput("");
       setLiveHistorySummariesByRecordId({});
       setLiveTranscribeSession(null);
+      setThinkingEnabled(false);
       setResults([]);
       setWork(null);
       return;
@@ -1098,6 +1111,7 @@ export default function HomePage() {
     setLastResolvedInput(snapshot.lastResolvedInput);
     setLiveHistorySummariesByRecordId(snapshot.liveHistorySummariesByRecordId);
     setLiveTranscribeSession(snapshot.liveTranscribeSession);
+    setThinkingEnabled(snapshot.liveTranscribeSession?.thinkingEnabled ?? false);
     setResults(snapshot.results);
     setWork(snapshot.work);
   }, []);
@@ -1643,7 +1657,13 @@ export default function HomePage() {
     const sessionWorkKey = activeWorkKey;
     const clientJobId = activeLiveSession?.jobId || createClientJobId();
     const historyRecordId = activeLiveSession?.historyRecordId || createHistoryRecordId();
-    const nextLiveSession = { historyRecordId, jobId: clientJobId, persisted: false, workKey: sessionWorkKey };
+    const nextLiveSession = {
+      historyRecordId,
+      jobId: clientJobId,
+      persisted: false,
+      thinkingEnabled,
+      workKey: sessionWorkKey,
+    };
     transcribeAbortControllerRef.current = controller;
     setIsTranscribing(true);
     setError(null);
@@ -1651,7 +1671,15 @@ export default function HomePage() {
 
     try {
       if (activeLiveSession?.jobId) {
-        await pollPendingTranscribeResult(activeLiveSession.jobId, requestId, controller.signal);
+        await pollPendingTranscribeResult(
+          activeLiveSession.jobId,
+          requestId,
+          controller.signal,
+          {
+            thinkingEnabled: activeLiveSession.thinkingEnabled ?? thinkingEnabled,
+            title: work.title,
+          },
+        );
         return;
       }
 
@@ -1674,6 +1702,7 @@ export default function HomePage() {
           model: asrModel,
           specialWordFilter,
           speakerCount: effectiveSpeakerCount,
+          thinkingEnabled,
           work,
         }),
         signal: controller.signal,
@@ -1682,7 +1711,10 @@ export default function HomePage() {
       if (outcome.type === "running") {
         setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
         setResults([]);
-        await pollPendingTranscribeResult(outcome.jobId, requestId, controller.signal);
+        await pollPendingTranscribeResult(outcome.jobId, requestId, controller.signal, {
+          thinkingEnabled,
+          title: work.title,
+        });
       }
     } catch (transcribeError) {
       if (isAbortError(transcribeError)) {
@@ -1751,12 +1783,13 @@ export default function HomePage() {
     jobId: string,
     requestId: number,
     signal: AbortSignal,
+    postprocess: TranscriptPostprocessControls,
   ) {
     let elapsedMs = 0;
     setLiveTranscribeSession((current) => current ? { ...current, jobId } : current);
 
     while (requestId === transcribeRequestIdRef.current && !signal.aborted) {
-      const settled = await fetchPendingTranscribeResult(jobId, signal);
+      const settled = await fetchPendingTranscribeResult(jobId, signal, postprocess);
       if (settled) {
         return;
       }
@@ -1774,12 +1807,20 @@ export default function HomePage() {
   async function fetchPendingTranscribeResult(
     jobId: string,
     signal: AbortSignal,
+    postprocess: TranscriptPostprocessControls,
   ): Promise<boolean> {
     if (!jobId) {
       return false;
     }
 
-    const response = await fetch(`/api/douyin/transcribe?jobId=${encodeURIComponent(jobId)}`, {
+    const query = new URLSearchParams({ jobId });
+    if (postprocess.thinkingEnabled) {
+      query.set("thinking", "1");
+    }
+    if (postprocess.title) {
+      query.set("title", postprocess.title);
+    }
+    const response = await fetch(`/api/douyin/transcribe?${query}`, {
       cache: "no-store",
       signal,
     });
@@ -1799,7 +1840,7 @@ export default function HomePage() {
 
     for await (const event of readJsonEventStream<TranscribeStreamEvent>(response.body)) {
       if (event.type === "postprocess_start") {
-        setTranscribeStatusMessage("正在后处理优化转录结果...");
+        setTranscribeStatusMessage(getPostprocessStatusMessage(thinkingEnabled));
       } else if (event.type === "running") {
         const eventWork = event.work;
         if (eventWork) {
@@ -1810,7 +1851,13 @@ export default function HomePage() {
         setLiveTranscribeSession((current) =>
           current
             ? { ...current, jobId: event.jobId }
-            : { historyRecordId: createHistoryRecordId(), jobId: event.jobId, persisted: false, workKey: eventWorkKey }
+            : {
+                historyRecordId: createHistoryRecordId(),
+                jobId: event.jobId,
+                persisted: false,
+                thinkingEnabled,
+                workKey: eventWorkKey,
+              }
         );
         setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
         return { type: "running", jobId: event.jobId };
@@ -2222,11 +2269,21 @@ export default function HomePage() {
               }
               modelSlot={
                 activeKind === "video" ? (
-                  <AsrModelSelect
-                    disabled={isTranscribing}
-                    model={asrModel}
-                    onChange={updateAsrModel}
-                  />
+                  <div className="flex items-center gap-1">
+                    <PostprocessToggle
+                      checked={thinkingEnabled}
+                      description="深入推理"
+                      disabled={isTranscribing}
+                      icon={Brain}
+                      label="思考"
+                      onCheckedChange={setThinkingEnabled}
+                    />
+                    <AsrModelSelect
+                      disabled={isTranscribing}
+                      model={asrModel}
+                      onChange={updateAsrModel}
+                    />
+                  </div>
                 ) : undefined
               }
               onAction={activeKind === "video" ? transcribe : undefined}
@@ -2818,6 +2875,45 @@ function ItnHelpTooltip() {
         </span>
       </span>
     </span>
+  );
+}
+
+function PostprocessToggle({
+  checked,
+  description,
+  disabled,
+  icon: Icon,
+  label,
+  onCheckedChange,
+}: {
+  checked: boolean;
+  description: string;
+  disabled?: boolean;
+  icon: LucideIcon;
+  label: string;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  const stateLabel = `${label}${checked ? "已开启" : "已关闭"}`;
+
+  return (
+    <button
+      type="button"
+      aria-label={stateLabel}
+      aria-pressed={checked}
+      disabled={disabled}
+      onClick={() => onCheckedChange(!checked)}
+      className={cn(
+        "inline-flex h-8 translate-y-0.5 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-sm px-1 text-[11px] transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
+        checked
+          ? "bg-cyan/[0.08] text-cyan"
+          : "text-muted-foreground hover:bg-white/[0.055] hover:text-foreground",
+      )}
+      title={stateLabel}
+    >
+      <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="font-semibold text-current">{label}</span>
+      <span className={checked ? "text-cyan/75" : "text-muted-foreground/70"}>{description}</span>
+    </button>
   );
 }
 

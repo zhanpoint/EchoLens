@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   buildTranscriptPostprocessPrompt,
@@ -11,7 +12,21 @@ type PostprocessedSegmentText = {
   text: string;
 };
 
-export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen-transcript-postprocess-v2";
+export type TranscriptPostprocessOptions = {
+  thinkingEnabled?: boolean;
+  title?: string;
+};
+
+const transcriptPostprocessOptions = new AsyncLocalStorage<TranscriptPostprocessOptions>();
+
+export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen-transcript-postprocess-v6";
+
+export function runWithTranscriptPostprocessOptions<T>(
+  options: TranscriptPostprocessOptions,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return transcriptPostprocessOptions.run(options, operation);
+}
 
 export async function streamQwenTranscriptPostprocess(input: {
   content: string;
@@ -23,8 +38,13 @@ export async function streamQwenTranscriptPostprocess(input: {
     return { ok: false, code: "unavailable", detail: "没有可后处理的转录文本。" };
   }
 
-  const prompt = buildTranscriptPostprocessPrompt(promptSegments);
-  const result = await streamQwenChat({ prompt, signal: input.signal });
+  const options = transcriptPostprocessOptions.getStore() ?? {};
+  const prompt = buildTranscriptPostprocessPrompt(promptSegments, options);
+  const result = await streamQwenChat({
+    prompt,
+    signal: input.signal,
+    thinkingEnabled: options.thinkingEnabled,
+  });
   if (!result.ok) {
     return result;
   }

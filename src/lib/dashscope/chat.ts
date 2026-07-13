@@ -27,11 +27,11 @@ type DashScopeChatErrorFormatter = (
 ) => string;
 
 const QWEN_CHAT_REQUEST_TIMEOUT_MS = 120_000;
-
 export async function streamQwenChat(input: {
   onDelta?: (delta: string) => void;
   prompt: string;
   signal?: AbortSignal;
+  thinkingEnabled?: boolean;
 }): Promise<ProviderResult> {
   try {
     const config = readDashScopeQwenChatConfig();
@@ -41,7 +41,10 @@ export async function streamQwenChat(input: {
       onDelta: input.onDelta,
       signal: input.signal,
       timeoutMs: QWEN_CHAT_REQUEST_TIMEOUT_MS,
-      extraBody: { temperature: 0 },
+      extraBody: {
+        temperature: 0,
+        ...(input.thinkingEnabled !== undefined ? { enable_thinking: input.thinkingEnabled } : {}),
+      },
       emptyBodyDetail: "Qwen 没有返回流式内容。",
       emptyContentDetail: "模型没有返回可用文本。",
       formatError: formatDashScopeChatError,
@@ -149,7 +152,7 @@ async function readDashScopeChatJsonResponse(response: Response): Promise<DashSc
 
 function readDashScopeChatFailure(
   response: Response,
-  payload: DashScopeChatCompletionPayload | null,
+  payload: { error?: DashScopeChatCompletionError } | null,
   formatError: DashScopeChatErrorFormatter,
 ): ProviderResult {
   if (payload?.error) {
