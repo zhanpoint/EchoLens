@@ -73,6 +73,11 @@ import {
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
 import { estimateMediaProcessingDurationSeconds } from "@/lib/douyin/cache-estimate";
 import { buildMediaDownloadPath } from "@/lib/douyin/download";
+import {
+  cacheDownloadOrganization,
+  saveToDownloadDirectory,
+} from "@/lib/browser-download-directory";
+import { isDownloadOrganization, type DownloadOrganization } from "@/lib/download-settings";
 import { cn } from "@/lib/utils";
 
 type ApiError = {
@@ -107,6 +112,7 @@ type TranscriptUserSettings = {
 };
 type UserSettingsPayload = {
   settings?: {
+    download?: { organization?: DownloadOrganization };
     transcript?: Partial<TranscriptUserSettings>;
     translation?: Partial<TranslationUserSettings>;
   };
@@ -2455,6 +2461,7 @@ function TranscriptHistorySidebar({
       <div className="mt-4 border-t border-white/10 pt-2">
         <Link
           href="/douyin/favorites"
+          prefetch={false}
           className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
         >
           <Star className="size-4 shrink-0 text-amber" aria-hidden="true" />
@@ -2536,6 +2543,7 @@ function TranscriptHistorySidebar({
             </button>
             <Link
               href="/douyin/favorites"
+              prefetch={false}
               className="mt-1 inline-flex size-8 items-center justify-center rounded-md text-amber transition hover:bg-amber/[0.1]"
               aria-label="收藏与关注"
               title="收藏与关注"
@@ -3709,6 +3717,7 @@ function WorkDownloadActions({
   const workKey = `${work.kind}:${work.id}`;
   const actions = DOWNLOAD_ACTIONS;
   const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
+  const [downloadError, setDownloadError] = useState("");
 
   const previewCache = preview ? cachedAssets[preview.asset] : undefined;
   const previewCached = previewCache?.workKey === workKey ? previewCache : undefined;
@@ -3764,20 +3773,29 @@ function WorkDownloadActions({
                   下载
                 </button>
               ) : (
-                <a
-                  href={cached.url}
-                  download={cached.downloadName}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDownloadError("");
+                    void downloadCachedAsset(cached.url!, cached.downloadName, work)
+                      .catch((error) => setDownloadError(readUserFacingError(error, "文件保存失败。")));
+                  }}
                   className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96]"
-                  title={action.label}
+                  title={downloadError || action.label}
                 >
                   <Download className="size-3.5" aria-hidden="true" />
                   下载
-                </a>
+                </button>
               )}
             </div>
           </div>
         );
       })}
+      {downloadError ? (
+        <p className="w-full text-xs font-medium leading-5 text-rose-400" role="alert">
+          {downloadError}
+        </p>
+      ) : null}
       {preview && previewCached?.url && typeof document !== "undefined"
         ? createPortal(
             <AssetPreviewDialog
@@ -3785,6 +3803,7 @@ function WorkDownloadActions({
               previewUrl={previewCached.url}
               downloadName={previewCached?.downloadName}
               downloadUrl={previewCached.url}
+              work={work}
               onClose={() => setPreview(null)}
             />,
             document.body,
@@ -3938,15 +3957,18 @@ function AssetPreviewDialog({
   downloadName,
   previewUrl,
   downloadUrl,
+  work,
   onClose,
 }: {
   action: (typeof DOWNLOAD_ACTIONS)[number];
   downloadName?: string;
   previewUrl: string;
   downloadUrl: string;
+  work: ResolvedDouyinWork;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
   const canCopyCover = action.asset === "cover";
 
   useEffect(() => {
@@ -4002,15 +4024,19 @@ function AssetPreviewDialog({
                 {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
               </button>
             ) : null}
-            <a
-              href={downloadUrl}
-              download={downloadName}
+            <button
+              type="button"
+              onClick={() => {
+                setDownloadError("");
+                void downloadCachedAsset(downloadUrl, downloadName ?? `echolens-${work.id}-${action.asset}`, work)
+                  .catch((error) => setDownloadError(readUserFacingError(error, "文件保存失败。")));
+              }}
               className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
               aria-label={action.label}
-              title={action.label}
+              title={downloadError || action.label}
             >
               <Download className="size-4" aria-hidden="true" />
-            </a>
+            </button>
             <button
               type="button"
               onClick={onClose}
@@ -4022,6 +4048,11 @@ function AssetPreviewDialog({
             </button>
           </div>
         </div>
+        {downloadError ? (
+          <p className="border-b border-white/10 px-4 py-2 text-xs font-medium text-rose-400" role="alert">
+            {downloadError}
+          </p>
+        ) : null}
         <div className="max-h-[calc(100dvh_-_5.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] overflow-auto bg-black/25 p-3 sm:max-h-[calc(100dvh_-_7rem)] sm:p-4">
           <AssetPreviewContent asset={action.asset} url={previewUrl} />
         </div>
@@ -4544,6 +4575,10 @@ function TranscriptResultPanel({
         const payload = await response.json() as UserSettingsPayload;
         const transcriptSettings = normalizeTranscriptUserSettings(payload.settings?.transcript);
         const translationSettings = normalizeTranslationUserSettings(payload.settings?.translation);
+        const downloadOrganization = payload.settings?.download?.organization;
+        if (isDownloadOrganization(downloadOrganization)) {
+          cacheDownloadOrganization(downloadOrganization);
+        }
         if (isActive) {
           setTranslationConfig({
             domains: translationSettings.domains,
@@ -6518,6 +6553,25 @@ function SummaryHistoryMenu({
       </div>
     </div>
   );
+}
+
+async function downloadCachedAsset(
+  sourceUrl: string,
+  filename: string,
+  work: ResolvedDouyinWork,
+): Promise<void> {
+  const saved = await saveToDownloadDirectory(sourceUrl, filename, {
+    authorName: work.authorName,
+    workId: work.id,
+    workTitle: work.title,
+  });
+  if (saved) {
+    return;
+  }
+  const anchor = document.createElement("a");
+  anchor.href = sourceUrl;
+  anchor.download = filename;
+  anchor.click();
 }
 
 function CopyTranscriptMenu({

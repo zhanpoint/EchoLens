@@ -2,19 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { readSessionCookieValue, SESSION_COOKIE } from "@/lib/auth/session-cookie";
 
 export function proxy(request: NextRequest) {
-  if (!isDouyinApiRequest(request)) {
+  const { pathname, search } = request.nextUrl;
+  const isDouyinApiRequest = pathname.startsWith("/api/douyin/");
+  const isDouyinPageRequest = pathname.startsWith("/douyin/");
+
+  if ((!isDouyinApiRequest && !isDouyinPageRequest) || hasSignedSession(request)) {
     return NextResponse.next();
   }
 
-  if (!hasSignedSession(request)) {
+  if (isDouyinApiRequest) {
     return NextResponse.json({ error: "请先登录后再使用。", code: "UNAUTHENTICATED" }, { status: 401 });
   }
 
-  return NextResponse.next();
-}
-
-function isDouyinApiRequest(request: NextRequest): boolean {
-  return request.nextUrl.pathname.startsWith("/api/douyin/");
+  const loginUrl = new URL("/login", request.url);
+  loginUrl.searchParams.set("next", `${pathname}${search}`);
+  return NextResponse.redirect(loginUrl);
 }
 
 function hasSignedSession(request: NextRequest): boolean {
@@ -22,5 +24,5 @@ function hasSignedSession(request: NextRequest): boolean {
 }
 
 export const config = {
-  matcher: ["/api/douyin/:path*"],
+  matcher: ["/douyin/:path*", "/api/douyin/:path*"],
 };

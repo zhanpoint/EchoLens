@@ -12,6 +12,13 @@
 
 # testing
 /coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
 
 # next.js
 /.next/
@@ -60,3 +67,7 @@ next-env.d.ts
 !/src/test/postgres.test.ts
 !/src/test/transcript-db.test.ts
 !/src/test/user-settings-route.test.ts
+!/src/test/auth-email.test.ts
+!/src/test/douyin.test.ts
+!/src/test/download-route.test.ts
+!/src/test/proxy.test.ts

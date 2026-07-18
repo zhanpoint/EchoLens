@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { DouyinApiError } from "@/lib/douyin/web-client";
+import { DEFAULT_DOWNLOAD_ORGANIZATION, DOWNLOAD_ORGANIZATIONS } from "@/lib/download-settings";
 import { isUserSettingsCategory, readUserSettings, upsertUserSetting } from "@/lib/user-settings";
 
 export const runtime = "nodejs";
@@ -21,6 +22,10 @@ const TranscriptSettingsSchema = z.object({
 });
 const DouyinSettingsSchema = z.object({
   cookie: z.string().max(120_000),
+});
+const DownloadSettingsSchema = z.object({
+  directoryPath: z.string().max(500).catch(""),
+  organization: z.enum(DOWNLOAD_ORGANIZATIONS).catch(DEFAULT_DOWNLOAD_ORGANIZATION),
 });
 
 const PutSettingsSchema = z.object({
@@ -70,15 +75,19 @@ export async function PUT(request: Request) {
 }
 
 function parseSettingsValue(
-  category: "douyin" | "transcript" | "translation",
+  category: "douyin" | "download" | "transcript" | "translation",
   value: unknown,
-): { ok: true; data: z.infer<typeof DouyinSettingsSchema> | z.infer<typeof TranscriptSettingsSchema> | z.infer<typeof TranslationSettingsSchema> } | { ok: false } {
+): { ok: true; data: z.infer<typeof DouyinSettingsSchema> | z.infer<typeof DownloadSettingsSchema> | z.infer<typeof TranscriptSettingsSchema> | z.infer<typeof TranslationSettingsSchema> } | { ok: false } {
   if (category === "douyin") {
     const parsed = DouyinSettingsSchema.safeParse(value);
     return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
   }
   if (category === "transcript") {
     const parsed = TranscriptSettingsSchema.safeParse(value);
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  }
+  if (category === "download") {
+    const parsed = DownloadSettingsSchema.safeParse(value);
     return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
   }
   if (category === "translation") {

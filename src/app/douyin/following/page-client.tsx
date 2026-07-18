@@ -24,16 +24,28 @@ import {
   requireValidDouyinCredential,
 } from "../_client-api";
 import { DouyinAvatar } from "../_avatar";
+import { DouyinUserMeta } from "../_user-meta";
 import { DouyinSectionNav } from "../_section-nav";
+import { DouyinLastSynced } from "../_last-synced";
 import { readDouyinClientSnapshot, writeDouyinClientSnapshot } from "@/lib/douyin/client-list-cache";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 type FollowingUser = {
   avatarUrl: string;
+  followerCount: number;
   id: string;
+  isMutual: boolean;
   name: string;
   signature: string;
   uniqueId: string;
   url: string;
+  workCount: number;
 };
 
 type FollowingPayload = {
@@ -42,6 +54,7 @@ type FollowingPayload = {
 };
 
 const PAGE_SIZE = 30;
+type FollowingSortOrder = "followers" | "works" | "name";
 
 function isFollowingUser(value: unknown): value is FollowingUser {
   if (!value || typeof value !== "object") {
@@ -49,11 +62,14 @@ function isFollowingUser(value: unknown): value is FollowingUser {
   }
   const user = value as Partial<FollowingUser>;
   return typeof user.avatarUrl === "string" &&
+    typeof user.followerCount === "number" &&
     typeof user.id === "string" &&
+    typeof user.isMutual === "boolean" &&
     typeof user.name === "string" &&
     typeof user.signature === "string" &&
     typeof user.uniqueId === "string" &&
-    typeof user.url === "string";
+    typeof user.url === "string" &&
+    typeof user.workCount === "number";
 }
 
 async function requestFollowing(): Promise<FollowingPayload> {
@@ -83,11 +99,14 @@ export function DouyinFollowingPage() {
   const [users, setUsers] = useState<FollowingUser[]>([]);
   const [userId, setUserId] = useState("");
   const [query, setQuery] = useState("");
+  const [mutualFilter, setMutualFilter] = useState<"all" | "mutual" | "not-mutual">("all");
+  const [sortOrder, setSortOrder] = useState<FollowingSortOrder>("followers");
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [needsCredentialUpdate, setNeedsCredentialUpdate] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
 
   const handleError = useCallback((loadError: unknown) => {
     if (loadError instanceof Error && loadError.message === "UNAUTHENTICATED") {
@@ -105,14 +124,13 @@ export function DouyinFollowingPage() {
         if (active) {
           setUserId(user.id);
         }
-        const cache = await readDouyinClientSnapshot(user.id, "following", (value) =>
-          Array.isArray(value) ? value.filter(isFollowingUser) : null,
-        );
+        const cache = await readDouyinClientSnapshot(user.id, "following", parseFollowingSnapshot);
         if (!active) {
           return;
         }
         if (cache) {
           setUsers(cache.data);
+          setRefreshedAt(cache.refreshedAt);
           return;
         }
         await requireValidDouyinCredential();
@@ -120,6 +138,7 @@ export function DouyinFollowingPage() {
         await writeDouyinClientSnapshot(user.id, "following", payload.users, payload.refreshedAt);
         if (active) {
           setUsers(payload.users);
+          setRefreshedAt(payload.refreshedAt);
         }
       })
       .catch((loadError) => {
@@ -149,6 +168,7 @@ export function DouyinFollowingPage() {
       const payload = await requestFollowing();
       await writeDouyinClientSnapshot(userId, "following", payload.users, payload.refreshedAt);
       setUsers(payload.users);
+      setRefreshedAt(payload.refreshedAt);
       setPage(1);
     } catch (loadError) {
       handleError(loadError);
@@ -159,13 +179,16 @@ export function DouyinFollowingPage() {
 
   const filteredUsers = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase();
-    if (!keyword) {
-      return users;
-    }
-    return users.filter((user) =>
-      `${user.name}\n${user.uniqueId}`.toLocaleLowerCase().includes(keyword),
-    );
-  }, [query, users]);
+    return users.filter((user) => {
+      if (mutualFilter === "mutual" && !user.isMutual) {
+        return false;
+      }
+      if (mutualFilter === "not-mutual" && user.isMutual) {
+        return false;
+      }
+      return !keyword || `${user.name}\n${user.uniqueId}`.toLocaleLowerCase().includes(keyword);
+    }).sort((a, b) => compareFollowingUsers(a, b, sortOrder));
+  }, [mutualFilter, query, sortOrder, users]);
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const pageUsers = filteredUsers.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
@@ -185,19 +208,22 @@ export function DouyinFollowingPage() {
             </Link>
             <h1 className="truncate text-xl font-semibold">收藏与关注</h1>
           </div>
-          <button
-            type="button"
-            onClick={() => void refreshFollowing()}
-            disabled={isLoading || isRefreshing}
-            className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
-          >
-            {isRefreshing ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <RefreshCw className="size-4" aria-hidden="true" />
-            )}
-            {isRefreshing ? "同步中" : "刷新"}
-          </button>
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+            <DouyinLastSynced refreshedAt={refreshedAt} />
+            <button
+              type="button"
+              onClick={() => void refreshFollowing()}
+              disabled={isLoading || isRefreshing}
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
+            >
+              {isRefreshing ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <RefreshCw className="size-4" aria-hidden="true" />
+              )}
+              {isRefreshing ? "同步中" : "刷新"}
+            </button>
+          </div>
         </header>
 
         <div className="grid flex-1 lg:min-h-0 lg:grid-cols-[clamp(18rem,22vw,23rem)_minmax(0,1fr)]">
@@ -231,6 +257,53 @@ export function DouyinFollowingPage() {
                     </button>
                   ) : null}
                 </label>
+                <div className="mt-2 flex w-full items-center justify-between gap-2">
+                  <div className="inline-grid w-fit grid-cols-3 gap-1 rounded-md bg-white/[0.04] p-1" aria-label="按互关状态筛选">
+                    {([
+                      ["all", "全部"],
+                      ["mutual", "已互关"],
+                      ["not-mutual", "未互关"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => {
+                          setMutualFilter(value);
+                          setPage(1);
+                        }}
+                        className={`h-8 w-12 rounded text-[11px] font-medium transition-colors ${
+                          mutualFilter === value
+                            ? "bg-cyan/[0.14] text-cyan"
+                            : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground"
+                        }`}
+                        aria-pressed={mutualFilter === value}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <Select
+                    value={sortOrder}
+                    onValueChange={(value) => {
+                      if (isFollowingSortOrder(value)) {
+                        setSortOrder(value);
+                        setPage(1);
+                      }
+                    }}
+                  >
+                    <SelectTrigger
+                      aria-label="关注排序方式"
+                      className="h-8 w-20 min-w-0 border-0 bg-white/[0.04] px-2 text-[11px] text-muted-foreground"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent align="start">
+                      <SelectItem value="followers">粉丝数</SelectItem>
+                      <SelectItem value="works">作品数</SelectItem>
+                      <SelectItem value="name">昵称</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </section>
             </div>
           </aside>
@@ -259,7 +332,7 @@ export function DouyinFollowingPage() {
                   ))}
                 </div>
               ) : (
-                <EmptyState hasFilters={Boolean(query)} />
+                <EmptyState hasFilters={Boolean(query || mutualFilter !== "all")} />
               )}
             </div>
             {filteredUsers.length ? (
@@ -284,24 +357,16 @@ function FollowingRow({ user }: { user: FollowingUser }) {
   }
 
   return (
-    <article className="flex min-h-20 items-center px-3 transition-colors hover:bg-cyan/[0.035] sm:px-4">
-      <div className="grid w-full min-w-0 gap-x-5 gap-y-1 md:grid-cols-[minmax(7rem,12rem)_minmax(0,1fr)_minmax(11rem,18rem)] md:items-center">
-        <div className="flex min-w-0 items-center gap-2.5">
+    <article className="flex min-h-28 items-center px-3 py-3 transition-colors hover:bg-cyan/[0.035] sm:px-4">
+      <div className="flex w-full min-w-0 items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-2.5">
           <DouyinAvatar name={user.name} url={user.avatarUrl} />
           <div className="min-w-0">
             <p className="truncate text-sm font-medium" title={user.name}>{user.name}</p>
-            <p className="truncate text-xs text-muted-foreground" title={user.uniqueId}>
-              {user.uniqueId ? `抖音号：${user.uniqueId}` : ""}
-            </p>
+            <DouyinUserMeta profile={user} />
           </div>
         </div>
-        <p className="line-clamp-2 min-w-0 text-sm leading-5 text-muted-foreground" title={user.signature}>
-          {user.signature || "暂无简介"}
-        </p>
-        <div className="flex min-w-0 items-center gap-1 md:justify-end">
-          <a href={user.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-right text-xs text-cyan hover:text-cyan/80" title={user.url}>
-            {user.url}
-          </a>
+        <div className="flex shrink-0 items-center justify-end gap-1">
           <button type="button" onClick={() => void copyLink()} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.07] hover:text-foreground" aria-label="复制用户主页链接" title={copied ? "已复制" : "复制用户主页链接"}>
             {copied ? <Check className="size-4 text-cyan" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
           </button>
@@ -312,6 +377,24 @@ function FollowingRow({ user }: { user: FollowingUser }) {
       </div>
     </article>
   );
+}
+
+function parseFollowingSnapshot(value: unknown): FollowingUser[] | null {
+  return Array.isArray(value) && value.every(isFollowingUser) ? value : null;
+}
+
+function isFollowingSortOrder(value: string): value is FollowingSortOrder {
+  return value === "followers" || value === "works" || value === "name";
+}
+
+function compareFollowingUsers(a: FollowingUser, b: FollowingUser, sortOrder: FollowingSortOrder): number {
+  if (sortOrder === "followers") {
+    return b.followerCount - a.followerCount || b.workCount - a.workCount || a.name.localeCompare(b.name, "zh-CN");
+  }
+  if (sortOrder === "works") {
+    return b.workCount - a.workCount || b.followerCount - a.followerCount || a.name.localeCompare(b.name, "zh-CN");
+  }
+  return a.name.localeCompare(b.name, "zh-CN");
 }
 
 function Pagination({ page, totalPages, onChange }: { page: number; totalPages: number; onChange: (page: number) => void }) {
@@ -332,8 +415,8 @@ function FollowingSkeleton() {
   return (
     <div className="h-full overflow-hidden" aria-label="正在读取关注列表">
       {Array.from({ length: 7 }, (_, index) => (
-        <div key={index} className="flex h-20 items-center px-4">
-          <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_14rem]">
+        <div key={index} className="flex h-28 items-center px-4">
+          <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_4rem]">
             <div className="h-3 w-24 animate-pulse rounded-sm bg-white/10" style={{ animationDelay: `${index * 70}ms` }} />
             <div className="h-4 w-4/5 animate-pulse rounded-sm bg-white/10" style={{ animationDelay: `${index * 70 + 35}ms` }} />
             <div className="h-3 w-full animate-pulse rounded-sm bg-white/10" style={{ animationDelay: `${index * 70 + 70}ms` }} />

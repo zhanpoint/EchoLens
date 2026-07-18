@@ -1,14 +1,14 @@
 import { execute, queryRows } from "@/lib/storage/postgres";
 import { decryptSensitiveValue, encryptSensitiveValue, isEncryptedValue } from "@/lib/sensitive-data";
 
-export type UserSettingsCategory = "douyin" | "transcript" | "translation";
+export type UserSettingsCategory = "douyin" | "download" | "transcript" | "translation";
 
 type UserSettingRow = {
   category: string;
   value: unknown;
 };
 
-const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["douyin", "transcript", "translation"]);
+const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["douyin", "download", "transcript", "translation"]);
 
 export function isUserSettingsCategory(value: string): value is UserSettingsCategory {
   return USER_SETTINGS_CATEGORIES.has(value as UserSettingsCategory);

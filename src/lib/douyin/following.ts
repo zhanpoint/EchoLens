@@ -3,11 +3,14 @@ import { createDouyinWebClient, DOUYIN_BASE_URL, DouyinApiError } from "./web-cl
 
 export type DouyinFollowingUser = {
   avatarUrl: string;
+  followerCount: number;
   id: string;
+  isMutual: boolean;
   name: string;
   signature: string;
   uniqueId: string;
   url: string;
+  workCount: number;
 };
 
 const MAX_FOLLOWING_USERS = 5_000;
@@ -47,11 +50,14 @@ export async function collectDouyinFollowingUsers(cookie: string): Promise<Douyi
       seen.add(id);
       users.push({
         avatarUrl: readDouyinAvatarUrl(user),
+        followerCount: readInteger(user.follower_count ?? user.followerCount),
         id,
+        isMutual: readInteger(user.follower_status) === 1,
         name: cleanText(readString(user.nickname) || readString(user.unique_id)) || "未命名用户",
         signature: cleanText(readString(user.signature)) || "",
         uniqueId: cleanText(readString(user.unique_id) || readString(user.short_id)) || "",
         url: new URL(`/user/${encodeURIComponent(id)}`, DOUYIN_BASE_URL).toString(),
+        workCount: readInteger(user.aweme_count ?? user.awemeCount),
       });
       if (users.length >= MAX_FOLLOWING_USERS) {
         break;

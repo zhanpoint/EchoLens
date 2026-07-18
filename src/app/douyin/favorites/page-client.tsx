@@ -4,15 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
-  AudioLines,
-  Check,
   ChevronLeft,
   ChevronRight,
-  Copy,
-  ExternalLink,
+  FolderHeart,
+  Layers3,
   Loader2,
   RefreshCw,
   Search,
+  Video as VideoIcon,
   X,
 } from "lucide-react";
 import {
@@ -31,9 +30,15 @@ import {
   requestCurrentUser,
   requireValidDouyinCredential,
 } from "../_client-api";
-import { DouyinAvatar } from "../_avatar";
 import { DouyinSectionNav } from "../_section-nav";
+import { DouyinLastSynced } from "../_last-synced";
 import { readDouyinClientSnapshot, writeDouyinClientSnapshot } from "@/lib/douyin/client-list-cache";
+import type {
+  DouyinFavoriteAuthor,
+  DouyinFavoriteFolder,
+  DouyinFavoriteMix,
+  DouyinFavoriteVideo,
+} from "@/lib/douyin/favorites";
 import {
   Select,
   SelectContent,
@@ -41,35 +46,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-type DouyinFavoriteVideo = {
-  author: string;
-  authorId: string;
-  isFollowing: boolean;
-  publishedAt: number;
-  title: string;
-  url: string;
-};
-
-type DouyinFavoriteAuthor = {
-  avatarUrl: string;
-  id: string;
-  name: string;
-};
+import { FavoriteGroups } from "./_favorite-groups";
+import { FavoriteWorkRow } from "./_favorite-work-row";
 
 type FavoritesPayload = {
   authors: DouyinFavoriteAuthor[];
+  folders: DouyinFavoriteFolder[];
+  mixes: DouyinFavoriteMix[];
   refreshedAt: number;
   videos: DouyinFavoriteVideo[];
 };
 
+type FavoriteCategory = "folders" | "videos" | "mixes";
 type DisplayMode = "paginated" | "virtual";
 type SortOrder = "newest" | "oldest";
 
 const PAGE_SIZE = 30;
 const VIRTUAL_ROW_HEIGHT = 80;
 const VIRTUAL_OVERSCAN = 6;
-const SOCIAL_TOKEN_PATTERN = /([#@][\p{L}\p{N}_-]+)/gu;
 
 function isDouyinFavoriteVideo(value: unknown): value is DouyinFavoriteVideo {
   if (!value || typeof value !== "object") {
@@ -78,7 +72,11 @@ function isDouyinFavoriteVideo(value: unknown): value is DouyinFavoriteVideo {
   const item = value as Partial<DouyinFavoriteVideo>;
   return typeof item.author === "string" &&
     typeof item.authorId === "string" &&
+    typeof item.commentCount === "number" &&
+    typeof item.coverUrl === "string" &&
+    typeof item.favoriteCount === "number" &&
     typeof item.isFollowing === "boolean" &&
+    typeof item.likeCount === "number" &&
     typeof item.publishedAt === "number" &&
     typeof item.title === "string" &&
     typeof item.url === "string";
@@ -90,21 +88,66 @@ function isDouyinFavoriteAuthor(value: unknown): value is DouyinFavoriteAuthor {
   }
   const author = value as Partial<DouyinFavoriteAuthor>;
   return typeof author.avatarUrl === "string" &&
+    typeof author.followerCount === "number" &&
     typeof author.id === "string" &&
-    typeof author.name === "string";
+    typeof author.name === "string" &&
+    typeof author.signature === "string" &&
+    typeof author.uniqueId === "string" &&
+    typeof author.workCount === "number";
+}
+
+function isDouyinFavoriteFolder(value: unknown): value is DouyinFavoriteFolder {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const folder = value as Partial<DouyinFavoriteFolder>;
+  return typeof folder.id === "string" &&
+    typeof folder.isPrivate === "boolean" &&
+    typeof folder.name === "string" &&
+    typeof folder.total === "number" &&
+    Array.isArray(folder.works) && folder.works.every(isDouyinFavoriteVideo);
+}
+
+function isDouyinFavoriteMix(value: unknown): value is DouyinFavoriteMix {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const mix = value as Partial<DouyinFavoriteMix>;
+  return typeof mix.coverUrl === "string" &&
+    typeof mix.id === "string" &&
+    typeof mix.name === "string" &&
+    typeof mix.playCount === "number" &&
+    typeof mix.total === "number" &&
+    typeof mix.url === "string" &&
+    Array.isArray(mix.works) && mix.works.every(isDouyinFavoriteVideo);
 }
 
 function parseFavoritesSnapshot(value: unknown): Omit<FavoritesPayload, "refreshedAt"> | null {
   if (!value || typeof value !== "object") {
     return null;
   }
-  const snapshot = value as { authors?: unknown; videos?: unknown };
-  if (!Array.isArray(snapshot.authors) || !Array.isArray(snapshot.videos)) {
+  const snapshot = value as { authors?: unknown; folders?: unknown; mixes?: unknown; videos?: unknown };
+  if (
+    !Array.isArray(snapshot.authors) ||
+    !Array.isArray(snapshot.folders) ||
+    !Array.isArray(snapshot.mixes) ||
+    !Array.isArray(snapshot.videos)
+  ) {
+    return null;
+  }
+  if (
+    !snapshot.authors.every(isDouyinFavoriteAuthor) ||
+    !snapshot.folders.every(isDouyinFavoriteFolder) ||
+    !snapshot.mixes.every(isDouyinFavoriteMix) ||
+    !snapshot.videos.every(isDouyinFavoriteVideo)
+  ) {
     return null;
   }
   return {
-    authors: snapshot.authors.filter(isDouyinFavoriteAuthor),
-    videos: snapshot.videos.filter(isDouyinFavoriteVideo),
+    authors: snapshot.authors,
+    folders: snapshot.folders,
+    mixes: snapshot.mixes,
+    videos: snapshot.videos,
   };
 }
 
@@ -115,6 +158,8 @@ async function requestFavorites(): Promise<FavoritesPayload> {
   });
   const payload = await readJsonPayload(response, "抖音收藏列表获取失败。") as {
     authors?: unknown;
+    folders?: unknown;
+    mixes?: unknown;
     refreshedAt?: unknown;
     videos?: unknown;
   };
@@ -130,6 +175,8 @@ async function requestFavorites(): Promise<FavoritesPayload> {
   }
   return {
     authors: Array.isArray(payload.authors) ? payload.authors.filter(isDouyinFavoriteAuthor) : [],
+    folders: Array.isArray(payload.folders) ? payload.folders.filter(isDouyinFavoriteFolder) : [],
+    mixes: Array.isArray(payload.mixes) ? payload.mixes.filter(isDouyinFavoriteMix) : [],
     refreshedAt: typeof payload.refreshedAt === "number" ? payload.refreshedAt : Date.now(),
     videos: Array.isArray(payload.videos) ? payload.videos.filter(isDouyinFavoriteVideo) : [],
   };
@@ -139,12 +186,16 @@ export function DouyinFavoritesPage() {
   const router = useRouter();
   const [videos, setVideos] = useState<DouyinFavoriteVideo[]>([]);
   const [authors, setAuthors] = useState<DouyinFavoriteAuthor[]>([]);
+  const [folders, setFolders] = useState<DouyinFavoriteFolder[]>([]);
+  const [mixes, setMixes] = useState<DouyinFavoriteMix[]>([]);
+  const [activeCategory, setActiveCategory] = useState<FavoriteCategory>("folders");
   const [userId, setUserId] = useState("");
   const [dataVersion, setDataVersion] = useState(0);
   const [error, setError] = useState("");
   const [needsCredentialUpdate, setNeedsCredentialUpdate] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [followFilter, setFollowFilter] = useState<"all" | "followed" | "not-followed">("all");
   const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
@@ -173,7 +224,10 @@ export function DouyinFavoritesPage() {
         }
         if (cache) {
           setAuthors(cache.data.authors);
+          setFolders(cache.data.folders);
+          setMixes(cache.data.mixes);
           setVideos(cache.data.videos);
+          setRefreshedAt(cache.refreshedAt);
           setDataVersion((current) => current + 1);
           return;
         }
@@ -182,12 +236,20 @@ export function DouyinFavoritesPage() {
         await writeDouyinClientSnapshot(
           user.id,
           "favorites",
-          { authors: payload.authors, videos: payload.videos },
+          {
+            authors: payload.authors,
+            folders: payload.folders,
+            mixes: payload.mixes,
+            videos: payload.videos,
+          },
           payload.refreshedAt,
         );
         if (isActive) {
           setAuthors(payload.authors);
+          setFolders(payload.folders);
+          setMixes(payload.mixes);
           setVideos(payload.videos);
+          setRefreshedAt(payload.refreshedAt);
           setDataVersion((current) => current + 1);
         }
       })
@@ -219,11 +281,19 @@ export function DouyinFavoritesPage() {
       await writeDouyinClientSnapshot(
         userId,
         "favorites",
-        { authors: payload.authors, videos: payload.videos },
+        {
+          authors: payload.authors,
+          folders: payload.folders,
+          mixes: payload.mixes,
+          videos: payload.videos,
+        },
         payload.refreshedAt,
       );
       setAuthors(payload.authors);
+      setFolders(payload.folders);
+      setMixes(payload.mixes);
       setVideos(payload.videos);
+      setRefreshedAt(payload.refreshedAt);
       setDataVersion((current) => current + 1);
     } catch (loadError) {
       handleRequestError(loadError);
@@ -246,8 +316,13 @@ export function DouyinFavoritesPage() {
     return filtered.sort((a, b) => comparePublishedAt(a, b, sortOrder));
   }, [followFilter, query, sortOrder, videos]);
 
-  const avatarByAuthor = useMemo(
-    () => new Map(authors.map((author) => [author.id || author.name, author.avatarUrl])),
+  const authorByKey = useMemo(
+    () => new Map(
+      authors.flatMap((author) => [
+        ...(author.id ? [[author.id, author] as const] : []),
+        [author.name, author] as const,
+      ]),
+    ),
     [authors],
   );
 
@@ -257,6 +332,11 @@ export function DouyinFavoritesPage() {
     (currentPage - 1) * PAGE_SIZE,
     currentPage * PAGE_SIZE,
   );
+  const searchPlaceholder = activeCategory === "folders"
+    ? "搜索收藏夹或作品"
+    : activeCategory === "mixes"
+      ? "搜索合集或作品"
+      : "搜索作者或标题";
 
   return (
     <main className="min-h-dvh w-full bg-background text-foreground lg:h-dvh lg:overflow-hidden">
@@ -273,25 +353,37 @@ export function DouyinFavoritesPage() {
             </Link>
             <h1 className="truncate text-xl font-semibold text-foreground">收藏与关注</h1>
           </div>
-          <button
-            type="button"
-            onClick={() => void refreshFavorites()}
-            disabled={isLoading || isRefreshing}
-            className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
-          >
-            {isRefreshing ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <RefreshCw className="size-4" aria-hidden="true" />
-            )}
-            {isRefreshing ? "同步中" : "刷新"}
-          </button>
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+            <DouyinLastSynced refreshedAt={refreshedAt} />
+            <button
+              type="button"
+              onClick={() => void refreshFavorites()}
+              disabled={isLoading || isRefreshing}
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
+            >
+              {isRefreshing ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <RefreshCw className="size-4" aria-hidden="true" />
+              )}
+              {isRefreshing ? "同步中" : "刷新"}
+            </button>
+          </div>
         </header>
 
         <div className="grid flex-1 lg:min-h-0 lg:grid-cols-[clamp(18rem,22vw,23rem)_minmax(0,1fr)]">
           <aside className="border-b border-white/10 px-4 pb-4 pt-2 sm:px-6 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:px-5">
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
               <DouyinSectionNav active="favorites" />
+              <FavoriteCategoryNav
+                active={activeCategory}
+                counts={{ folders: folders.length, mixes: mixes.length, videos: videos.length }}
+                onChange={(category) => {
+                  setActiveCategory(category);
+                  setQuery("");
+                  setPage(1);
+                }}
+              />
               <section className="min-w-0 sm:col-span-2 lg:col-span-1">
                 <label className="relative mb-2 block">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
@@ -301,7 +393,7 @@ export function DouyinFavoritesPage() {
                       setQuery(event.target.value);
                       setPage(1);
                     }}
-                    placeholder="搜索作者或标题"
+                    placeholder={searchPlaceholder}
                     className="h-8 w-full rounded-md border border-white/10 bg-white/[0.035] pl-8 pr-8 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-cyan/40 focus:bg-white/[0.05]"
                   />
                   {query ? (
@@ -319,65 +411,62 @@ export function DouyinFavoritesPage() {
                     </button>
                   ) : null}
                 </label>
-                <div className="grid grid-cols-2 gap-5 rounded-md bg-white/[0.035] px-2 py-1.5">
-                  <FilterSelectRow
-                    label="关注状态："
-                    value={followFilter}
-                    onValueChange={(value) => {
-                      setFollowFilter(value as "all" | "followed" | "not-followed");
-                      setPage(1);
-                    }}
-                    ariaLabel="按关注状态筛选"
-                    options={[
-                      { value: "all", label: "全部" },
-                      { value: "followed", label: "已关注" },
-                      { value: "not-followed", label: "未关注" },
-                    ]}
-                  />
-                  <FilterSelectRow
-                    label="发布时间："
-                    value={sortOrder}
-                    onValueChange={(value) => {
-                      setSortOrder(value as SortOrder);
-                      setPage(1);
-                    }}
-                    ariaLabel="按发布时间排序"
-                    options={[
-                      { value: "newest", label: "最新" },
-                      { value: "oldest", label: "最早" },
-                    ]}
-                  />
-                </div>
+                {activeCategory === "videos" ? (
+                  <div className="grid grid-cols-2 gap-5 rounded-md bg-white/[0.035] px-2 py-1.5">
+                    <FilterSelectRow
+                      label="关注状态："
+                      value={followFilter}
+                      onValueChange={(value) => {
+                        setFollowFilter(value as "all" | "followed" | "not-followed");
+                        setPage(1);
+                      }}
+                      ariaLabel="按关注状态筛选"
+                      options={[
+                        { value: "all", label: "全部" },
+                        { value: "followed", label: "已关注" },
+                        { value: "not-followed", label: "未关注" },
+                      ]}
+                    />
+                    <FilterSelectRow
+                      label="发布时间："
+                      value={sortOrder}
+                      onValueChange={(value) => {
+                        setSortOrder(value as SortOrder);
+                        setPage(1);
+                      }}
+                      ariaLabel="按发布时间排序"
+                      options={[
+                        { value: "newest", label: "最新" },
+                        { value: "oldest", label: "最早" },
+                      ]}
+                    />
+                  </div>
+                ) : null}
               </section>
 
-              <section className="min-w-0">
-                <h2 className="mb-1.5 text-xs font-normal text-cyan">统计</h2>
-                <dl>
-                  <Stat label="作品个数" value={filteredVideos.length} />
-                </dl>
-              </section>
-
-              <section className="flex min-w-0 items-center justify-between gap-3 sm:col-span-2 lg:col-span-1">
-                <h2 className="shrink-0 text-xs font-normal text-cyan">显示方式</h2>
-                <div className="grid w-32 grid-cols-2 rounded-full bg-white/[0.045] p-0.5" role="group" aria-label="显示方式">
-                  <ModeButton
-                    active={displayMode === "paginated"}
-                    onClick={() => {
-                      setDisplayMode("paginated");
-                      setPage(1);
-                    }}
-                    label="分页渲染"
-                  />
-                  <ModeButton
-                    active={displayMode === "virtual"}
-                    onClick={() => {
-                      setDisplayMode("virtual");
-                      setPage(1);
-                    }}
-                    label="虚拟滚动"
-                  />
-                </div>
-              </section>
+              {activeCategory === "videos" ? (
+                <section className="flex min-w-0 items-center justify-between gap-3 sm:col-span-2 lg:col-span-1">
+                  <h2 className="shrink-0 text-xs font-normal text-cyan">显示方式</h2>
+                  <div className="grid w-32 grid-cols-2 rounded-full bg-white/[0.045] p-0.5" role="group" aria-label="显示方式">
+                    <ModeButton
+                      active={displayMode === "paginated"}
+                      onClick={() => {
+                        setDisplayMode("paginated");
+                        setPage(1);
+                      }}
+                      label="分页渲染"
+                    />
+                    <ModeButton
+                      active={displayMode === "virtual"}
+                      onClick={() => {
+                        setDisplayMode("virtual");
+                        setPage(1);
+                      }}
+                      label="虚拟滚动"
+                    />
+                  </div>
+                </section>
+              ) : null}
             </div>
           </aside>
 
@@ -395,20 +484,24 @@ export function DouyinFavoritesPage() {
 
             <div className="min-h-[22rem] flex-1 overflow-hidden lg:min-h-0">
               {isLoading || isRefreshing ? (
-                <FavoritesSkeleton />
+                activeCategory === "videos" ? <FavoritesSkeleton /> : <GroupsSkeleton />
+              ) : activeCategory === "folders" ? (
+                <FavoriteGroups key="folders" authors={authors} groups={folders} kind="folder" query={query} />
+              ) : activeCategory === "mixes" ? (
+                <FavoriteGroups key="mixes" authors={authors} groups={mixes} kind="mix" query={query} />
               ) : filteredVideos.length ? (
                 displayMode === "virtual" ? (
                   <VirtualFavoritesList
                     key={`${followFilter}\u0000${query}\u0000${sortOrder}\u0000${dataVersion}`}
-                    avatarByAuthor={avatarByAuthor}
+                    authorByKey={authorByKey}
                     videos={filteredVideos}
                   />
                 ) : (
                   <div className="content-scroll h-full overflow-y-auto">
                     {pageVideos.map((video) => (
-                      <FavoriteRow
+                      <FavoriteWorkRow
                         key={video.url}
-                        avatarUrl={avatarByAuthor.get(video.authorId || video.author) ?? ""}
+                        author={authorByKey.get(video.authorId || video.author)}
                         video={video}
                       />
                     ))}
@@ -419,7 +512,7 @@ export function DouyinFavoritesPage() {
               )}
             </div>
 
-            {displayMode === "paginated" && filteredVideos.length ? (
+            {activeCategory === "videos" && displayMode === "paginated" && filteredVideos.length ? (
               <div className="mt-3 flex shrink-0 justify-end">
                 <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
               </div>
@@ -428,6 +521,47 @@ export function DouyinFavoritesPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+function FavoriteCategoryNav({
+  active,
+  counts,
+  onChange,
+}: {
+  active: FavoriteCategory;
+  counts: Record<FavoriteCategory, number>;
+  onChange: (category: FavoriteCategory) => void;
+}) {
+  const items = [
+    { icon: FolderHeart, id: "folders" as const, label: "收藏夹" },
+    { icon: VideoIcon, id: "videos" as const, label: "视频" },
+    { icon: Layers3, id: "mixes" as const, label: "合集" },
+  ];
+  return (
+    <nav className="grid gap-1 sm:self-start lg:w-full" aria-label="收藏分类">
+      {items.map((item) => {
+        const Icon = item.icon;
+        const isActive = active === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            aria-current={isActive ? "page" : undefined}
+            onClick={() => onChange(item.id)}
+            className={`flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-left text-sm transition-colors active:bg-cyan/[0.12] ${
+              isActive
+                ? "bg-cyan/[0.1] text-cyan"
+                : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"
+            }`}
+          >
+            <Icon className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate">{item.label}</span>
+            <span className="shrink-0 text-xs tabular-nums opacity-75">{counts[item.id]} 个</span>
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -462,15 +596,6 @@ function FilterSelectRow({
           ))}
         </SelectContent>
       </Select>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="flex min-w-0 items-center justify-between py-1.5">
-      <dt className="truncate text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-xs font-normal tabular-nums text-foreground">{value}</dd>
     </div>
   );
 }
@@ -527,10 +652,10 @@ function Pagination({
 }
 
 function VirtualFavoritesList({
-  avatarByAuthor,
+  authorByKey,
   videos,
 }: {
-  avatarByAuthor: ReadonlyMap<string, string>;
+  authorByKey: ReadonlyMap<string, DouyinFavoriteAuthor>;
   videos: DouyinFavoriteVideo[];
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -572,8 +697,8 @@ function VirtualFavoritesList({
               className="absolute inset-x-0"
               style={{ height: VIRTUAL_ROW_HEIGHT, top: index * VIRTUAL_ROW_HEIGHT }}
             >
-              <FavoriteRow
-                avatarUrl={avatarByAuthor.get(video.authorId || video.author) ?? ""}
+              <FavoriteWorkRow
+                author={authorByKey.get(video.authorId || video.author)}
                 video={video}
               />
             </div>
@@ -584,74 +709,12 @@ function VirtualFavoritesList({
   );
 }
 
-function FavoriteRow({ avatarUrl, video }: { avatarUrl: string; video: DouyinFavoriteVideo }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copyLink() {
-    await navigator.clipboard.writeText(video.url);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
-  }
-
-  return (
-    <article className="flex h-20 min-w-0 items-center px-3 transition-colors hover:bg-cyan/[0.035] sm:px-4">
-      <div className="grid w-full min-w-0 gap-x-5 gap-y-1 md:grid-cols-[minmax(9rem,14rem)_minmax(0,1fr)_minmax(11rem,18rem)] md:items-center">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <DouyinAvatar name={video.author} url={avatarUrl} />
-          <p className="truncate text-sm font-medium text-foreground" title={video.author}>{video.author}</p>
-        </div>
-        <h2 className="line-clamp-2 min-w-0 text-xs font-normal leading-5 text-foreground" title={video.title}>
-          {renderSocialTokens(video.title)}
-        </h2>
-        <div className="flex min-w-0 items-center gap-1 md:justify-end">
-          <a
-            href={video.url}
-            target="_blank"
-            rel="noreferrer"
-            className="min-w-0 flex-1 truncate text-xs text-cyan transition-colors hover:text-cyan/80 md:text-right"
-            title={video.url}
-          >
-            {video.url}
-          </a>
-          <Link
-            href={{ pathname: "/", query: { transcribe: video.url } }}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-cyan/[0.07] hover:text-cyan"
-            aria-label="转录此作品"
-            title="转录此作品"
-          >
-            <AudioLines className="size-4 text-cyan motion-safe:animate-pulse" aria-hidden="true" />
-          </Link>
-          <button
-            type="button"
-            onClick={() => void copyLink()}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-foreground"
-            aria-label="复制视频链接"
-            title={copied ? "已复制" : "复制视频链接"}
-          >
-            {copied ? <Check className="size-4 text-cyan" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
-          </button>
-          <a
-            href={video.url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-cyan"
-            aria-label="在新页面打开视频"
-            title="在新页面打开视频"
-          >
-            <ExternalLink className="size-4" aria-hidden="true" />
-          </a>
-        </div>
-      </div>
-    </article>
-  );
-}
-
 function FavoritesSkeleton() {
   return (
     <div className="h-full overflow-hidden" aria-label="正在读取收藏列表">
       {Array.from({ length: 7 }, (_, index) => (
         <div key={index} className="flex h-20 items-center px-4">
-          <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_14rem]">
+          <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_6rem]">
             <div className="flex items-center gap-2">
               <div className="size-8 animate-pulse rounded-full bg-white/10" style={{ animationDelay: `${index * 70}ms` }} />
               <div className="h-3 w-20 animate-pulse rounded-sm bg-white/10" style={{ animationDelay: `${index * 70}ms` }} />
@@ -665,27 +728,24 @@ function FavoritesSkeleton() {
   );
 }
 
-function renderSocialTokens(text: string) {
-  return text.split(SOCIAL_TOKEN_PATTERN).map((token, index) => {
-    if (!token) {
-      return null;
-    }
-    if (token.startsWith("#")) {
-      return (
-        <span key={`${index}-${token}`} className="mx-0.5 inline-flex rounded-sm bg-[#9bb892]/10 px-1.5 py-0.5 text-[#adc4a3]">
-          {token}
-        </span>
-      );
-    }
-    if (token.startsWith("@")) {
-      return (
-        <span key={`${index}-${token}`} className="mx-0.5 inline-flex rounded-sm bg-cyan/[0.08] px-1.5 py-0.5 text-cyan">
-          {token}
-        </span>
-      );
-    }
-    return <span key={`${index}-${token.slice(0, 8)}`}>{token}</span>;
-  });
+function GroupsSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-3 overflow-hidden xl:grid-cols-2" aria-label="正在读取收藏分组">
+      {Array.from({ length: 6 }, (_, index) => (
+        <div key={index} className="min-h-40 animate-pulse rounded-md border border-white/[0.06] bg-white/[0.035] p-4" style={{ animationDelay: `${index * 60}ms` }}>
+          <div className="flex items-center justify-between gap-4">
+            <div className="h-4 w-28 rounded-sm bg-white/10" />
+            <div className="h-3 w-14 rounded-sm bg-white/[0.08]" />
+          </div>
+          <div className="mt-4 grid grid-cols-6 gap-2">
+            {Array.from({ length: 6 }, (_, coverIndex) => (
+              <div key={coverIndex} className="aspect-square rounded-md bg-white/[0.08]" />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function EmptyState({ hasFilters }: { hasFilters: boolean }) {

@@ -20,6 +20,7 @@ type OssConfig = {
 const DEFAULT_ASR_PREFIX = "echolens/asr/";
 const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 6 * 60 * 60;
 const OSS_REQUEST_TIMEOUT_MS = 120_000;
+const OSS_RETRY_DELAYS_MS = [1_000, 2_000, 3_000, 4_000, 5_000] as const;
 const ASR_AUDIO_CONTENT_TYPE = "audio/mp4";
 const ASR_AUDIO_EXTENSION = ".m4a";
 
@@ -37,7 +38,7 @@ export async function uploadAsrAudioFile(input: {
   assertAsrAudioFile(input.filePath);
   const objectKey = buildAsrObjectKey(config.prefix, input.userId, input.workKey);
   await requestOssObject(config, objectKey, {
-    body: Readable.toWeb(createReadStream(input.filePath)) as BodyInit,
+    createBody: () => Readable.toWeb(createReadStream(input.filePath)) as BodyInit,
     contentLength: stat.size,
     contentType: ASR_AUDIO_CONTENT_TYPE,
     method: "PUT",
@@ -74,16 +75,30 @@ async function requestOssObject(
   config: OssConfig,
   objectKey: string,
   input: {
-    body?: BodyInit;
     contentLength?: number;
     contentType?: string;
+    createBody?: () => BodyInit;
     method: "PUT";
   },
 ): Promise<void> {
-  const response = await signedOssRequest(config, objectKey, input);
-  await response.body?.cancel();
-  if (!response.ok) {
-    throw new Error(`OSS ${input.method} 临时音频对象失败：HTTP ${response.status}`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= OSS_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const response = await signedOssRequest(config, objectKey, input);
+      await response.body?.cancel();
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`OSS ${input.method} 临时音频对象失败：HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    const retryDelayMs = OSS_RETRY_DELAYS_MS[attempt];
+    if (retryDelayMs === undefined) {
+      throw lastError;
+    }
+    await delay(retryDelayMs);
   }
 }
 
@@ -91,17 +106,18 @@ async function signedOssRequest(
   config: OssConfig,
   objectKey: string,
   input: {
-    body?: BodyInit;
     contentLength?: number;
     contentType?: string;
+    createBody?: () => BodyInit;
     method: "PUT";
   },
 ): Promise<Response> {
   const date = new Date().toUTCString();
   const contentType = input.contentType ?? "";
+  const body = input.createBody?.();
   const request = {
-    body: input.body,
-    duplex: input.body ? "half" : undefined,
+    body,
+    duplex: body ? "half" : undefined,
     headers: {
       authorization: signOssRequest(config, {
         contentType,
@@ -118,6 +134,10 @@ async function signedOssRequest(
   } satisfies RequestInit & { duplex?: "half"; method: "PUT"; timeoutMs: number };
 
   return await fetchWithTimeout(buildObjectUrl(config, objectKey), request);
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 function buildSignedGetUrl(config: OssConfig, objectKey: string): string {

@@ -19,8 +19,17 @@ type GlobalWithPostgres = typeof globalThis & {
 
 const globalForPostgres = globalThis as GlobalWithPostgres;
 types.setTypeParser(20, (value) => Number(value));
+types.setTypeParser(1184, (value) => Date.parse(value));
 
 export type DbExecutor = Queryable;
+
+export function toPostgresTimestamp(epochMilliseconds: number): Date {
+  const timestamp = new Date(epochMilliseconds);
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw new TypeError("Invalid epoch timestamp.");
+  }
+  return timestamp;
+}
 
 export function getPostgresPool(): PooledQueryable {
   if (globalForPostgres.__echolensPostgresPool) {
@@ -119,8 +128,58 @@ async function getReadyPostgresPool(): Promise<PooledQueryable> {
 }
 
 async function migrateSchema(db: Queryable): Promise<void> {
+  await dropLegacyAuthDisplayViews(db);
   for (const statement of SCHEMA_STATEMENTS) {
     await db.query(statement);
+  }
+  await migrateLegacyAuthTimestamps(db);
+}
+
+const LEGACY_AUTH_DISPLAY_VIEWS = new Set(["users_display", "sessions_display", "email_codes_display"]);
+
+async function dropLegacyAuthDisplayViews(db: Queryable): Promise<void> {
+  const result = await db.query<{ table_name: string }>(
+    `SELECT table_name
+     FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_type = 'VIEW'
+       AND table_name IN ('users_display', 'sessions_display', 'email_codes_display')`,
+  );
+  for (const { table_name: view } of result.rows) {
+    if (LEGACY_AUTH_DISPLAY_VIEWS.has(view)) {
+      await db.query(`DROP VIEW ${view}`);
+    }
+  }
+}
+
+const AUTH_TIMESTAMP_COLUMNS = new Set([
+  "email_codes.expires_at",
+  "email_codes.sent_at",
+  "email_codes.used_at",
+  "sessions.expires_at",
+  "sessions.created_at",
+  "sessions.last_seen_at",
+  "users.terms_accepted_at",
+  "users.created_at",
+  "users.updated_at",
+]);
+
+async function migrateLegacyAuthTimestamps(db: Queryable): Promise<void> {
+  const result = await db.query<{ column_name: string; table_name: string }>(
+    `SELECT table_name, column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND data_type = 'bigint'
+       AND table_name IN ('users', 'sessions', 'email_codes')`,
+  );
+  for (const { column_name: column, table_name: table } of result.rows) {
+    if (AUTH_TIMESTAMP_COLUMNS.has(`${table}.${column}`)) {
+      await db.query(
+        `ALTER TABLE ${table}
+         ALTER COLUMN ${column} TYPE timestamptz(3)
+         USING to_timestamp(${column}::double precision / 1000)`,
+      );
+    }
   }
 }
 
@@ -130,18 +189,18 @@ const SCHEMA_STATEMENTS = [
       username text NOT NULL,
       email text NOT NULL,
       password_hash text NOT NULL,
-      terms_accepted_at bigint NOT NULL,
-      created_at bigint NOT NULL,
-      updated_at bigint NOT NULL
+      terms_accepted_at timestamptz(3) NOT NULL,
+      created_at timestamptz(3) NOT NULL,
+      updated_at timestamptz(3) NOT NULL
     )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uidx ON users (lower(username))",
   "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uidx ON users (lower(email))",
   `CREATE TABLE IF NOT EXISTS sessions (
       token_hash text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      expires_at bigint NOT NULL,
-      created_at bigint NOT NULL,
-      last_seen_at bigint NOT NULL
+      expires_at timestamptz(3) NOT NULL,
+      created_at timestamptz(3) NOT NULL,
+      last_seen_at timestamptz(3) NOT NULL
     )`,
   "CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id)",
   "CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at)",
@@ -151,9 +210,9 @@ const SCHEMA_STATEMENTS = [
       purpose text NOT NULL,
       code_hash text NOT NULL,
       attempts integer NOT NULL DEFAULT 0,
-      expires_at bigint NOT NULL,
-      sent_at bigint NOT NULL,
-      used_at bigint
+      expires_at timestamptz(3) NOT NULL,
+      sent_at timestamptz(3) NOT NULL,
+      used_at timestamptz(3)
     )`,
   `CREATE INDEX IF NOT EXISTS email_codes_lookup_idx
       ON email_codes(lower(email), purpose, used_at, sent_at DESC)`,
@@ -244,34 +303,6 @@ const SCHEMA_STATEMENTS = [
     )`,
   `CREATE INDEX IF NOT EXISTS transcript_custom_prompts_user_created_idx
       ON transcript_custom_prompts(user_id, created_at ASC)`,
-  `CREATE OR REPLACE VIEW users_display AS
-    SELECT
-      id,
-      username,
-      email,
-      to_char(timezone('Asia/Shanghai', to_timestamp(terms_accepted_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS terms_accepted_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(created_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS created_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(updated_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS updated_at
-    FROM users`,
-  `CREATE OR REPLACE VIEW sessions_display AS
-    SELECT
-      token_hash,
-      user_id,
-      to_char(timezone('Asia/Shanghai', to_timestamp(expires_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS expires_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(created_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS created_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(last_seen_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS last_seen_at
-    FROM sessions`,
-  `CREATE OR REPLACE VIEW email_codes_display AS
-    SELECT
-      id,
-      email,
-      purpose,
-      code_hash,
-      attempts,
-      to_char(timezone('Asia/Shanghai', to_timestamp(expires_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS expires_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(sent_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS sent_at,
-      to_char(timezone('Asia/Shanghai', to_timestamp(used_at::double precision / 1000)), 'YYYY"年"MM"月"DD"日" HH24:MI') AS used_at
-    FROM email_codes`,
 ];
 
 function readBooleanEnv(name: string, fallback: boolean): boolean {

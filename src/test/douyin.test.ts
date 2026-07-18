@@ -422,7 +422,7 @@ describe("douyin url utilities", () => {
     const longVideo = estimate(25 * 60);
     const extraLongVideo = estimate(4 * 60 * 60);
 
-    expect(tinyVideo).toBe(16);
+    expect(tinyVideo).toBe(10);
     expect(shortVideo).toBeGreaterThan(tinyVideo);
     expect(shortVideo).toBeLessThanOrEqual(35);
     expect(mediumVideo).toBeGreaterThan(shortVideo);

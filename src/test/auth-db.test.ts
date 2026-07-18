@@ -4,7 +4,7 @@ import { AuthError, loginUser } from "@/lib/auth/service";
 import { hashPassword } from "@/lib/auth/password";
 import { getEmailError, getPasswordError, getUsernameError } from "@/lib/auth/policy";
 import { decryptSensitiveValue, encryptSensitiveValue } from "@/lib/sensitive-data";
-import { execute, queryRow } from "@/lib/storage/postgres";
+import { execute, queryRow, toPostgresTimestamp } from "@/lib/storage/postgres";
 import { setupPostgresTestDb } from "@/test/postgres-test-utils";
 
 setupPostgresTestDb();
@@ -36,8 +36,8 @@ describe("auth credential policy", () => {
   });
 });
 
-describe("auth postgres display views", () => {
-  it("shows all auth table timestamps as Shanghai date strings", async () => {
+describe("auth postgres timestamps", () => {
+  it("stores auth timestamps as native PostgreSQL date-time values", async () => {
     await insertUser({
       email: "reader@example.com",
       id: "user-1",
@@ -47,7 +47,11 @@ describe("auth postgres display views", () => {
     });
     await execute(
       "UPDATE users SET created_at = $1, updated_at = $2 WHERE id = $3",
-      [Date.UTC(2026, 5, 24, 16, 0, 0), Date.UTC(2026, 5, 25, 15, 5, 9), "user-1"],
+      [
+        toPostgresTimestamp(Date.UTC(2026, 5, 24, 16, 0, 0)),
+        toPostgresTimestamp(Date.UTC(2026, 5, 25, 15, 5, 9)),
+        "user-1",
+      ],
     );
     await execute(
       `INSERT INTO sessions (token_hash, user_id, expires_at, created_at, last_seen_at)
@@ -55,9 +59,9 @@ describe("auth postgres display views", () => {
       [
         "token-hash",
         "user-1",
-        Date.UTC(2026, 5, 26, 0, 0, 0),
-        Date.UTC(2026, 5, 25, 1, 2, 3),
-        Date.UTC(2026, 5, 25, 2, 3, 4),
+        toPostgresTimestamp(Date.UTC(2026, 5, 26, 0, 0, 0)),
+        toPostgresTimestamp(Date.UTC(2026, 5, 25, 1, 2, 3)),
+        toPostgresTimestamp(Date.UTC(2026, 5, 25, 2, 3, 4)),
       ],
     );
     await execute(
@@ -69,26 +73,18 @@ describe("auth postgres display views", () => {
         "signup",
         "code-hash",
         0,
-        Date.UTC(2026, 5, 25, 3, 4, 5),
-        Date.UTC(2026, 5, 25, 2, 4, 5),
+        toPostgresTimestamp(Date.UTC(2026, 5, 25, 3, 4, 5)),
+        toPostgresTimestamp(Date.UTC(2026, 5, 25, 2, 4, 5)),
         null,
       ],
     );
 
-    expect(await queryRow("SELECT terms_accepted_at, created_at, updated_at FROM users_display")).toEqual({
-      terms_accepted_at: "2026年06月25日 20:34",
-      created_at: "2026年06月25日 00:00",
-      updated_at: "2026年06月25日 23:05",
-    });
-    expect(await queryRow("SELECT expires_at, created_at, last_seen_at FROM sessions_display")).toEqual({
-      expires_at: "2026年06月26日 08:00",
-      created_at: "2026年06月25日 09:02",
-      last_seen_at: "2026年06月25日 10:03",
-    });
-    expect(await queryRow("SELECT expires_at, sent_at, used_at FROM email_codes_display")).toEqual({
-      expires_at: "2026年06月25日 11:04",
-      sent_at: "2026年06月25日 10:04",
-      used_at: null,
+    const column = await queryRow<{ data_type: string }>(
+      "SELECT data_type FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'created_at'",
+    );
+    expect(["timestamptz", "timestamp with time zone"]).toContain(column?.data_type);
+    expect(await queryRow("SELECT created_at FROM users WHERE id = $1", ["user-1"])).toEqual({
+      created_at: toPostgresTimestamp(Date.UTC(2026, 5, 24, 16, 0, 0)),
     });
   });
 });

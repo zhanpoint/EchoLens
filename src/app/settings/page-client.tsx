@@ -9,6 +9,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FolderOpen,
   Loader2,
   Maximize2,
   MonitorDown,
@@ -21,12 +22,28 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select";
+import {
   detectDesktopPlatform,
   detectWindowsArchitecture,
   type SupportedDesktopPlatform,
   type WindowsArchitecture,
 } from "@/lib/client-platform";
 import credentialHelperArtifacts from "@/lib/douyin/credential-helper-artifacts.json";
+import {
+  cacheDownloadOrganization,
+  chooseDownloadDirectory,
+  supportsDownloadDirectoryPicker,
+} from "@/lib/browser-download-directory";
+import {
+  DEFAULT_DOWNLOAD_ORGANIZATION,
+  isDownloadOrganization,
+  type DownloadOrganization,
+} from "@/lib/download-settings";
 import { getApiError, readJsonPayload, readUserFacingError } from "../douyin/_client-api";
 
 type DouyinSettings = {
@@ -37,7 +54,13 @@ type DouyinSettings = {
 type UserSettingsPayload = {
   settings?: {
     douyin?: Partial<DouyinSettings>;
+    download?: Partial<DownloadSettings>;
   };
+};
+
+type DownloadSettings = {
+  directoryPath: string;
+  organization: DownloadOrganization;
 };
 
 type CredentialStatus = "idle" | "valid" | "invalid" | "unavailable";
@@ -51,6 +74,14 @@ function normalizeDouyinSettings(value: Partial<DouyinSettings> | undefined): Do
   return {
     credentialStatus: value?.credentialStatus,
     cookie: typeof value?.cookie === "string" ? value.cookie : "",
+  };
+}
+
+function normalizeDownloadSettings(value: Partial<DownloadSettings> | undefined): DownloadSettings {
+  const organization = value?.organization;
+  return {
+    directoryPath: typeof value?.directoryPath === "string" ? value.directoryPath : "",
+    organization: isDownloadOrganization(organization) ? organization : DEFAULT_DOWNLOAD_ORGANIZATION,
   };
 }
 
@@ -74,8 +105,178 @@ function subscribeToPlatform(): () => void {
   return () => undefined;
 }
 
+const DOWNLOAD_ORGANIZATION_OPTIONS: Array<{
+  description: string;
+  example: string;
+  label: string;
+  value: DownloadOrganization;
+}> = [
+  { value: "work", label: "按作品", description: "每个作品独立建目录，封面、视频和原声集中存放。", example: "作品标题/视频.mp4" },
+  { value: "author", label: "按作者", description: "每位作者独立建目录，该作者的所有作品集中存放。", example: "作者名称/作品视频.mp4" },
+  { value: "fileType", label: "按文件类型", description: "按视频、音频、图片和文本类型分别归档。", example: "视频/作品视频.mp4" },
+  { value: "date", label: "按日期", description: "按下载当天的本地日期创建目录。", example: "2026-07-14/作品视频.mp4" },
+  { value: "flat", label: "完全扁平化", description: "不创建任何子目录，全部文件直接放在下载目录。", example: "作品视频.mp4" },
+];
+
+function DownloadSettingsPanel({
+  isLoaded,
+  onSettingsChange,
+  settings,
+}: {
+  isLoaded: boolean;
+  onSettingsChange: (settings: DownloadSettings) => void;
+  settings: DownloadSettings;
+}) {
+  const [feedback, setFeedback] = useState<Feedback>();
+  const [isSaving, setIsSaving] = useState(false);
+  const helpDetailsRef = useRef<HTMLDetailsElement>(null);
+  const directoryPickerSupported = supportsDownloadDirectoryPicker();
+  const selectedOrganization = DOWNLOAD_ORGANIZATION_OPTIONS.find((option) => option.value === settings.organization)
+    ?? DOWNLOAD_ORGANIZATION_OPTIONS[0];
+
+  useEffect(() => {
+    function closeHelpOnOutsidePointer(event: PointerEvent) {
+      const details = helpDetailsRef.current;
+      if (details?.open && event.target instanceof Node && !details.contains(event.target)) {
+        details.open = false;
+      }
+    }
+
+    document.addEventListener("pointerdown", closeHelpOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeHelpOnOutsidePointer);
+  }, []);
+
+  async function chooseDirectory() {
+    setFeedback(undefined);
+    try {
+      const handle = await chooseDownloadDirectory();
+      await persistDownloadSettings({ ...settings, directoryPath: handle.name });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setFeedback({ message: readUserFacingError(error, "无法选择下载目录。"), tone: "error" });
+    }
+  }
+
+  async function persistDownloadSettings(nextSettings: DownloadSettings) {
+    const previousSettings = settings;
+    onSettingsChange(nextSettings);
+    cacheDownloadOrganization(nextSettings.organization);
+    setIsSaving(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch("/api/user/settings", {
+        body: JSON.stringify({ category: "download", value: nextSettings }),
+        headers: { "content-type": "application/json" },
+        method: "PUT",
+      });
+      const payload = await readJsonPayload(response, "下载配置保存失败。") as UserSettingsPayload;
+      if (!response.ok) {
+        throw new Error(getApiError(payload)?.error || "下载配置保存失败。");
+      }
+      const savedSettings = normalizeDownloadSettings(payload.settings?.download);
+      onSettingsChange(savedSettings);
+      cacheDownloadOrganization(savedSettings.organization);
+      setFeedback(undefined);
+    } catch (error) {
+      onSettingsChange(previousSettings);
+      cacheDownloadOrganization(previousSettings.organization);
+      setFeedback({ message: readUserFacingError(error, "下载配置保存失败。"), tone: "error" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="w-full max-w-4xl">
+      <div className="mb-4 flex items-center gap-1.5">
+        <h2 className="text-base font-semibold text-foreground">下载配置</h2>
+        <details ref={helpDetailsRef} className="relative">
+          <summary
+            className="inline-flex size-6 cursor-pointer list-none items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/30 [&::-webkit-details-marker]:hidden"
+            aria-label="查看下载目录说明"
+            title="下载目录说明"
+          >
+            <CircleHelp className="size-4" aria-hidden="true" />
+          </summary>
+          <div className="absolute left-0 top-7 z-20 w-[min(22rem,calc(100vw-3rem))] rounded-md border border-white/15 bg-surface-strong p-3 text-xs font-normal leading-5 text-muted-foreground shadow-xl shadow-black/30">
+            Chrome 和 Edge 支持选择自定义目录，其他浏览器将使用浏览器默认下载目录。受浏览器安全限制，网页只能读取已授权目录的名称，无法获取完整磁盘路径。
+          </div>
+        </details>
+      </div>
+
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)_10.5rem_auto]">
+        <label className="whitespace-nowrap text-xs font-semibold text-foreground" htmlFor="download-directory-path">
+          默认下载目录：
+        </label>
+        <input
+          id="download-directory-path"
+          value={settings.directoryPath}
+          readOnly
+          placeholder="浏览器默认下载目录"
+          className="h-11 min-w-0 rounded-md border border-white/10 bg-black/25 px-3 text-xs text-foreground outline-none placeholder:text-muted-foreground/65 focus:border-cyan/60 focus:ring-2 focus:ring-cyan/15"
+        />
+        <div className="col-span-2 grid grid-cols-[minmax(0,10.5rem)_auto] items-center gap-2 sm:col-span-1 sm:contents">
+          <Select
+            value={settings.organization}
+            onValueChange={(value) => {
+              if (!isDownloadOrganization(value)) return;
+              void persistDownloadSettings({ ...settings, organization: value });
+            }}
+            disabled={!isLoaded || isSaving}
+          >
+            <SelectTrigger
+              aria-label="目录组织方式"
+              className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                <span className="shrink-0 text-foreground">目录组织方式</span>
+                <span className="ml-auto truncate font-semibold text-foreground">{selectedOrganization.label}</span>
+              </span>
+            </SelectTrigger>
+            <SelectContent
+              align="end"
+              sideOffset={6}
+              className="w-[min(24rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1"
+            >
+              {DOWNLOAD_ORGANIZATION_OPTIONS.map((option) => (
+                <SelectItem
+                  key={option.value}
+                  value={option.value}
+                  textValue={option.label}
+                  className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]"
+                >
+                  <span className="grid gap-1 text-left">
+                    <span className="text-sm font-semibold text-foreground">{option.label}</span>
+                    <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    <code className="text-[11px] text-cyan/85">示例：{option.example}</code>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <button
+            type="button"
+            onClick={() => void chooseDirectory()}
+            disabled={!directoryPickerSupported || !isLoaded || isSaving}
+            className="inline-flex h-11 items-center justify-center gap-1.5 rounded-md border-0 bg-white/[0.045] px-3 text-xs font-semibold text-cyan transition hover:bg-white/[0.075] active:scale-[0.98] disabled:cursor-not-allowed disabled:text-muted-foreground"
+          >
+            {isSaving ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <FolderOpen className="size-3.5" aria-hidden="true" />}
+            {settings.directoryPath ? "更换目录" : "选择目录"}
+          </button>
+        </div>
+      </div>
+      {feedback ? (
+        <p className="mt-2 text-xs font-medium leading-5 text-rose-400" role="alert">
+          {feedback.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const router = useRouter();
+  const [activeSection, setActiveSection] = useState<"douyin" | "download">("douyin");
   const [credentialMethod, setCredentialMethod] = useState<"automatic" | "manual">("automatic");
   const [credentialStatus, setCredentialStatus] = useState<CredentialStatus>("idle");
   const [feedback, setFeedback] = useState<Feedback>();
@@ -88,6 +289,10 @@ export function SettingsPage() {
     () => undefined,
   );
   const [settings, setSettings] = useState<DouyinSettings>({ cookie: "" });
+  const [downloadSettings, setDownloadSettings] = useState<DownloadSettings>({
+    directoryPath: "",
+    organization: DEFAULT_DOWNLOAD_ORGANIZATION,
+  });
   const [isCredentialVisible, setIsCredentialVisible] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -174,7 +379,10 @@ export function SettingsPage() {
 
         if (isActive) {
           const loadedSettings = normalizeDouyinSettings(settingsPayload.settings?.douyin);
+          const loadedDownloadSettings = normalizeDownloadSettings(settingsPayload.settings?.download);
           setSettings(loadedSettings);
+          setDownloadSettings(loadedDownloadSettings);
+          cacheDownloadOrganization(loadedDownloadSettings.organization);
           setCredentialStatus(
             loadedSettings.credentialStatus === "valid"
               ? "valid"
@@ -273,22 +481,33 @@ export function SettingsPage() {
           </div>
         </header>
 
-        <div className="grid flex-1 md:grid-cols-[15rem_minmax(0,1fr)]">
+        <div className="grid flex-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[15rem_minmax(0,1fr)] md:grid-rows-1">
           <aside className="border-b border-white/10 px-4 py-4 sm:px-6 md:border-b-0 md:border-r md:px-4 lg:px-5">
             <nav className="grid gap-1" aria-label="设置导航">
               <button
                 type="button"
-                className="flex h-9 w-full items-center gap-2 rounded-md bg-cyan/[0.1] px-3 text-left text-sm font-semibold text-cyan"
-                aria-current="page"
+                onClick={() => setActiveSection("douyin")}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                aria-current={activeSection === "douyin" ? "page" : undefined}
               >
                 <UserRound className="size-4" aria-hidden="true" />
                 抖音账号凭证
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSection("download")}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "download" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                aria-current={activeSection === "download" ? "page" : undefined}
+              >
+                <Download className="size-4" aria-hidden="true" />
+                下载配置
               </button>
             </nav>
           </aside>
 
           <section className="min-w-0 px-4 py-4 sm:px-5 lg:px-6">
-            <div className="w-full max-w-2xl">
+            {activeSection === "douyin" ? (
+              <div className="w-full max-w-2xl">
               <div className="mb-4 border-b border-white/10 pb-3">
                 <h2 className="text-base font-semibold text-foreground">抖音账号凭证</h2>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -467,9 +686,23 @@ export function SettingsPage() {
                       autoComplete="off"
                       autoCorrect="off"
                       spellCheck={false}
-                      className="h-9 w-full rounded-md border border-cyan/40 bg-black/25 py-1.5 pl-3 pr-9 font-mono text-xs text-foreground outline-none transition placeholder:font-sans placeholder:text-muted-foreground/65 hover:border-cyan/55 focus:border-cyan/70 focus:ring-2 focus:ring-cyan/15"
+                      className="h-9 w-full rounded-md border border-cyan/40 bg-black/25 py-1.5 pl-3 pr-[4.5rem] font-mono text-xs text-foreground outline-none transition placeholder:font-sans placeholder:text-muted-foreground/65 hover:border-cyan/55 focus:border-cyan/70 focus:ring-2 focus:ring-cyan/15"
                       placeholder="粘贴完整 Cookie"
                     />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettings((current) => ({ ...current, cookie: "" }));
+                        setCredentialStatus("idle");
+                        setFeedback(undefined);
+                      }}
+                      disabled={!settings.cookie || isSaving}
+                      className="absolute inset-y-0 right-9 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-35"
+                      aria-label="清空访问凭证"
+                      title="清空访问凭证"
+                    >
+                      <X className="size-3.5" aria-hidden="true" />
+                    </button>
                     <button
                       type="button"
                       onClick={() => setIsCredentialVisible((current) => !current)}
@@ -515,7 +748,14 @@ export function SettingsPage() {
                   </p>
                 ) : null}
               </div>
-            </div>
+              </div>
+            ) : (
+              <DownloadSettingsPanel
+                isLoaded={isLoaded}
+                settings={downloadSettings}
+                onSettingsChange={setDownloadSettings}
+              />
+            )}
           </section>
         </div>
       </div>

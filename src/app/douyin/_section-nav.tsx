@@ -17,6 +17,7 @@ function SectionLink({ active, href, label }: { active: boolean; href: string; l
   return (
     <Link
       href={href}
+      prefetch={false}
       role="tab"
       aria-selected={active}
       className={`inline-flex h-8 cursor-pointer items-center justify-center rounded-md text-xs font-semibold transition-all active:scale-[0.98] ${active ? "bg-cyan/[0.12] text-cyan shadow-[inset_0_0_0_1px_rgba(34,211,238,0.12)]" : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"}`}

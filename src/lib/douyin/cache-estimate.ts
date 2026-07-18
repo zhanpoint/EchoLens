@@ -1,3 +1,5 @@
+const SIMULATED_PROGRESS_DURATION_SCALE = 0.63;
+
 export function estimateMediaProcessingDurationSeconds(videoDurationSeconds: number | undefined): number | null {
   if (!Number.isFinite(videoDurationSeconds) || !videoDurationSeconds || videoDurationSeconds <= 0) {
     return null;
@@ -5,5 +7,5 @@ export function estimateMediaProcessingDurationSeconds(videoDurationSeconds: num
 
   const videoSeconds = Math.max(0, videoDurationSeconds);
   const estimatedSeconds = 15 + videoSeconds * 0.016 + Math.sqrt(videoSeconds) * 0.68;
-  return Math.ceil(estimatedSeconds);
+  return Math.ceil(estimatedSeconds * SIMULATED_PROGRESS_DURATION_SCALE);
 }

@@ -1,4 +1,4 @@
-import { execute, queryRow, withTransaction } from "@/lib/storage/postgres";
+import { execute, queryRow, toPostgresTimestamp, withTransaction } from "@/lib/storage/postgres";
 
 type UserRow = {
   created_at: number;
@@ -49,12 +49,11 @@ export async function insertUser(input: {
   termsAcceptedAt: number;
   username: string;
 }): Promise<UserRow> {
-  const now = Date.now();
   const row = await queryRow<UserRow>(
     `INSERT INTO users (id, username, email, password_hash, terms_accepted_at, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
      RETURNING id, username, email, password_hash, created_at`,
-    [input.id, input.username, input.email, input.passwordHash, input.termsAcceptedAt, now],
+    [input.id, input.username, input.email, input.passwordHash, toPostgresTimestamp(input.termsAcceptedAt)],
   );
   if (!row) {
     throw new Error("用户创建失败。");
@@ -64,8 +63,8 @@ export async function insertUser(input: {
 
 export async function updateUserPassword(userId: string, passwordHash: string): Promise<void> {
   await execute(
-    "UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3",
-    [passwordHash, Date.now(), userId],
+    "UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+    [passwordHash, userId],
   );
 }
 
@@ -74,11 +73,10 @@ export async function createSessionRow(input: {
   tokenHash: string;
   userId: string;
 }): Promise<void> {
-  const now = Date.now();
   await execute(
     `INSERT INTO sessions (token_hash, user_id, expires_at, created_at, last_seen_at)
-     VALUES ($1, $2, $3, $4, $4)`,
-    [input.tokenHash, input.userId, input.expiresAt, now],
+     VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [input.tokenHash, input.userId, toPostgresTimestamp(input.expiresAt)],
   );
 }
 
@@ -104,14 +102,13 @@ export async function readSessionUser(tokenHash: string): Promise<SessionRow | u
     return undefined;
   }
 
-  await execute("UPDATE sessions SET last_seen_at = $1 WHERE token_hash = $2", [Date.now(), tokenHash]);
+  await execute("UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = $1", [tokenHash]);
   return row;
 }
 
 export async function cleanupExpiredAuthRows(): Promise<void> {
-  const now = Date.now();
-  await execute("DELETE FROM sessions WHERE expires_at <= $1", [now]);
-  await execute("DELETE FROM email_codes WHERE expires_at <= $1 OR used_at IS NOT NULL", [now]);
+  await execute("DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP");
+  await execute("DELETE FROM email_codes WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL");
 }
 
 export async function readRecentEmailCode(email: string, purpose: string): Promise<{ sent_at: number } | undefined> {
@@ -132,16 +129,15 @@ export async function replaceEmailCode(input: {
   id: string;
   purpose: string;
 }): Promise<void> {
-  const now = Date.now();
   await withTransaction(async (client) => {
     await client.query(
-      "UPDATE email_codes SET used_at = $1 WHERE lower(email) = lower($2) AND purpose = $3 AND used_at IS NULL",
-      [now, input.email, input.purpose],
+      "UPDATE email_codes SET used_at = CURRENT_TIMESTAMP WHERE lower(email) = lower($1) AND purpose = $2 AND used_at IS NULL",
+      [input.email, input.purpose],
     );
     await client.query(
       `INSERT INTO email_codes (id, email, purpose, code_hash, attempts, expires_at, sent_at, used_at)
-       VALUES ($1, $2, $3, $4, 0, $5, $6, NULL)`,
-      [input.id, input.email, input.purpose, input.codeHash, input.expiresAt, now],
+       VALUES ($1, $2, $3, $4, 0, $5, CURRENT_TIMESTAMP, NULL)`,
+      [input.id, input.email, input.purpose, input.codeHash, toPostgresTimestamp(input.expiresAt)],
     );
   });
 }
@@ -162,5 +158,5 @@ export async function markEmailCodeAttempt(id: string, attempts: number): Promis
 }
 
 export async function markEmailCodeUsed(id: string): Promise<void> {
-  await execute("UPDATE email_codes SET used_at = $1 WHERE id = $2", [Date.now(), id]);
+  await execute("UPDATE email_codes SET used_at = CURRENT_TIMESTAMP WHERE id = $1", [id]);
 }
