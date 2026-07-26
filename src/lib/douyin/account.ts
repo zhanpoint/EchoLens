@@ -1,4 +1,5 @@
 import { readUserSettings, upsertUserSetting } from "@/lib/user-settings";
+import { assertDouyinAccountServicesEnabled } from "./account-services";
 import { createDouyinWebClient, DouyinApiError, normalizeCookie } from "./web-client";
 
 type StoredDouyinSettings = {
@@ -16,6 +17,7 @@ export type DouyinCredentialState = {
 };
 
 export async function readDouyinCredentialState(userId: string): Promise<DouyinCredentialState> {
+  assertDouyinAccountServicesEnabled();
   const settings = await readUserSettings(userId);
   const douyin = settings.douyin && typeof settings.douyin === "object"
     ? settings.douyin as StoredDouyinSettings
@@ -34,6 +36,7 @@ export async function readDouyinCredentialState(userId: string): Promise<DouyinC
 }
 
 export async function validateDouyinCredential(cookie: string): Promise<void> {
+  assertDouyinAccountServicesEnabled();
   const self = await createDouyinWebClient(cookie).getSelfProfile(1);
   if (typeof (self.sec_uid ?? self.secUid) !== "string" || !(self.sec_uid ?? self.secUid)) {
     throw new DouyinApiError("访问凭证无效或已过期，请重新获取。", "LOGIN_REQUIRED");
@@ -41,6 +44,7 @@ export async function validateDouyinCredential(cookie: string): Promise<void> {
 }
 
 export async function validateAndStoreDouyinCredential(userId: string, cookie: string): Promise<DouyinCredentialState> {
+  assertDouyinAccountServicesEnabled();
   const normalized = normalizeCookie(cookie);
   if (!normalized) {
     const state = { checkedAt: null, cookie: "", status: "missing" } as const;

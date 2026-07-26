@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/app/api/auth/_shared";
+import { rejectDisabledDouyinAccountServices } from "../../_account-services";
 import { readDouyinCredentialState } from "@/lib/douyin/account";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  const disabled = rejectDisabledDouyinAccountServices();
+  if (disabled) return disabled;
+
   const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;

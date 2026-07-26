@@ -888,7 +888,13 @@ function GuideImageModal({
   );
 }
 
-export function SettingsPage({ initialSection = "aiCredential" }: { initialSection?: SettingsSection }) {
+export function SettingsPage({
+  douyinAccountServicesEnabled,
+  initialSection = "aiCredential",
+}: {
+  douyinAccountServicesEnabled: boolean;
+  initialSection?: SettingsSection;
+}) {
   const router = useRouter();
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
   const [aiCredentialConfigured, setAiCredentialConfigured] = useState(false);
@@ -1136,15 +1142,17 @@ export function SettingsPage({ initialSection = "aiCredential" }: { initialSecti
                 <KeyRound className="size-4" aria-hidden="true" />
                 自定义 APIKey
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("douyin")}
-                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
-                aria-current={activeSection === "douyin" ? "page" : undefined}
-              >
-                <UserRound className="size-4" aria-hidden="true" />
-                抖音账号凭证
-              </button>
+              {douyinAccountServicesEnabled ? (
+                <button
+                  type="button"
+                  onClick={() => setActiveSection("douyin")}
+                  className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                  aria-current={activeSection === "douyin" ? "page" : undefined}
+                >
+                  <UserRound className="size-4" aria-hidden="true" />
+                  抖音账号凭证
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setActiveSection("download")}
@@ -1172,7 +1180,7 @@ export function SettingsPage({ initialSection = "aiCredential" }: { initialSecti
                  onConfiguredChange={setAiCredentialConfigured}
                  onModelsChange={setAiModels}
                />
-            ) : activeSection === "douyin" ? (
+            ) : activeSection === "douyin" && douyinAccountServicesEnabled ? (
               <div className="w-full max-w-2xl">
               <div className="mb-4 border-b border-white/10 pb-3">
                 <h2 className="text-base font-semibold text-foreground">抖音账号凭证</h2>

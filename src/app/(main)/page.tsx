@@ -110,6 +110,9 @@ type ApiError = {
 };
 
 type ApiPayload = ApiError | Record<string, unknown>;
+type PublicFeatures = {
+  douyinAccountServicesEnabled?: boolean;
+};
 type SegmentTranslation = {
   error?: string;
   errorCode?: string;
@@ -1275,7 +1278,27 @@ function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
   return typeof action === "function" ? (action as (value: T) => T)(current) : action;
 }
 
+function useDouyinAccountServicesEnabled(): boolean {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/features", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<PublicFeatures> : null)
+      .then((features) => {
+        if (active) setEnabled(features?.douyinAccountServicesEnabled === true);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return enabled;
+}
+
 export default function HomePage() {
+  const douyinAccountServicesEnabled = useDouyinAccountServicesEnabled();
   const router = useRouter();
   const [initialSession] = useState(() => createWorkflowSession());
   const [activeSessionId, setActiveSessionId] = useState(initialSession.historyRecordId);
@@ -2563,6 +2586,7 @@ export default function HomePage() {
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
           activeId={activeSidebarId}
+          douyinAccountServicesEnabled={douyinAccountServicesEnabled}
           entries={sidebarEntries}
           isDrawerOpen={historyDrawerOpen}
           isOpen={historySidebarOpen}
@@ -2780,12 +2804,12 @@ export default function HomePage() {
 
         <section
           className={cn(
-            "work-flow-panel shrink-0 rounded-lg border border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
-            hasVisibleResults ? "min-h-[10.5rem] overflow-hidden p-4 sm:p-5" : "overflow-visible p-0",
+            "work-flow-panel shrink-0 rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
+            hasVisibleResults ? "min-h-[10.5rem] overflow-hidden" : "overflow-visible",
           )}
         >
           {activeKind ? (
-            <div className={cn("relative z-10", hasVisibleResults ? "" : "px-4 pt-4 sm:px-5 sm:pt-5")}>
+            <div className="relative z-10 px-4 pt-4 sm:px-5 sm:pt-5">
               <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-2 gap-y-4 text-left text-sm xl:flex-nowrap">
                 <dl className="contents">
                   <InfoRow className="w-20 shrink-0" label="作品类型" singleLine value={KIND_LABELS[activeKind]} />
@@ -2826,6 +2850,7 @@ export default function HomePage() {
                 {displayWork ? (
                   <WorkDownloadActions
                     cachedAssets={cachedAssets}
+                    commentsEnabled={douyinAccountServicesEnabled}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
                     onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
@@ -2850,10 +2875,12 @@ export default function HomePage() {
           )}
 
           {!isHistoryMode && error ? (
-            <div className={cn(
-              "relative z-10 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-destructive",
-              hasVisibleResults ? "mt-5" : "mt-3 sm:px-5",
-            )}>
+            <div
+              className={cn(
+                "relative z-10 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-destructive sm:px-5",
+                hasVisibleResults ? "mt-5" : "mt-3",
+              )}
+            >
               <AlertCircle className="size-4 shrink-0" />
               <span>{error}</span>
               <NetworkRetryButton
@@ -3060,6 +3087,7 @@ function TopToast({
 
 function TranscriptHistorySidebar({
   activeId,
+  douyinAccountServicesEnabled,
   isDrawerOpen,
   isLoading,
   isOpen,
@@ -3077,6 +3105,7 @@ function TranscriptHistorySidebar({
   showReturnLive,
 }: {
   activeId?: string;
+  douyinAccountServicesEnabled: boolean;
   entries: SidebarEntry[];
   isDrawerOpen: boolean;
   isLoading: boolean;
@@ -3163,16 +3192,18 @@ function TranscriptHistorySidebar({
           />
         </label>
       </div>
-      <div className="mt-4 border-t border-white/10 pt-2">
-        <Link
-          href="/douyin/favorites"
-          prefetch={false}
-          className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
-        >
-          <Star className="size-4 shrink-0 text-amber" aria-hidden="true" />
-          收藏与关注
-        </Link>
-      </div>
+      {douyinAccountServicesEnabled ? (
+        <div className="mt-4 border-t border-white/10 pt-2">
+          <Link
+            href="/douyin/favorites"
+            prefetch={false}
+            className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08] active:scale-[0.99]"
+          >
+            <Star className="size-4 shrink-0 text-amber" aria-hidden="true" />
+            收藏与关注
+          </Link>
+        </div>
+      ) : null}
       <div className="content-scroll mt-5 min-h-0 flex-1 overflow-auto pb-3">
         {isLoading ? (
           <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -3239,15 +3270,17 @@ function TranscriptHistorySidebar({
             >
               <Search className="size-4" aria-hidden="true" />
             </button>
-            <Link
-              href="/douyin/favorites"
-              prefetch={false}
-              className="mt-1 inline-flex size-8 items-center justify-center rounded-md text-amber transition hover:bg-amber/[0.1]"
-              aria-label="收藏与关注"
-              title="收藏与关注"
-            >
-              <Star className="size-4" aria-hidden="true" />
-            </Link>
+            {douyinAccountServicesEnabled ? (
+              <Link
+                href="/douyin/favorites"
+                prefetch={false}
+                className="mt-1 inline-flex size-8 items-center justify-center rounded-md text-amber transition hover:bg-amber/[0.1]"
+                aria-label="收藏与关注"
+                title="收藏与关注"
+              >
+                <Star className="size-4" aria-hidden="true" />
+              </Link>
+            ) : null}
           </div>
         )}
       </aside>
@@ -4460,11 +4493,13 @@ type AssetPayload = {
 
 function WorkDownloadActions({
   cachedAssets,
+  commentsEnabled,
   historyRecordId,
   onRetryAsset,
   work,
 }: {
   cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>;
+  commentsEnabled: boolean;
   historyRecordId: string;
   onRetryAsset: (asset: MediaAssetKind) => void;
   work: ResolvedDouyinWork;
@@ -4575,7 +4610,9 @@ function WorkDownloadActions({
           </div>
         );
       })}
-      <CommentActions key={historyRecordId} historyRecordId={historyRecordId} work={work} />
+      {commentsEnabled ? (
+        <CommentActions key={historyRecordId} historyRecordId={historyRecordId} work={work} />
+      ) : null}
       {downloadError ? (
         <p className="w-full text-xs font-medium leading-5 text-rose-400" role="alert">
           {downloadError}

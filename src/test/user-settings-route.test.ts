@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 vi.mock("@/app/api/auth/_shared", () => ({
@@ -9,10 +9,13 @@ const settingsStore = new Map<string, unknown>();
 
 vi.mock("@/lib/user-settings", () => ({
   isUserSettingsCategory: (value: string) => ["aiCredential", "aiModels", "douyin", "download", "transcript", "translation"].includes(value),
-  readUserSettings: vi.fn(async (userId: string) => ({
+  readUserSettings: vi.fn(async (
+    userId: string,
+    options: { includeDouyin?: boolean } = {},
+  ) => ({
     ...(settingsStore.has(`${userId}:aiCredential`) ? { aiCredential: settingsStore.get(`${userId}:aiCredential`) } : {}),
     aiModels: settingsStore.get(`${userId}:aiModels`),
-    douyin: settingsStore.get(`${userId}:douyin`),
+    ...(options.includeDouyin === false ? {} : { douyin: settingsStore.get(`${userId}:douyin`) }),
     transcript: settingsStore.get(`${userId}:transcript`),
     translation: settingsStore.get(`${userId}:translation`),
   })),
@@ -32,16 +35,41 @@ vi.mock("@/lib/douyin/account", () => ({
 }));
 
 import { requireUser } from "@/app/api/auth/_shared";
+import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { GET, PUT } from "@/app/api/user/settings/route";
 import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
 
 const requireUserMock = vi.mocked(requireUser);
+const validateDouyinCredentialMock = vi.mocked(validateAndStoreDouyinCredential);
 
 describe("user settings route", () => {
   beforeEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
     settingsStore.clear();
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
+  });
+
+  afterEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
+  });
+
+  it("hides stored Douyin credentials and rejects updates when disabled", async () => {
+    settingsStore.set("user-1:douyin", { cookie: "sessionid=secret", credentialStatus: "valid" });
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+
+    const getResponse = await GET(new Request("https://echolens.test/api/user/settings"));
+    expect((await getResponse.json()).settings).not.toHaveProperty("douyin");
+    requireUserMock.mockClear();
+
+    const putResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
+      body: JSON.stringify({ category: "douyin", value: { cookie: "sessionid=new" } }),
+      method: "PUT",
+    }));
+    expect(putResponse.status).toBe(503);
+    expect(await putResponse.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
+    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(validateDouyinCredentialMock).not.toHaveBeenCalled();
   });
 
   it("requires authentication", async () => {

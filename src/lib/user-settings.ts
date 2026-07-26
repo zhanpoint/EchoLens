@@ -8,15 +8,25 @@ type UserSettingRow = {
   value: unknown;
 };
 
+type ReadUserSettingsOptions = {
+  includeDouyin?: boolean;
+};
+
 const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["aiCredential", "aiModels", "douyin", "download", "transcript", "translation"]);
 
 export function isUserSettingsCategory(value: string): value is UserSettingsCategory {
   return USER_SETTINGS_CATEGORIES.has(value as UserSettingsCategory);
 }
 
-export async function readUserSettings(userId: string): Promise<Partial<Record<UserSettingsCategory, unknown>>> {
+export async function readUserSettings(
+  userId: string,
+  options: ReadUserSettingsOptions = {},
+): Promise<Partial<Record<UserSettingsCategory, unknown>>> {
+  const includeDouyin = options.includeDouyin ?? true;
   const rows = await queryRows<UserSettingRow>(
-    "SELECT category, value FROM user_settings WHERE user_id = $1",
+    includeDouyin
+      ? "SELECT category, value FROM user_settings WHERE user_id = $1"
+      : "SELECT category, value FROM user_settings WHERE user_id = $1 AND category <> 'douyin'",
     [userId],
   );
 

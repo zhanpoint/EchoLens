@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 vi.mock("@/app/api/auth/_shared", () => ({
@@ -22,9 +22,23 @@ const readStateMock = vi.mocked(readDouyinCredentialState);
 
 describe("douyin credential status route", () => {
   beforeEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     readStateMock.mockResolvedValue({ checkedAt: 1_234, cookie: "sessionid=abc", status: "valid" });
+  });
+
+  afterEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
+  });
+
+  it("rejects before authentication and credential reading when disabled", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+    const response = await GET(new Request("https://echolens.test/api/douyin/credential/validate"));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
+    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(readStateMock).not.toHaveBeenCalled();
   });
 
   it("requires authentication", async () => {

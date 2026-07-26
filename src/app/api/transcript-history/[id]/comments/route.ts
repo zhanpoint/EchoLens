@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
+import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
 import { readValidDouyinCredential } from "@/app/api/douyin/_credential";
 import { markDouyinCredentialInvalid } from "@/lib/douyin/account";
 import { collectDouyinComments } from "@/lib/douyin/comments";
@@ -26,6 +27,9 @@ type CollectionEvent =
   | { code: string; error: string; type: "error" };
 
 export async function GET(request: Request, context: RouteContext) {
+  const disabled = rejectDisabledDouyinAccountServices();
+  if (disabled) return disabled;
+
   const user = await requireUser(request);
   if (user instanceof NextResponse) return user;
 
@@ -61,6 +65,9 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  const disabled = rejectDisabledDouyinAccountServices();
+  if (disabled) return disabled;
+
   const user = await requireUser(request);
   if (user instanceof NextResponse) return user;
 

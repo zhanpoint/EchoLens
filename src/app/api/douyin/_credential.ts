@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { assertDouyinAccountServicesEnabled } from "@/lib/douyin/account-services";
 import { readDouyinCredentialState } from "@/lib/douyin/account";
 
 export async function readValidDouyinCredential(userId: string): Promise<string | NextResponse> {
+  assertDouyinAccountServicesEnabled();
   const state = await readDouyinCredentialState(userId);
   if (state.status === "valid") {
     return state.cookie;

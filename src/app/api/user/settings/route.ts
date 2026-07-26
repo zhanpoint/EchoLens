@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
+import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
+import { isDouyinAccountServicesEnabled } from "@/lib/douyin/account-services";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { DEFAULT_DOWNLOAD_ORGANIZATION, DOWNLOAD_ORGANIZATIONS } from "@/lib/download-settings";
@@ -44,18 +46,27 @@ export async function GET(request: Request) {
     return user;
   }
 
-  return NextResponse.json({ settings: toPublicSettings(await readUserSettings(user.id)) });
+  return NextResponse.json({
+    settings: toPublicSettings(await readUserSettings(user.id, {
+      includeDouyin: isDouyinAccountServicesEnabled(),
+    })),
+  });
 }
 
 export async function PUT(request: Request) {
-  const user = await requireUser(request);
-  if (user instanceof NextResponse) {
-    return user;
-  }
-
   const parsed = PutSettingsSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success || !isUserSettingsCategory(parsed.data.category)) {
     return NextResponse.json({ error: "设置参数无效。" }, { status: 400 });
+  }
+
+  if (parsed.data.category === "douyin") {
+    const disabled = rejectDisabledDouyinAccountServices();
+    if (disabled) return disabled;
+  }
+
+  const user = await requireUser(request);
+  if (user instanceof NextResponse) {
+    return user;
   }
 
   const value = parseSettingsValue(parsed.data.category, parsed.data.value);
@@ -76,7 +87,11 @@ export async function PUT(request: Request) {
   } else {
     await upsertUserSetting(user.id, parsed.data.category, value.data);
   }
-  return NextResponse.json({ settings: toPublicSettings(await readUserSettings(user.id)) });
+  return NextResponse.json({
+    settings: toPublicSettings(await readUserSettings(user.id, {
+      includeDouyin: isDouyinAccountServicesEnabled(),
+    })),
+  });
 }
 
 function parseSettingsValue(

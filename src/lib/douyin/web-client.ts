@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fetchWithRetry } from "@/lib/http/retry";
+import { assertDouyinAccountServicesEnabled } from "./account-services";
 import { signDouyinUrl } from "./xbogus";
 
 export const DOUYIN_BASE_URL = "https://www.douyin.com";
@@ -29,6 +30,7 @@ export type DouyinWebClient = {
 };
 
 export function createDouyinWebClient(value: string): DouyinWebClient {
+  assertDouyinAccountServicesEnabled();
   const cookie = normalizeCookie(value);
   const cookieMap = parseCookie(cookie);
   if (!cookie || !hasLoginCookie(cookieMap)) {

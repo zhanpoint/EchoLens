@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 
@@ -44,6 +44,7 @@ const requireUserMock = vi.mocked(requireUser);
 
 describe("transcript comment route", () => {
   beforeEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     mocks.readHistory.mockResolvedValue({ id: "history-1", workId: "123" });
@@ -55,6 +56,24 @@ describe("transcript comment route", () => {
       onProgress({ commentCount: 1, page: 1 });
       return payload;
     });
+  });
+
+  afterEach(() => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
+  });
+
+  it("rejects reads and collection before authentication or credential access when disabled", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+    const request = new Request("https://echolens.test/api/transcript-history/history-1/comments");
+    const [getResponse, postResponse] = await Promise.all([
+      GET(request, context()),
+      POST(new Request(request.url, { method: "POST" }), context()),
+    ]);
+    expect(getResponse.status).toBe(503);
+    expect(postResponse.status).toBe(503);
+    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(mocks.credential).not.toHaveBeenCalled();
+    expect(mocks.collect).not.toHaveBeenCalled();
   });
 
   it("requires an EchoLens user", async () => {

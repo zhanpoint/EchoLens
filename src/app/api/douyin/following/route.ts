@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/app/api/auth/_shared";
+import { rejectDisabledDouyinAccountServices } from "../_account-services";
 import { markDouyinCredentialInvalid } from "@/lib/douyin/account";
 import { collectDouyinFollowingUsers } from "@/lib/douyin/following";
 import { DouyinApiError } from "@/lib/douyin/web-client";
@@ -8,6 +9,9 @@ import { readValidDouyinCredential } from "../_credential";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  const disabled = rejectDisabledDouyinAccountServices();
+  if (disabled) return disabled;
+
   const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
