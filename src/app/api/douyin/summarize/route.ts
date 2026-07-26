@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireUser } from "@/app/api/auth/_shared";
+import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/dashscope/summary";
+import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
+import {
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+  NetworkRetryExhaustedError,
+} from "@/lib/http/retry";
 import { insertTranscriptHistorySummary, readTranscriptHistoryRecord, type TranscriptHistorySummary } from "@/lib/transcript/db";
 
 export const runtime = "nodejs";
@@ -38,11 +44,14 @@ export async function POST(request: Request) {
     transcript = record.transcriptContent;
   }
 
+  const dashScope = await readDashScopeUserConfig(user.id);
   return streamSummary({
+    apiKey: dashScope.apiKey,
     historyRecordId: parsed.data.historyRecordId,
     prompt: parsed.data.prompt,
     promptId: parsed.data.promptId,
     promptTitle: parsed.data.promptTitle,
+    model: dashScope.models.summary,
     transcript,
     userId: user.id,
     signal: request.signal,
@@ -51,11 +60,14 @@ export async function POST(request: Request) {
 
 type SummaryEvent =
   | { type: "delta"; value: string }
+  | { type: "replace"; value: "" }
   | { summary?: TranscriptHistorySummary; type: "done"; value: string }
   | { type: "error"; error: string; code?: string };
 
 function streamSummary(input: {
+  apiKey?: string;
   historyRecordId?: string;
+  model: string;
   prompt: string;
   promptId?: string;
   promptTitle?: string;
@@ -65,6 +77,22 @@ function streamSummary(input: {
 }): Response {
   const encoder = new TextEncoder();
   let closed = false;
+  let closeResponse: (() => void) | undefined;
+  const upstreamAbortController = new AbortController();
+  const abortUpstream = () => {
+    if (!upstreamAbortController.signal.aborted) {
+      upstreamAbortController.abort();
+    }
+  };
+  const handleInputAbort = () => {
+    abortUpstream();
+    closeResponse?.();
+  };
+  if (input.signal?.aborted) {
+    abortUpstream();
+  } else {
+    input.signal?.addEventListener("abort", handleInputAbort, { once: true });
+  }
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const close = () => {
@@ -73,8 +101,7 @@ function streamSummary(input: {
           controller.close();
         }
       };
-      const abort = () => close();
-      input.signal?.addEventListener("abort", abort, { once: true });
+      closeResponse = close;
       const send = (event: SummaryEvent) => {
         if (closed || input.signal?.aborted) {
           return;
@@ -84,12 +111,15 @@ function streamSummary(input: {
 
       try {
         const result = await streamSummarizeTranscript({
+          apiKey: input.apiKey,
+          model: input.model,
           prompt: input.prompt,
           transcript: input.transcript,
           onDelta: (delta) => send({ type: "delta", value: delta }),
-          signal: input.signal,
+          onReset: () => send({ type: "replace", value: "" }),
+          signal: upstreamAbortController.signal,
         });
-        if (input.signal?.aborted) {
+        if (upstreamAbortController.signal.aborted) {
           return;
         }
 
@@ -104,7 +134,7 @@ function streamSummary(input: {
                 userId: input.userId,
               })
             : undefined;
-          if (input.signal?.aborted) {
+          if (upstreamAbortController.signal.aborted) {
             return;
           }
           send({ summary, type: "done", value: result.content });
@@ -112,14 +142,27 @@ function streamSummary(input: {
           send({ type: "error", error: result.detail, code: result.code });
         }
       } catch (error) {
-        if (input.signal?.aborted) {
+        if (upstreamAbortController.signal.aborted) {
           return;
         }
-        send({ type: "error", error: error instanceof Error ? error.message : "AI处理失败。" });
+        logServerError("douyin.summarize", error);
+        const networkFailure = error instanceof NetworkRetryExhaustedError;
+        send({
+          type: "error",
+          error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "AI处理失败，请稍后重试。",
+          ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
+        });
       } finally {
-        input.signal?.removeEventListener("abort", abort);
+        input.signal?.removeEventListener("abort", handleInputAbort);
+        closeResponse = undefined;
         close();
       }
+    },
+    cancel() {
+      closed = true;
+      abortUpstream();
+      input.signal?.removeEventListener("abort", handleInputAbort);
+      closeResponse = undefined;
     },
   });
 

@@ -127,13 +127,59 @@ async function getReadyPostgresPool(): Promise<PooledQueryable> {
   return getPostgresPool();
 }
 
-async function migrateSchema(db: Queryable): Promise<void> {
+async function migrateSchema(db: PooledQueryable): Promise<void> {
   await dropLegacyAuthDisplayViews(db);
-  for (const statement of SCHEMA_STATEMENTS) {
+  await migrateLegacyAuthTimestamps(db);
+  for (const statement of CORE_SCHEMA_STATEMENTS) {
     await db.query(statement);
   }
-  await migrateLegacyAuthTimestamps(db);
+  await migrateTranscriptSchemaV3(db);
 }
+
+const TRANSCRIPT_SCHEMA_V3_VERSION = "transcript-schema-v3-session-name";
+
+async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [TRANSCRIPT_SCHEMA_V3_VERSION]);
+    const applied = await client.query<{ version: string }>(
+      "SELECT version FROM app_schema_migrations WHERE version = $1",
+      [TRANSCRIPT_SCHEMA_V3_VERSION],
+    );
+    if (applied.rows.length === 0) {
+      for (const statement of RESET_TRANSCRIPT_SCHEMA_STATEMENTS) {
+        await client.query(statement);
+      }
+    }
+    for (const statement of TRANSCRIPT_SCHEMA_STATEMENTS) {
+      await client.query(statement);
+    }
+    if (applied.rows.length === 0) {
+      await client.query(
+        "INSERT INTO app_schema_migrations (version) VALUES ($1)",
+        [TRANSCRIPT_SCHEMA_V3_VERSION],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+const RESET_TRANSCRIPT_SCHEMA_STATEMENTS = [
+  "DROP TABLE IF EXISTS transcript_history_summaries",
+  "DROP TABLE IF EXISTS transcript_history_assets",
+  "DROP TABLE IF EXISTS transcript_asr_tasks",
+  "DROP TABLE IF EXISTS transcript_custom_prompts",
+  "DROP TABLE IF EXISTS transcript_history_records",
+  "DROP TABLE IF EXISTS douyin_favorites_cache",
+  "DROP TABLE IF EXISTS douyin_following_cache",
+  "DROP INDEX IF EXISTS user_settings_user_id_idx",
+];
 
 const LEGACY_AUTH_DISPLAY_VIEWS = new Set(["users_display", "sessions_display", "email_codes_display"]);
 
@@ -183,7 +229,11 @@ async function migrateLegacyAuthTimestamps(db: Queryable): Promise<void> {
   }
 }
 
-const SCHEMA_STATEMENTS = [
+const CORE_SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS app_schema_migrations (
+      version text PRIMARY KEY,
+      applied_at timestamptz(3) NOT NULL DEFAULT now()
+    )`,
   `CREATE TABLE IF NOT EXISTS users (
       id text PRIMARY KEY,
       username text NOT NULL,
@@ -216,6 +266,15 @@ const SCHEMA_STATEMENTS = [
     )`,
   `CREATE INDEX IF NOT EXISTS email_codes_lookup_idx
       ON email_codes(lower(email), purpose, used_at, sent_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS auth_rate_limits (
+      scope text NOT NULL,
+      subject_hash text NOT NULL,
+      attempts integer NOT NULL,
+      window_started_at timestamptz(3) NOT NULL,
+      updated_at timestamptz(3) NOT NULL,
+      PRIMARY KEY(scope, subject_hash)
+    )`,
+  "CREATE INDEX IF NOT EXISTS auth_rate_limits_updated_at_idx ON auth_rate_limits(updated_at)",
   `CREATE TABLE IF NOT EXISTS user_settings (
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       category text NOT NULL,
@@ -223,20 +282,9 @@ const SCHEMA_STATEMENTS = [
       updated_at bigint NOT NULL,
       PRIMARY KEY (user_id, category)
     )`,
-  "CREATE INDEX IF NOT EXISTS user_settings_user_id_idx ON user_settings(user_id)",
-  "DROP TABLE IF EXISTS douyin_favorites_cache",
-  "DROP TABLE IF EXISTS douyin_following_cache",
-  `CREATE TABLE IF NOT EXISTS transcript_asr_audio_cache (
-      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      work_key text NOT NULL,
-      object_key text NOT NULL,
-      duration_seconds double precision NOT NULL,
-      created_at bigint NOT NULL,
-      updated_at bigint NOT NULL,
-      PRIMARY KEY(user_id, work_key, object_key)
-    )`,
-  `CREATE INDEX IF NOT EXISTS transcript_asr_audio_cache_user_work_idx
-      ON transcript_asr_audio_cache(user_id, work_key, updated_at DESC)`,
+];
+
+const TRANSCRIPT_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS transcript_asr_tasks (
       id text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -245,21 +293,17 @@ const SCHEMA_STATEMENTS = [
       task_id text NOT NULL,
       object_key text NOT NULL,
       model text NOT NULL,
+      credential_source text NOT NULL DEFAULT 'platform'
+        CHECK (credential_source IN ('platform', 'custom')),
       audio_duration_seconds double precision NOT NULL DEFAULT 0,
       history_record_id text,
       history_work jsonb,
       status text NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'canceled')),
       error_detail text,
-      created_at bigint NOT NULL,
-      updated_at bigint NOT NULL,
-      completed_at bigint
+      updated_at bigint NOT NULL
     )`,
-  `CREATE INDEX IF NOT EXISTS transcript_asr_tasks_user_idx
-      ON transcript_asr_tasks(user_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS transcript_asr_tasks_user_cache_idx
       ON transcript_asr_tasks(user_id, cache_key, status, updated_at DESC)`,
-  `CREATE INDEX IF NOT EXISTS transcript_asr_tasks_user_completed_idx
-      ON transcript_asr_tasks(user_id, status, completed_at)`,
   `CREATE TABLE IF NOT EXISTS transcript_history_records (
       id text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -269,29 +313,48 @@ const SCHEMA_STATEMENTS = [
       input_url text NOT NULL,
       final_url text NOT NULL,
       author_name text,
-      original_title text NOT NULL,
-      display_title text NOT NULL,
+      author_url text,
+      caption text NOT NULL,
+      session_name text NOT NULL,
       duration_seconds double precision,
       transcript_content text NOT NULL,
       transcript_segments jsonb,
       created_at bigint NOT NULL,
       updated_at bigint NOT NULL
     )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS transcript_history_records_user_work_uidx
+      ON transcript_history_records(user_id, work_key)`,
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS pinned_at bigint",
   `CREATE INDEX IF NOT EXISTS transcript_history_records_user_updated_idx
       ON transcript_history_records(user_id, updated_at DESC)`,
-  `CREATE INDEX IF NOT EXISTS transcript_history_records_user_work_idx
-      ON transcript_history_records(user_id, work_key, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS transcript_history_assets (
+      history_record_id text NOT NULL REFERENCES transcript_history_records(id) ON DELETE CASCADE,
+      asset_kind text NOT NULL CHECK (asset_kind IN ('avatar', 'cover', 'video', 'originalAudio')),
+      object_key text NOT NULL,
+      content_type text NOT NULL,
+      size_bytes bigint NOT NULL,
+      duration_seconds double precision,
+      verified_at bigint,
+      updated_at bigint NOT NULL,
+      PRIMARY KEY(history_record_id, asset_kind)
+    )`,
+  "ALTER TABLE transcript_history_assets ADD COLUMN IF NOT EXISTS verified_at bigint",
+  `CREATE TABLE IF NOT EXISTS transcript_history_comments (
+      history_record_id text PRIMARY KEY REFERENCES transcript_history_records(id) ON DELETE CASCADE,
+      payload jsonb NOT NULL,
+      comment_count integer NOT NULL,
+      collected_at bigint NOT NULL
+    )`,
   `CREATE TABLE IF NOT EXISTS transcript_history_summaries (
       id text PRIMARY KEY,
       history_record_id text NOT NULL REFERENCES transcript_history_records(id) ON DELETE CASCADE,
-      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       prompt_id text NOT NULL,
       prompt_title text NOT NULL,
       content text NOT NULL,
       created_at bigint NOT NULL
     )`,
   `CREATE INDEX IF NOT EXISTS transcript_history_summaries_record_idx
-      ON transcript_history_summaries(user_id, history_record_id, created_at DESC)`,
+      ON transcript_history_summaries(history_record_id, created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS transcript_custom_prompts (
       id text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

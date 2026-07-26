@@ -1,11 +1,13 @@
 import { cleanText, uniqueMediaReferences } from "./media";
 import { fetchWithRetry } from "@/lib/http/retry";
 import type { DouyinKind } from "../../types/douyin";
-import type { ResolvedDouyinWork } from "../../types/douyin";
+import type { DouyinWorkIdentity } from "../../types/douyin";
 
 type DouyinDetailPayload = {
   aweme_detail?: {
     author?: {
+      avatar_thumb?: unknown;
+      avatarThumb?: unknown;
       nickname?: unknown;
       sec_uid?: unknown;
       secUid?: unknown;
@@ -20,23 +22,6 @@ type DouyinDetailPayload = {
   };
 };
 
-type DetailRequest = {
-  label: string;
-  parse: (body: string, work: Pick<ResolvedDouyinWork, "id" | "kind">) => unknown;
-  url: string;
-  headers: Record<string, string>;
-};
-
-type DetailAttempt = {
-  label: string;
-  reason: string;
-  status?: number;
-  body?: string;
-};
-
-const DETAIL_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const SHARE_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 " +
   "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
@@ -44,48 +29,56 @@ const METADATA_REQUEST_TIMEOUT_MS = 12_000;
 
 export type DouyinWorkMetadata = {
   authorName?: string;
+  authorAvatarUrls?: string[];
   authorUrl?: string;
   caption?: string;
   coverUrls?: string[];
   durationSeconds?: number;
-  title?: string;
   videoUrls?: string[];
 };
 
+export type CompleteDouyinWorkMetadata = DouyinWorkMetadata & {
+  authorAvatarUrls: string[];
+  authorName: string;
+  caption: string;
+  coverUrls: string[];
+  durationSeconds: number;
+  videoUrls: string[];
+};
+
 export async function collectWorkMetadata(
-  work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">,
-): Promise<DouyinWorkMetadata> {
-  const attempts: DetailAttempt[] = [];
-  let collected: DouyinWorkMetadata = {};
-
-  for (const request of buildDetailRequests(work)) {
-    const payload = await fetchDetailPayload(request, attempts, work);
-    const detail = readAwemeDetail(payload);
-    if (!detail) {
-      continue;
-    }
-
-    const metadata = parseWorkMetadata({ aweme_detail: detail }, work.id, work.kind);
-    if (hasMetadata(metadata)) {
-      collected = mergeMetadata(collected, metadata);
-      if (hasPrimaryContent(collected)) {
-        return collected;
-      }
-      continue;
-    }
-
-    attempts.push({
-      label: request.label,
-      reason: "aweme_detail parsed without usable metadata",
-    });
+  work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
+  options: { signal?: AbortSignal } = {},
+): Promise<CompleteDouyinWorkMetadata> {
+  const response = await fetchWithRetry(buildSharePageUrl(work), {
+    cache: "no-store",
+    headers: buildSharePageHeaders(),
+    signal: options.signal,
+    retry: { timeoutMs: METADATA_REQUEST_TIMEOUT_MS },
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`抖音作品信息请求失败：HTTP ${response.status}`);
   }
 
-  if (hasMetadata(collected)) {
-    return collected;
+  const payload = parseSharePagePayload(await response.text(), work);
+  const metadata = parseWorkMetadata(payload, work.id, work.kind);
+  if (!hasCompleteMetadata(metadata)) {
+    throw new Error("抖音作品信息不完整，请稍后重试。");
   }
+  return metadata;
+}
 
-  warnMetadataFailure(work, attempts);
-  return {};
+function hasCompleteMetadata(metadata: DouyinWorkMetadata): metadata is CompleteDouyinWorkMetadata {
+  return Boolean(
+    metadata.authorName &&
+    metadata.authorAvatarUrls?.length &&
+    metadata.caption &&
+    metadata.coverUrls?.length &&
+    metadata.videoUrls?.length &&
+    metadata.durationSeconds &&
+    metadata.durationSeconds > 0,
+  );
 }
 
 export function parseWorkMetadata(
@@ -110,11 +103,11 @@ export function parseWorkMetadata(
 
   return {
     authorName: cleanText(readString(author?.nickname)),
+    authorAvatarUrls: readUrlList(author?.avatar_thumb ?? author?.avatarThumb),
     authorUrl: buildAuthorUrl(secUid, workId),
     caption: readCaption(detail),
     coverUrls,
     durationSeconds,
-    title: cleanText(readString(detail.preview_title) ?? readString(detail.previewTitle)),
     videoUrls,
   };
 }
@@ -130,51 +123,8 @@ export function buildAuthorUrl(secUid: string | undefined, workId: string): stri
   return url.toString();
 }
 
-function buildDetailRequests(work: Pick<ResolvedDouyinWork, "finalUrl" | "id" | "kind">): DetailRequest[] {
-  const headers = buildRequestHeaders(work.finalUrl);
-
-  return [
-    {
-      label: "share-page-ssr",
-      url: buildSharePageUrl(work),
-      headers: buildSharePageHeaders(),
-      parse: parseSharePagePayload,
-    },
-    {
-      label: "web-detail-aid-6383",
-      url: buildDetailApiUrl(work.id, "6383"),
-      headers,
-      parse: parseJson,
-    },
-    {
-      label: "web-detail-aid-1128",
-      url: buildDetailApiUrl(work.id, "1128"),
-      headers,
-      parse: parseJson,
-    },
-  ];
-}
-
-function buildSharePageUrl(work: Pick<ResolvedDouyinWork, "id" | "kind">): string {
+function buildSharePageUrl(work: Pick<DouyinWorkIdentity, "id" | "kind">): string {
   return new URL(`/share/${work.kind}/${work.id}`, "https://www.douyin.com").toString();
-}
-
-function buildDetailApiUrl(workId: string, aid: string): string {
-  const url = new URL("https://www.douyin.com/aweme/v1/web/aweme/detail/");
-  url.searchParams.set("aweme_id", workId);
-  url.searchParams.set("aid", aid);
-  url.searchParams.set("version_name", "23.5.0");
-  url.searchParams.set("device_platform", "webapp");
-  return url.toString();
-}
-
-function buildRequestHeaders(referer: string): Record<string, string> {
-  return {
-    accept: "application/json, text/plain, */*",
-    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-    referer,
-    "user-agent": DETAIL_USER_AGENT,
-  };
 }
 
 function buildSharePageHeaders(): Record<string, string> {
@@ -185,61 +135,7 @@ function buildSharePageHeaders(): Record<string, string> {
   };
 }
 
-async function fetchDetailPayload(
-  request: DetailRequest,
-  attempts: DetailAttempt[],
-  work: Pick<ResolvedDouyinWork, "id" | "kind">,
-): Promise<unknown> {
-  try {
-    const response = await fetchWithRetry(request.url, {
-      cache: "no-store",
-      headers: request.headers,
-      retry: { timeoutMs: METADATA_REQUEST_TIMEOUT_MS },
-    });
-    const text = await response.text();
-
-    if (!response.ok) {
-      attempts.push({
-        label: request.label,
-        reason: "upstream http error",
-        status: response.status,
-        body: truncateBody(text),
-      });
-      return null;
-    }
-
-    const payload = request.parse(text, work);
-    if (!payload) {
-      attempts.push({
-        label: request.label,
-        reason: "invalid json",
-        status: response.status,
-        body: truncateBody(text),
-      });
-      return null;
-    }
-
-    if (!readAwemeDetail(payload)) {
-      attempts.push({
-        label: request.label,
-        reason: "missing aweme_detail",
-        status: response.status,
-        body: truncateBody(text),
-      });
-      return null;
-    }
-
-    return payload;
-  } catch (error) {
-    attempts.push({
-      label: request.label,
-      reason: error instanceof Error ? error.message : "request failed",
-    });
-    return null;
-  }
-}
-
-function parseSharePagePayload(value: string, work: Pick<ResolvedDouyinWork, "id" | "kind">): unknown {
+function parseSharePagePayload(value: string, work: Pick<DouyinWorkIdentity, "id" | "kind">): unknown {
   const match = value.match(/<script>window\._ROUTER_DATA = ([\s\S]*?)<\/script>/u);
   if (!match) {
     return null;
@@ -286,70 +182,12 @@ function readAwemeDetail(payload: unknown): DouyinDetailPayload["aweme_detail"] 
   return detail && typeof detail === "object" ? detail : undefined;
 }
 
-function hasMetadata(metadata: DouyinWorkMetadata): boolean {
-  return Boolean(
-    metadata.authorName ||
-    metadata.caption ||
-    metadata.title ||
-    metadata.coverUrls?.length ||
-    metadata.videoUrls?.length,
-  );
-}
-
-export function selectResolvedTitle(
-  _kind: DouyinKind,
-  metadata: DouyinWorkMetadata,
-): string | undefined {
-  return metadata.caption ?? metadata.title;
-}
-
-function hasPrimaryContent(metadata: DouyinWorkMetadata): boolean {
-  return Boolean(
-    metadata.coverUrls?.length ||
-    metadata.videoUrls?.length,
-  );
-}
-
-function mergeMetadata(
-  current: DouyinWorkMetadata,
-  next: DouyinWorkMetadata,
-): DouyinWorkMetadata {
-  const coverUrls = uniqueMediaReferences([...(current.coverUrls ?? []), ...(next.coverUrls ?? [])]);
-  const videoUrls = uniqueMediaReferences([...(current.videoUrls ?? []), ...(next.videoUrls ?? [])]);
-
-  return {
-    authorName: current.authorName ?? next.authorName,
-    authorUrl: current.authorUrl ?? next.authorUrl,
-    caption: current.caption ?? next.caption,
-    coverUrls,
-    durationSeconds: current.durationSeconds ?? next.durationSeconds,
-    title: current.title ?? next.title,
-    videoUrls,
-  };
-}
-
 function parseJson(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
     return null;
   }
-}
-
-function truncateBody(value: string): string | undefined {
-  const text = value.trim();
-  return text ? text.slice(0, 400) : undefined;
-}
-
-function warnMetadataFailure(
-  work: Pick<ResolvedDouyinWork, "id" | "kind">,
-  attempts: DetailAttempt[],
-): void {
-  console.warn("[douyin] metadata collection failed", {
-    id: work.id,
-    kind: work.kind,
-    attempts,
-  });
 }
 
 function readString(value: unknown): string | undefined {

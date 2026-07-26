@@ -1,8 +1,11 @@
-import { execute, queryRow, queryRows } from "@/lib/storage/postgres";
+import type { TranscribeHistoryContext } from "@/lib/douyin/transcribe-request";
+import { TranscribeHistoryContextSchema } from "@/lib/douyin/transcribe-schema";
+import { execute, queryRow, queryRows, withTransaction, type DbExecutor } from "@/lib/storage/postgres";
 
 type StoredAsrTaskRow = {
   audio_duration_seconds: number | null;
   cache_key: string;
+  credential_source: AsrCredentialSource;
   error_detail: string | null;
   history_record_id: string | null;
   history_work: unknown;
@@ -17,13 +20,15 @@ type StoredAsrTaskRow = {
 };
 type TranscriptHistoryRecordRow = {
   author_name: string | null;
+  author_url: string | null;
+  caption: string | null;
   created_at: number;
-  display_title: string;
+  session_name: string;
   duration_seconds: number | null;
   final_url: string;
   id: string;
   input_url: string;
-  original_title: string;
+  pinned_at: number | null;
   transcript_content: string;
   transcript_segments: unknown;
   updated_at: number;
@@ -32,6 +37,17 @@ type TranscriptHistoryRecordRow = {
   work_key: string;
   work_kind: string;
 };
+type TranscriptHistoryAssetRow = {
+  asset_kind: TranscriptHistoryAssetKind;
+  content_type: string;
+  duration_seconds: number | null;
+  history_record_id: string;
+  object_key: string;
+  size_bytes: number;
+  updated_at: number;
+  verified_at: number | null;
+};
+
 type TranscriptHistorySummaryRow = {
   content: string;
   created_at: number;
@@ -50,9 +66,11 @@ type TranscriptCustomPromptRow = {
 };
 
 export type StoredAsrTaskStatus = "running" | "succeeded" | "failed" | "canceled";
+export type AsrCredentialSource = "platform" | "custom";
 export type StoredAsrTask = {
   audioDurationSeconds: number;
   cacheKey: string;
+  credentialSource: AsrCredentialSource;
   errorDetail?: string;
   historyContext?: StoredAsrHistoryContext;
   id: string;
@@ -64,19 +82,29 @@ export type StoredAsrTask = {
   userId: string;
   workKey: string;
 };
-export type StoredAsrHistoryContext = {
+export type StoredAsrHistoryContext = TranscribeHistoryContext;
+export type TranscriptHistoryAssetKind = "avatar" | "cover" | "video" | "originalAudio";
+export type TranscriptHistoryAsset = {
+  assetKind: TranscriptHistoryAssetKind;
+  contentType: string;
+  durationSeconds?: number;
   historyRecordId: string;
-  work: unknown;
+  objectKey: string;
+  sizeBytes: number;
+  updatedAt: number;
+  verifiedAt?: number;
 };
 export type TranscriptHistoryRecord = {
   authorName?: string;
+  authorUrl?: string;
+  caption: string;
   createdAt: number;
-  displayTitle: string;
+  sessionName: string;
   durationSeconds?: number;
   finalUrl: string;
   id: string;
   inputUrl: string;
-  originalTitle: string;
+  pinnedAt?: number;
   transcriptContent: string;
   transcriptSegments?: unknown;
   updatedAt: number;
@@ -104,41 +132,98 @@ export type TranscriptCustomPrompt = {
 
 const HISTORY_RECORD_COLUMNS = `
   id, user_id, work_key, work_id, work_kind, input_url, final_url,
-  author_name, original_title, display_title, duration_seconds,
-  transcript_content, transcript_segments, created_at, updated_at
+  author_name, author_url, caption, session_name, duration_seconds,
+  transcript_content, transcript_segments, created_at, updated_at, pinned_at
+`;
+
+const HISTORY_ASSET_COLUMNS = `
+  history_record_id, asset_kind, object_key, content_type, size_bytes,
+  duration_seconds, verified_at, updated_at
 `;
 
 const ASR_TASK_COLUMNS = `
-  id, user_id, work_key, cache_key, task_id, object_key, model,
+  id, user_id, work_key, cache_key, task_id, object_key, model, credential_source,
   audio_duration_seconds, history_record_id, history_work,
   status, error_detail, updated_at
 `;
 
-const SHANGHAI_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-export async function upsertAsrAudioCache(input: {
-  durationSeconds: number;
+export async function upsertTranscriptHistoryAsset(input: {
+  assetKind: TranscriptHistoryAssetKind;
+  contentType: string;
+  durationSeconds?: number;
+  historyRecordId: string;
   objectKey: string;
+  sizeBytes: number;
   userId: string;
-  workKey: string;
-}): Promise<void> {
-  const now = Date.now();
-  await execute(
-    `INSERT INTO transcript_asr_audio_cache (
-       user_id, work_key, object_key, duration_seconds, created_at, updated_at
+  verifiedAt?: number;
+}): Promise<TranscriptHistoryAsset | null> {
+  const row = await queryRow<TranscriptHistoryAssetRow>(
+    `INSERT INTO transcript_history_assets (
+       history_record_id, asset_kind, object_key, content_type, size_bytes, duration_seconds, verified_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $5)
-     ON CONFLICT(user_id, work_key, object_key) DO UPDATE SET
+     SELECT id, $3, $4, $5, $6, $7, $8, $9
+     FROM transcript_history_records
+     WHERE id = $1 AND user_id = $2
+     ON CONFLICT(history_record_id, asset_kind) DO UPDATE SET
+       object_key = excluded.object_key,
+       content_type = excluded.content_type,
+       size_bytes = excluded.size_bytes,
        duration_seconds = excluded.duration_seconds,
-       updated_at = excluded.updated_at`,
-    [input.userId, input.workKey, input.objectKey, input.durationSeconds, now],
+       verified_at = excluded.verified_at,
+       updated_at = excluded.updated_at
+     RETURNING ${HISTORY_ASSET_COLUMNS}`,
+    [
+      input.historyRecordId,
+      input.userId,
+      input.assetKind,
+      input.objectKey,
+      input.contentType,
+      input.sizeBytes,
+      input.durationSeconds ?? null,
+      input.verifiedAt ?? null,
+      Date.now(),
+    ],
   );
+  return row ? mapTranscriptHistoryAsset(row) : null;
+}
+
+export async function readTranscriptHistoryAsset(input: {
+  assetKind: TranscriptHistoryAssetKind;
+  historyRecordId: string;
+  userId: string;
+}): Promise<TranscriptHistoryAsset | null> {
+  const row = await queryRow<TranscriptHistoryAssetRow>(
+    `SELECT asset.history_record_id, asset.asset_kind, asset.object_key, asset.content_type,
+            asset.size_bytes, asset.duration_seconds, asset.verified_at, asset.updated_at
+     FROM transcript_history_assets asset
+     JOIN transcript_history_records history ON history.id = asset.history_record_id
+     WHERE history.user_id = $1 AND asset.history_record_id = $2 AND asset.asset_kind = $3
+     LIMIT 1`,
+    [input.userId, input.historyRecordId, input.assetKind],
+  );
+  return row ? mapTranscriptHistoryAsset(row) : null;
+}
+
+export async function listTranscriptHistoryAssets(input: {
+  historyRecordId: string;
+  userId: string;
+}): Promise<TranscriptHistoryAsset[]> {
+  const rows = await queryRows<TranscriptHistoryAssetRow>(
+    `SELECT asset.history_record_id, asset.asset_kind, asset.object_key, asset.content_type,
+            asset.size_bytes, asset.duration_seconds, asset.verified_at, asset.updated_at
+     FROM transcript_history_assets asset
+     JOIN transcript_history_records history ON history.id = asset.history_record_id
+     WHERE history.user_id = $1 AND asset.history_record_id = $2
+     ORDER BY asset.updated_at DESC`,
+    [input.userId, input.historyRecordId],
+  );
+  return rows.map(mapTranscriptHistoryAsset);
 }
 
 export async function insertAsrTask(input: {
   audioDurationSeconds: number;
   cacheKey: string;
+  credentialSource?: AsrCredentialSource;
   historyContext?: StoredAsrHistoryContext;
   id: string;
   model: string;
@@ -147,13 +232,28 @@ export async function insertAsrTask(input: {
   userId: string;
   workKey: string;
 }): Promise<void> {
+  await insertAsrTaskWithExecutor(input);
+}
+
+async function insertAsrTaskWithExecutor(input: {
+  audioDurationSeconds: number;
+  cacheKey: string;
+  credentialSource?: AsrCredentialSource;
+  historyContext?: StoredAsrHistoryContext;
+  id: string;
+  model: string;
+  objectKey: string;
+  taskId: string;
+  userId: string;
+  workKey: string;
+}, executor?: DbExecutor): Promise<void> {
   const now = Date.now();
   await execute(
     `INSERT INTO transcript_asr_tasks (
-       id, user_id, work_key, cache_key, task_id, object_key, model,
-       audio_duration_seconds, history_record_id, history_work, status, created_at, updated_at
+       id, user_id, work_key, cache_key, task_id, object_key, model, credential_source,
+       audio_duration_seconds, history_record_id, history_work, status, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'running', $11, $11)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, 'running', $12)`,
     [
       input.id,
       input.userId,
@@ -162,27 +262,45 @@ export async function insertAsrTask(input: {
       input.taskId,
       input.objectKey,
       input.model,
+      input.credentialSource ?? "platform",
       input.audioDurationSeconds,
       input.historyContext?.historyRecordId ?? null,
       stringifyJson(input.historyContext?.work),
       now,
     ],
+    executor,
   );
 }
 
 export async function reserveAsrTask(input: {
   audioDurationSeconds: number;
   cacheKey: string;
+  credentialSource: AsrCredentialSource;
   historyContext?: StoredAsrHistoryContext;
   id: string;
   model: string;
   objectKey: string;
   userId: string;
   workKey: string;
-}): Promise<void> {
-  await insertAsrTask({
-    ...input,
-    taskId: `pending:${input.id}`,
+}, platformQuotaLimitSeconds?: number): Promise<boolean> {
+  const reservedInput = { ...input, taskId: `pending:${input.id}` };
+  if (input.credentialSource !== "platform" || platformQuotaLimitSeconds === undefined) {
+    await insertAsrTaskWithExecutor(reservedInput);
+    return true;
+  }
+
+  return await withTransaction(async (transaction) => {
+    await queryRow(
+      "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+      [input.userId],
+      transaction,
+    );
+    const usedSeconds = await readPlatformAsrQuotaUsageSeconds({ userId: input.userId }, transaction);
+    if (usedSeconds + input.audioDurationSeconds > platformQuotaLimitSeconds) {
+      return false;
+    }
+    await insertAsrTaskWithExecutor(reservedInput, transaction);
+    return true;
   });
 }
 
@@ -238,21 +356,30 @@ export async function markAsrTaskRunning(id: string): Promise<void> {
   );
 }
 
-export async function markAsrTaskSucceeded(id: string): Promise<void> {
+export async function markAsrTaskSucceeded(id: string): Promise<boolean> {
   const now = Date.now();
-  await execute(
+  const rowCount = await execute(
     `UPDATE transcript_asr_tasks
-     SET status = 'succeeded', updated_at = $1, completed_at = $1
-     WHERE id = $2`,
+     SET status = 'succeeded', updated_at = $1
+     WHERE id = $2 AND status = 'running'`,
     [now, id],
   );
+  return rowCount > 0;
+}
+
+export async function deleteAsrTask(input: { id: string; userId: string }): Promise<boolean> {
+  const rowCount = await execute(
+    "DELETE FROM transcript_asr_tasks WHERE user_id = $1 AND id = $2 AND status = 'canceled'",
+    [input.userId, input.id],
+  );
+  return rowCount > 0;
 }
 
 export async function markAsrTaskFailed(id: string, detail: string): Promise<void> {
   const now = Date.now();
   await execute(
     `UPDATE transcript_asr_tasks
-     SET status = 'failed', error_detail = $1, updated_at = $2, completed_at = $2
+     SET status = 'failed', error_detail = $1, updated_at = $2
      WHERE id = $3`,
     [detail, now, id],
   );
@@ -262,61 +389,63 @@ export async function markAsrTaskCanceled(id: string, detail = "用户已放弃�
   const now = Date.now();
   await execute(
     `UPDATE transcript_asr_tasks
-     SET status = 'canceled', error_detail = $1, updated_at = $2, completed_at = $2
+     SET status = 'canceled', error_detail = $1, updated_at = $2
      WHERE id = $3 AND status = 'running'`,
     [detail, now, id],
   );
 }
 
-export async function readDailySucceededAsrDurationSeconds(input: {
-  now?: number;
+export async function readPlatformAsrQuotaUsageSeconds(input: {
   userId: string;
-}): Promise<number> {
-  const now = input.now ?? Date.now();
+}, executor?: DbExecutor): Promise<number> {
   const row = await queryRow<{ total: number | null }>(
     `SELECT COALESCE(SUM(audio_duration_seconds), 0)::double precision AS total
      FROM transcript_asr_tasks
      WHERE user_id = $1
-       AND status = 'succeeded'
-       AND completed_at >= $2
-       AND completed_at < $3`,
-    [input.userId, startOfLocalDay(now), startOfNextLocalDay(now)],
+       AND status IN ('running', 'succeeded')
+       AND credential_source = 'platform'`,
+    [input.userId],
+    executor,
   );
   return Number(row?.total ?? 0);
 }
 
-export async function upsertTranscriptHistoryRecord(input: {
+export type TranscriptHistoryRecordInput = {
   authorName?: string;
-  displayTitle?: string;
+  authorUrl?: string;
+  caption: string;
+  sessionName?: string;
   durationSeconds?: number;
   finalUrl: string;
   id: string;
   inputUrl: string;
-  originalTitle?: string;
   transcriptContent: string;
   transcriptSegments?: unknown;
   userId: string;
   workId: string;
   workKey: string;
   workKind: string;
-}): Promise<TranscriptHistoryRecord> {
+};
+
+export async function findOrCreateTranscriptHistoryRecord(
+  input: TranscriptHistoryRecordInput,
+): Promise<{ created: boolean; record: TranscriptHistoryRecord }> {
   const now = Date.now();
-  const title = normalizeHistoryTitle(input.originalTitle, input.finalUrl);
+  const title = requireHistoryCaption(input.caption);
   const row = await queryRow<TranscriptHistoryRecordRow>(
     `INSERT INTO transcript_history_records (
        id, user_id, work_key, work_id, work_kind, input_url, final_url,
-       author_name, original_title, display_title, duration_seconds,
+       author_name, author_url, caption, session_name, duration_seconds,
        transcript_content, transcript_segments, created_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $14)
-     ON CONFLICT(id) DO UPDATE SET
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $15)
+     ON CONFLICT(user_id, work_key) DO UPDATE SET
        input_url = excluded.input_url,
        final_url = excluded.final_url,
        author_name = excluded.author_name,
-       original_title = excluded.original_title,
+       author_url = excluded.author_url,
+       caption = excluded.caption,
        duration_seconds = excluded.duration_seconds,
-       transcript_content = excluded.transcript_content,
-       transcript_segments = excluded.transcript_segments,
        updated_at = excluded.updated_at
      RETURNING ${HISTORY_RECORD_COLUMNS}`,
     [
@@ -328,18 +457,101 @@ export async function upsertTranscriptHistoryRecord(input: {
       input.inputUrl,
       input.finalUrl,
       input.authorName ?? null,
+      input.authorUrl ?? null,
       title,
-      input.displayTitle?.trim() || title,
+      input.sessionName?.trim() || title,
       input.durationSeconds ?? null,
       input.transcriptContent,
       stringifyJson(input.transcriptSegments),
       now,
     ],
   );
-  if (!row) {
+  if (!row || row.user_id !== input.userId) {
+    throw new Error("转录历史创建失败。");
+  }
+  return {
+    created: row.id === input.id,
+    record: mapTranscriptHistoryRecord(row),
+  };
+}
+
+export async function upsertTranscriptHistoryRecord(
+  input: TranscriptHistoryRecordInput,
+): Promise<TranscriptHistoryRecord> {
+  const now = Date.now();
+  const title = requireHistoryCaption(input.caption);
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `INSERT INTO transcript_history_records (
+       id, user_id, work_key, work_id, work_kind, input_url, final_url,
+       author_name, author_url, caption, session_name, duration_seconds,
+       transcript_content, transcript_segments, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $15)
+     ON CONFLICT(id) DO UPDATE SET
+       input_url = excluded.input_url,
+       final_url = excluded.final_url,
+       author_name = excluded.author_name,
+       author_url = excluded.author_url,
+       caption = excluded.caption,
+       duration_seconds = excluded.duration_seconds,
+       transcript_content = excluded.transcript_content,
+       transcript_segments = excluded.transcript_segments,
+       updated_at = excluded.updated_at
+     WHERE transcript_history_records.user_id = excluded.user_id
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [
+      input.id,
+      input.userId,
+      input.workKey,
+      input.workId,
+      input.workKind,
+      input.inputUrl,
+      input.finalUrl,
+      input.authorName ?? null,
+      input.authorUrl ?? null,
+      title,
+      input.sessionName?.trim() || title,
+      input.durationSeconds ?? null,
+      input.transcriptContent,
+      stringifyJson(input.transcriptSegments),
+      now,
+    ],
+  );
+  if (!row || row.user_id !== input.userId) {
     throw new Error("转录历史保存失败。");
   }
   return mapTranscriptHistoryRecord(row);
+}
+
+export async function updateTranscriptHistoryRecordMetadata(input: {
+  authorName?: string;
+  authorUrl?: string;
+  caption: string;
+  durationSeconds?: number;
+  historyRecordId: string;
+  userId: string;
+}): Promise<TranscriptHistoryRecord | null> {
+  const caption = requireHistoryCaption(input.caption);
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `UPDATE transcript_history_records
+     SET author_name = COALESCE($1::text, author_name),
+         author_url = COALESCE($2::text, author_url),
+         caption = $3::text,
+         duration_seconds = COALESCE($4::double precision, duration_seconds),
+         updated_at = $5::bigint
+     WHERE id = $6::text AND user_id = $7::text
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [
+      input.authorName ?? null,
+      input.authorUrl ?? null,
+      caption,
+      input.durationSeconds ?? null,
+      Date.now(),
+      input.historyRecordId,
+      input.userId,
+    ],
+  );
+  return row ? mapTranscriptHistoryRecord(row) : null;
 }
 
 export async function listTranscriptHistoryRecords(input: {
@@ -353,16 +565,16 @@ export async function listTranscriptHistoryRecords(input: {
     ? await queryRows<TranscriptHistoryRecordRow>(
         `SELECT ${HISTORY_RECORD_COLUMNS}
          FROM transcript_history_records
-         WHERE user_id = $1 AND transcript_content <> '' AND display_title ILIKE $2
-         ORDER BY updated_at DESC
+         WHERE user_id = $1 AND session_name ILIKE $2
+         ORDER BY pinned_at IS NULL, updated_at DESC
          LIMIT $3`,
         [input.userId, `%${query}%`, limit],
       )
     : await queryRows<TranscriptHistoryRecordRow>(
         `SELECT ${HISTORY_RECORD_COLUMNS}
          FROM transcript_history_records
-         WHERE user_id = $1 AND transcript_content <> ''
-         ORDER BY updated_at DESC
+         WHERE user_id = $1
+         ORDER BY pinned_at IS NULL, updated_at DESC
          LIMIT $2`,
         [input.userId, limit],
       );
@@ -384,16 +596,31 @@ export async function readTranscriptHistoryRecord(input: {
 }
 
 export async function renameTranscriptHistoryRecord(input: {
-  displayTitle: string;
+  sessionName: string;
   id: string;
   userId: string;
 }): Promise<TranscriptHistoryRecord | null> {
   const row = await queryRow<TranscriptHistoryRecordRow>(
     `UPDATE transcript_history_records
-     SET display_title = $1, updated_at = $2
-     WHERE user_id = $3 AND id = $4
+     SET session_name = $1
+     WHERE user_id = $2 AND id = $3
      RETURNING ${HISTORY_RECORD_COLUMNS}`,
-    [input.displayTitle, Date.now(), input.userId, input.id],
+    [input.sessionName, input.userId, input.id],
+  );
+  return row ? mapTranscriptHistoryRecord(row) : null;
+}
+
+export async function setTranscriptHistoryRecordPinned(input: {
+  id: string;
+  pinned: boolean;
+  userId: string;
+}): Promise<TranscriptHistoryRecord | null> {
+  const row = await queryRow<TranscriptHistoryRecordRow>(
+    `UPDATE transcript_history_records
+     SET pinned_at = $1
+     WHERE user_id = $2 AND id = $3
+     RETURNING ${HISTORY_RECORD_COLUMNS}`,
+    [input.pinned ? Date.now() : null, input.userId, input.id],
   );
   return row ? mapTranscriptHistoryRecord(row) : null;
 }
@@ -442,11 +669,13 @@ export async function insertTranscriptHistorySummary(input: {
   const now = Date.now();
   const row = await queryRow<TranscriptHistorySummaryRow>(
     `INSERT INTO transcript_history_summaries (
-       id, history_record_id, user_id, prompt_id, prompt_title, content, created_at
+       id, history_record_id, prompt_id, prompt_title, content, created_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     SELECT $1::text, history.id, $3::text, $4::text, $5::text, $6::bigint
+     FROM transcript_history_records history
+     WHERE history.id = $2::text AND history.user_id = $7::text
      RETURNING id, prompt_id, prompt_title, content, created_at`,
-    [input.id, input.historyRecordId, input.userId, input.promptId, input.promptTitle, input.content, now],
+    [input.id, input.historyRecordId, input.promptId, input.promptTitle, input.content, now, input.userId],
   );
   if (!row) {
     throw new Error("转录总结保存失败。");
@@ -459,10 +688,11 @@ export async function listTranscriptHistorySummaries(input: {
   userId: string;
 }): Promise<TranscriptHistorySummary[]> {
   const rows = await queryRows<TranscriptHistorySummaryRow>(
-    `SELECT id, prompt_id, prompt_title, content, created_at
-     FROM transcript_history_summaries
-     WHERE user_id = $1 AND history_record_id = $2
-     ORDER BY created_at DESC`,
+    `SELECT summary.id, summary.prompt_id, summary.prompt_title, summary.content, summary.created_at
+     FROM transcript_history_summaries summary
+     JOIN transcript_history_records history ON history.id = summary.history_record_id
+     WHERE history.user_id = $1 AND summary.history_record_id = $2
+     ORDER BY summary.created_at DESC`,
     [input.userId, input.historyRecordId],
   );
   return rows.map(mapTranscriptHistorySummary);
@@ -474,9 +704,10 @@ export async function readTranscriptHistorySummary(input: {
   userId: string;
 }): Promise<TranscriptHistorySummary | null> {
   const row = await queryRow<TranscriptHistorySummaryRow>(
-    `SELECT id, prompt_id, prompt_title, content, created_at
-     FROM transcript_history_summaries
-     WHERE user_id = $1 AND history_record_id = $2 AND id = $3
+    `SELECT summary.id, summary.prompt_id, summary.prompt_title, summary.content, summary.created_at
+     FROM transcript_history_summaries summary
+     JOIN transcript_history_records history ON history.id = summary.history_record_id
+     WHERE history.user_id = $1 AND summary.history_record_id = $2 AND summary.id = $3
      LIMIT 1`,
     [input.userId, input.historyRecordId, input.id],
   );
@@ -489,7 +720,13 @@ export async function deleteTranscriptHistorySummary(input: {
   userId: string;
 }): Promise<boolean> {
   const rowCount = await execute(
-    "DELETE FROM transcript_history_summaries WHERE user_id = $1 AND history_record_id = $2 AND id = $3",
+    `DELETE FROM transcript_history_summaries
+     WHERE history_record_id = $2 AND id = $3
+       AND history_record_id IN (
+         SELECT history.id
+         FROM transcript_history_records history
+         WHERE history.user_id = $1 AND history.id = $2
+       )`,
     [input.userId, input.historyRecordId, input.id],
   );
   return rowCount > 0;
@@ -586,14 +823,11 @@ export async function readTranscriptCustomPrompt(input: {
   return row ? mapTranscriptCustomPrompt(row) : null;
 }
 
-export function nextAsrQuotaResetAt(now = Date.now()): number {
-  return startOfNextLocalDay(now);
-}
-
 function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
   return {
     audioDurationSeconds: row.audio_duration_seconds ?? 0,
     cacheKey: row.cache_key,
+    credentialSource: row.credential_source,
     errorDetail: row.error_detail ?? undefined,
     historyContext: mapAsrHistoryContext(row),
     id: row.id,
@@ -608,25 +842,25 @@ function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
 }
 
 function mapAsrHistoryContext(row: StoredAsrTaskRow): StoredAsrHistoryContext | undefined {
-  if (!row.history_record_id || row.history_work === null || row.history_work === undefined) {
-    return undefined;
-  }
-  return {
+  const parsed = TranscribeHistoryContextSchema.safeParse({
     historyRecordId: row.history_record_id,
     work: parseJsonValue(row.history_work),
-  };
+  });
+  return parsed.success ? parsed.data : undefined;
 }
 
 function mapTranscriptHistoryRecord(row: TranscriptHistoryRecordRow): TranscriptHistoryRecord {
   return {
     authorName: row.author_name ?? undefined,
+    authorUrl: row.author_url ?? undefined,
+    caption: requireStoredHistoryCaption(row.caption),
     createdAt: row.created_at,
-    displayTitle: row.display_title,
+    sessionName: row.session_name,
     durationSeconds: row.duration_seconds ?? undefined,
     finalUrl: row.final_url,
     id: row.id,
     inputUrl: row.input_url,
-    originalTitle: row.original_title,
+    pinnedAt: row.pinned_at ?? undefined,
     transcriptContent: row.transcript_content,
     transcriptSegments: parseJsonValue(row.transcript_segments) ?? undefined,
     updatedAt: row.updated_at,
@@ -634,6 +868,19 @@ function mapTranscriptHistoryRecord(row: TranscriptHistoryRecordRow): Transcript
     workId: row.work_id,
     workKey: row.work_key,
     workKind: row.work_kind,
+  };
+}
+
+function mapTranscriptHistoryAsset(row: TranscriptHistoryAssetRow): TranscriptHistoryAsset {
+  return {
+    assetKind: row.asset_kind,
+    contentType: row.content_type,
+    durationSeconds: row.duration_seconds ?? undefined,
+    historyRecordId: row.history_record_id,
+    objectKey: row.object_key,
+    sizeBytes: row.size_bytes,
+    updatedAt: row.updated_at,
+    verifiedAt: row.verified_at ?? undefined,
   };
 }
 
@@ -659,8 +906,19 @@ function mapTranscriptCustomPrompt(row: TranscriptCustomPromptRow): TranscriptCu
   };
 }
 
-function normalizeHistoryTitle(title: string | undefined, fallbackUrl: string): string {
-  return title?.trim() || fallbackUrl;
+function requireStoredHistoryCaption(caption: string | null): string {
+  if (!caption) {
+    throw new Error("历史记录缺少作品标题，请重新检测作品。");
+  }
+  return caption;
+}
+
+function requireHistoryCaption(caption: string): string {
+  const value = caption.trim();
+  if (!value) {
+    throw new Error("作品标题不能为空。");
+  }
+  return value;
 }
 
 function stringifyJson(value: unknown): string | null {
@@ -676,12 +934,4 @@ function parseJsonValue(value: unknown): unknown {
   } catch {
     return value;
   }
-}
-
-function startOfLocalDay(now: number): number {
-  return Math.floor((now + SHANGHAI_TIME_OFFSET_MS) / DAY_MS) * DAY_MS - SHANGHAI_TIME_OFFSET_MS;
-}
-
-function startOfNextLocalDay(now: number): number {
-  return startOfLocalDay(now) + DAY_MS;
 }

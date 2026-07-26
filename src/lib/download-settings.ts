@@ -12,9 +12,9 @@ export function isDownloadOrganization(value: unknown): value is DownloadOrganiz
 
 export type DownloadPathContext = {
   authorName?: string;
+  caption?: string;
   contentType?: string;
   workId?: string;
-  workTitle?: string;
 };
 
 export function buildDirectorySegments(
@@ -27,7 +27,7 @@ export function buildDirectorySegments(
   if (organization === "fileType") return [fileTypeDirectory(context.contentType, filename)];
   if (organization === "date") return [formatLocalDate(now)];
   if (organization === "author") return [sanitizeDownloadPathSegment(context.authorName, "未知作者")];
-  return [sanitizeDownloadPathSegment(context.workTitle || context.workId, "未知作品")];
+  return [sanitizeDownloadPathSegment(context.caption || context.workId, "未知作品")];
 }
 
 export function sanitizeDownloadPathSegment(value: string | undefined, fallback: string): string {

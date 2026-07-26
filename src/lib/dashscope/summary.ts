@@ -1,13 +1,17 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import { buildSummaryPromptContent } from "@/lib/ai/prompts";
-import { streamQwenChat } from "@/lib/dashscope/chat";
+import { streamDashScopeChat } from "@/lib/dashscope/chat";
+import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
 
 type SummaryPromptBuildResult =
   | { ok: true; prompt: string }
   | { ok: false; code: "unavailable"; detail: string };
 
 export async function streamSummarizeTranscript(input: {
+  apiKey?: string;
+  model?: string;
   onDelta: (delta: string) => void;
+  onReset?: () => void;
   prompt: string;
   signal?: AbortSignal;
   transcript: string;
@@ -17,9 +21,12 @@ export async function streamSummarizeTranscript(input: {
     return content;
   }
 
-  return streamQwenChat({
+  return streamDashScopeChat({
+    apiKey: input.apiKey,
+    model: input.model ?? DEFAULT_DASHSCOPE_MODELS.summary,
     prompt: content.prompt,
     onDelta: input.onDelta,
+    onReset: input.onReset,
     signal: input.signal,
   });
 }

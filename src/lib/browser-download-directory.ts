@@ -10,9 +10,9 @@ export type { DownloadOrganization } from "@/lib/download-settings";
 
 export type DownloadContext = {
   authorName?: string;
+  caption?: string;
   contentType?: string;
   workId?: string;
-  workTitle?: string;
 };
 
 type DirectoryPickerWindow = Window & {

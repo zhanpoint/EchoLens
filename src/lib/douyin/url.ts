@@ -1,11 +1,12 @@
-import type { DouyinKind, ResolvedDouyinWork } from "@/types/douyin";
+import type { DouyinKind, DouyinWorkIdentity } from "@/types/douyin";
 import { fetchWithRetry } from "@/lib/http/retry";
 
 const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
 const TRAILING_URL_PUNCTUATION_PATTERN = /[)\]}.,!?;:，。！？；：、]+$/u;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const MAX_REDIRECTS = 8;
+const MAX_REDIRECTS = 3;
 const CANONICAL_DOUYIN_ORIGIN = "https://www.douyin.com";
+const NETWORK_ERROR_MESSAGE = "网络连接失败，请检查网络后重试。";
 
 export class DouyinResolveError extends Error {
   constructor(
@@ -32,7 +33,7 @@ export function extractFirstUrl(input: string): string {
 }
 
 export function classifyDouyinUrl(value: string): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > {
   let url: URL;
@@ -54,8 +55,11 @@ export function classifyDouyinUrl(value: string): Pick<
   throw new DouyinResolveError("请粘贴抖音视频作品链接。", "unsupported_type");
 }
 
-export async function resolveDouyinInput(input: string): Promise<ResolvedDouyinWork> {
-  const inputUrl = extractFirstUrl(input);
+export async function resolveDouyinInput(input: string): Promise<DouyinWorkIdentity> {
+  return resolveDouyinUrl(extractFirstUrl(input));
+}
+
+export async function resolveDouyinUrl(inputUrl: string): Promise<DouyinWorkIdentity> {
   const directWork = classifyDirectWorkUrl(inputUrl);
   if (directWork) {
     return {
@@ -74,7 +78,7 @@ export async function resolveDouyinInput(input: string): Promise<ResolvedDouyinW
 }
 
 function classifyDirectWorkUrl(inputUrl: string): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > | null {
   try {
@@ -88,7 +92,7 @@ function classifyDirectWorkUrl(inputUrl: string): Pick<
 }
 
 function classifySupportedWorkUrl(value: string): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > | null {
   const url = new URL(value);
@@ -97,25 +101,34 @@ function classifySupportedWorkUrl(value: string): Pick<
 
 async function followRedirects(inputUrl: string): Promise<string> {
   let current = inputUrl;
+  let redirectCount = 0;
 
-  for (let i = 0; i < MAX_REDIRECTS; i += 1) {
+  while (true) {
     const work = classifySupportedWorkUrl(current);
     if (work) {
       return work.finalUrl;
+    }
+    if (redirectCount >= MAX_REDIRECTS) {
+      throw new DouyinResolveError("重定向次数过多。", "too_many_redirects");
     }
 
     const response = await fetchWithRetry(current, {
       method: "GET",
       redirect: "manual",
       headers: requestHeaders(),
-      retry: { timeoutMs: 12_000 },
-    }).catch((error: unknown) => {
-      throw new DouyinResolveError(
-        formatResolveNetworkError(error),
-        "network_error",
-      );
+      retry: {
+        attempts: 5,
+        baseDelayMs: 500,
+        maxDelayMs: 4_000,
+        timeoutMs: 12_000,
+      },
+    }).catch(() => {
+      throw new DouyinResolveError(NETWORK_ERROR_MESSAGE, "network_error");
     });
 
+    if (response.status === 429 || response.status >= 500) {
+      throw new DouyinResolveError(NETWORK_ERROR_MESSAGE, "network_error");
+    }
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response.url || current;
     }
@@ -126,17 +139,8 @@ async function followRedirects(inputUrl: string): Promise<string> {
     }
 
     current = new URL(location, current).toString();
+    redirectCount += 1;
   }
-
-  throw new DouyinResolveError("重定向次数过多。", "too_many_redirects");
-}
-
-function formatResolveNetworkError(error: unknown): string {
-  if (error instanceof Error && error.name === "AbortError") {
-    return "抖音链接响应超时，请稍后重试。";
-  }
-
-  return "暂时无法访问抖音链接，请稍后重试。";
 }
 
 function isShortDouyinUrl(value: string): boolean {
@@ -158,7 +162,7 @@ function requestHeaders(): HeadersInit {
 }
 
 function classifyCanonicalWorkUrl(url: URL): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > | null {
   if (!isDouyinHost(url.hostname)) {
@@ -174,7 +178,7 @@ function classifyCanonicalWorkUrl(url: URL): Pick<
 }
 
 function classifyShareWorkUrl(url: URL): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > | null {
   if (!isIesDouyinHost(url.hostname)) {
@@ -190,7 +194,7 @@ function classifyShareWorkUrl(url: URL): Pick<
 }
 
 function buildCanonicalWork(kind: DouyinKind, id: string): Pick<
-  ResolvedDouyinWork,
+  DouyinWorkIdentity,
   "finalUrl" | "kind" | "id"
 > {
   return {

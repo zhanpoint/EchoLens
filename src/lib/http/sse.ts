@@ -1,4 +1,11 @@
-export async function* readSseJsonStream<T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
+export type SseJsonStreamOptions = {
+  onDone?: () => void;
+};
+
+export async function* readSseJsonStream<T>(
+  stream: ReadableStream<Uint8Array>,
+  options: SseJsonStreamOptions = {},
+): AsyncGenerator<T> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -14,6 +21,10 @@ export async function* readSseJsonStream<T>(stream: ReadableStream<Uint8Array>):
       const events = buffer.split(/\r?\n\r?\n/u);
       buffer = events.pop() ?? "";
       for (const event of events) {
+        if (isSseDoneEvent(event)) {
+          options.onDone?.();
+          continue;
+        }
         const payload = parseSseJsonPayload<T>(event);
         if (payload) {
           yield payload;
@@ -22,6 +33,10 @@ export async function* readSseJsonStream<T>(stream: ReadableStream<Uint8Array>):
     }
 
     buffer += decoder.decode();
+    if (isSseDoneEvent(buffer)) {
+      options.onDone?.();
+      return;
+    }
     const payload = parseSseJsonPayload<T>(buffer);
     if (payload) {
       yield payload;
@@ -31,13 +46,21 @@ export async function* readSseJsonStream<T>(stream: ReadableStream<Uint8Array>):
   }
 }
 
-function parseSseJsonPayload<T>(event: string): T | null {
-  const data = event
+function readSseData(event: string): string {
+  return event
     .split(/\r?\n/u)
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trimStart())
     .join("\n")
     .trim();
+}
+
+function isSseDoneEvent(event: string): boolean {
+  return readSseData(event) === "[DONE]";
+}
+
+function parseSseJsonPayload<T>(event: string): T | null {
+  const data = readSseData(event);
 
   if (!data || data === "[DONE]") {
     return null;

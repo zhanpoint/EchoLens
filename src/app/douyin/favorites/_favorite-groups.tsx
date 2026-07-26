@@ -1,45 +1,38 @@
 "use client";
 
 import { ArrowLeft, ArrowRight, ExternalLink, Folder, Layers3, LibraryBig, Play } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type {
-  DouyinFavoriteAuthor,
   DouyinFavoriteFolder,
   DouyinFavoriteMix,
-  DouyinFavoriteVideo,
 } from "@/lib/douyin/favorites";
 import { formatDouyinCount } from "../_user-meta";
-import { FavoriteWorkRow } from "./_favorite-work-row";
 
 const DOUYIN_FAVORITES_URL = "https://www.douyin.com/user/self?showTab=favorite_collection";
 
 type FavoriteGroupsProps = {
-  authors: DouyinFavoriteAuthor[];
+  children?: ReactNode;
   groups: DouyinFavoriteFolder[] | DouyinFavoriteMix[];
   kind: "folder" | "mix";
+  onSelectedIdChange: (id: string) => void;
   query: string;
+  selectedId: string;
 };
 
-export function FavoriteGroups({ authors, groups, kind, query }: FavoriteGroupsProps) {
-  const [selectedId, setSelectedId] = useState("");
+export function FavoriteGroups({
+  children,
+  groups,
+  kind,
+  onSelectedIdChange,
+  query,
+  selectedId,
+}: FavoriteGroupsProps) {
   const keyword = query.trim().toLocaleLowerCase();
   const filteredGroups = useMemo(
-    () => groups.filter((group) => !keyword || groupMatches(group, keyword)),
+    () => groups.filter((group) => !keyword || group.name.toLocaleLowerCase().includes(keyword)),
     [groups, keyword],
   );
   const selected = groups.find((group) => group.id === selectedId);
-  const selectedWorks = selected
-    ? selected.works.filter((work) => !keyword || workMatches(work, keyword))
-    : [];
-  const authorByKey = useMemo(
-    () => new Map(
-      authors.flatMap((author) => [
-        ...(author.id ? [[author.id, author] as const] : []),
-        [author.name, author] as const,
-      ]),
-    ),
-    [authors],
-  );
 
   if (selected) {
     return (
@@ -48,7 +41,7 @@ export function FavoriteGroups({ authors, groups, kind, query }: FavoriteGroupsP
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
-              onClick={() => setSelectedId("")}
+              onClick={() => onSelectedIdChange("")}
               className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground active:bg-white/[0.1]"
               aria-label={`返回${kind === "folder" ? "收藏夹" : "合集"}列表`}
               title={`返回${kind === "folder" ? "收藏夹" : "合集"}列表`}
@@ -70,21 +63,7 @@ export function FavoriteGroups({ authors, groups, kind, query }: FavoriteGroupsP
             </a>
           ) : null}
         </div>
-        {selectedWorks.length ? (
-          <div className="content-scroll min-h-0 flex-1 overflow-y-auto pt-1">
-            {selectedWorks.map((work) => (
-              <FavoriteWorkRow
-                key={work.url}
-                author={authorByKey.get(work.authorId || work.author)}
-                video={work}
-              />
-            ))}
-          </div>
-        ) : (
-          <GroupEmptyState
-            label={keyword ? "当前分组中没有符合搜索条件的作品" : `${selected.name}中暂无可展示作品`}
-          />
-        )}
+        <div className="min-h-0 flex-1 pt-1">{children}</div>
       </div>
     );
   }
@@ -107,13 +86,13 @@ export function FavoriteGroups({ authors, groups, kind, query }: FavoriteGroupsP
             <FolderCard
               key={group.id}
               folder={group as DouyinFavoriteFolder}
-              onOpen={() => setSelectedId(group.id)}
+              onOpen={() => onSelectedIdChange(group.id)}
             />
           ) : (
             <MixCard
               key={group.id}
               mix={group as DouyinFavoriteMix}
-              onOpen={() => setSelectedId(group.id)}
+              onOpen={() => onSelectedIdChange(group.id)}
             />
           )
         ))}
@@ -123,7 +102,7 @@ export function FavoriteGroups({ authors, groups, kind, query }: FavoriteGroupsP
 }
 
 function FolderCard({ folder, onOpen }: { folder: DouyinFavoriteFolder; onOpen: () => void }) {
-  const previews = folder.works.filter((work) => work.coverUrl).slice(0, 6);
+  const previews = folder.works.filter((work) => work.coverUrl).slice(0, 5);
   return (
     <article className="group relative min-h-40 rounded-md border border-white/[0.08] bg-white/[0.035] transition-colors hover:border-cyan/30 hover:bg-cyan/[0.045]">
       <button
@@ -141,7 +120,7 @@ function FolderCard({ folder, onOpen }: { folder: DouyinFavoriteFolder; onOpen: 
           </div>
         </div>
         {previews.length ? (
-          <div className="mt-4 grid grid-cols-6 gap-2">
+          <div className="mt-4 grid grid-cols-5 gap-2">
             {previews.map((work) => (
               <MediaCover key={work.url} alt="" url={work.coverUrl} />
             ))}
@@ -268,13 +247,4 @@ function GroupEmptyState({ label }: { label: string }) {
       </div>
     </div>
   );
-}
-
-function groupMatches(group: DouyinFavoriteFolder | DouyinFavoriteMix, keyword: string): boolean {
-  return group.name.toLocaleLowerCase().includes(keyword) ||
-    group.works.some((work) => workMatches(work, keyword));
-}
-
-function workMatches(work: DouyinFavoriteVideo, keyword: string): boolean {
-  return `${work.author}\n${work.title}`.toLocaleLowerCase().includes(keyword);
 }

@@ -1,22 +1,67 @@
+export const NETWORK_RETRY_ERROR_CODE = "NETWORK_RETRY_EXHAUSTED";
+export const NETWORK_RETRY_ERROR_MESSAGE = "网络连接失败，请检查网络后重试。";
+export const DEFAULT_NETWORK_ATTEMPTS = 5;
+
+export class NetworkRetryExhaustedError extends Error {
+  readonly code = NETWORK_RETRY_ERROR_CODE;
+
+  constructor(options?: ErrorOptions) {
+    super(NETWORK_RETRY_ERROR_MESSAGE, options);
+    this.name = "NetworkRetryExhaustedError";
+  }
+}
+
+export type RetryOptions = {
+  attempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  signal?: AbortSignal;
+  shouldRetry?: (error: unknown) => boolean;
+};
+
 export type RetryableFetchInit = RequestInit & {
   duplex?: "half";
-  retry?: {
-    attempts?: number;
-    baseDelayMs?: number;
-    maxDelayMs?: number;
+  retry?: Omit<RetryOptions, "signal" | "shouldRetry"> & {
+    retryNetworkErrors?: boolean;
     timeoutMs?: number;
   };
 };
 
-const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 5_000;
+const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429]);
+
+export async function retryOperation<T>(
+  operation: (attempt: number) => Promise<T>,
+  options: RetryOptions = {},
+): Promise<T> {
+  const attempts = readPositiveInteger(options.attempts, DEFAULT_NETWORK_ATTEMPTS);
+  const baseDelayMs = readPositiveInteger(options.baseDelayMs, DEFAULT_BASE_DELAY_MS);
+  const maxDelayMs = readPositiveInteger(options.maxDelayMs, DEFAULT_MAX_DELAY_MS);
+  const shouldRetry = options.shouldRetry ?? isRetryableNetworkError;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfExternallyAborted(options.signal);
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (options.signal?.aborted || !shouldRetry(error)) throw error;
+      if (attempt < attempts) {
+        await abortableDelay(exponentialRetryDelay(attempt, baseDelayMs, maxDelayMs), options.signal);
+      }
+    }
+  }
+
+  throw new NetworkRetryExhaustedError({ cause: lastError });
+}
 
 export async function fetchWithRetry(
   url: string,
   init: RetryableFetchInit = {},
 ): Promise<Response> {
-  const attempts = readPositiveInteger(init.retry?.attempts, DEFAULT_ATTEMPTS);
+  const attempts = readPositiveInteger(init.retry?.attempts, DEFAULT_NETWORK_ATTEMPTS);
   const baseDelayMs = readPositiveInteger(init.retry?.baseDelayMs, DEFAULT_BASE_DELAY_MS);
   const maxDelayMs = readPositiveInteger(init.retry?.maxDelayMs, DEFAULT_MAX_DELAY_MS);
   const timeoutMs = init.retry?.timeoutMs;
@@ -24,25 +69,45 @@ export async function fetchWithRetry(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfExternallyAborted(externalSignal);
     try {
       const response = await fetchOnce(url, requestInit, timeoutMs, externalSignal);
-      if (!isRetryableStatus(response.status) || attempt === attempts) {
-        return response;
-      }
+      if (!isRetryableHttpStatus(response.status) || attempt === attempts) return response;
 
       await response.body?.cancel();
-      await delay(readRetryDelay(response, attempt, baseDelayMs, maxDelayMs));
+      await abortableDelay(readRetryDelay(response, attempt, baseDelayMs, maxDelayMs), externalSignal);
     } catch (error) {
       lastError = error;
-      if (!isRetryableFetchError(error) || attempt === attempts) {
-        throw error;
+      if (externalSignal?.aborted || init.retry?.retryNetworkErrors === false || !isRetryableNetworkError(error)) throw error;
+      if (attempt < attempts) {
+        await abortableDelay(exponentialRetryDelay(attempt, baseDelayMs, maxDelayMs), externalSignal);
       }
-
-      await delay(exponentialDelay(attempt, baseDelayMs, maxDelayMs));
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error("网络请求失败。");
+  throw new NetworkRetryExhaustedError({ cause: lastError });
+}
+
+export function isRetryableHttpStatus(status: number): boolean {
+  return RETRYABLE_HTTP_STATUSES.has(status) || status >= 500;
+}
+
+export function isRetryableNetworkError(error: unknown): boolean {
+  if (error instanceof NetworkRetryExhaustedError) return true;
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" ||
+    /fetch failed|network|socket|timeout|timed out|terminated|premature close|other side closed|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|UND_ERR/i.test(error.message) ||
+    /HTTP (408|425|429|5\d\d)\b/i.test(error.message);
+}
+
+export function exponentialRetryDelay(
+  attempt: number,
+  baseDelayMs = DEFAULT_BASE_DELAY_MS,
+  maxDelayMs = DEFAULT_MAX_DELAY_MS,
+): number {
+  const exponential = baseDelayMs * 2 ** Math.max(0, attempt - 1);
+  const jitter = 0.8 + Math.random() * 0.4;
+  return Math.min(Math.round(exponential * jitter), maxDelayMs);
 }
 
 function withoutRetry(init: RetryableFetchInit): RequestInit & { duplex?: "half" } {
@@ -57,35 +122,17 @@ function fetchOnce(
   timeoutMs: number | undefined,
   externalSignal: AbortSignal | null | undefined,
 ): Promise<Response> {
-  if (!timeoutMs) {
-    return fetch(url, { ...init, signal: externalSignal ?? undefined });
-  }
+  if (!timeoutMs) return fetch(url, { ...init, signal: externalSignal ?? undefined });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const abortExternal = () => controller.abort();
   externalSignal?.addEventListener("abort", abortExternal, { once: true });
 
-  return fetch(url, {
-    ...init,
-    signal: controller.signal,
-  }).finally(() => {
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => {
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", abortExternal);
   });
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status >= 500;
-}
-
-function isRetryableFetchError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return true;
-  }
-
-  return error.name === "AbortError" ||
-    /fetch failed|network|socket|timeout|timed out|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT/i.test(error.message);
 }
 
 function readRetryDelay(response: Response, attempt: number, baseDelayMs: number, maxDelayMs: number): number {
@@ -94,20 +141,33 @@ function readRetryDelay(response: Response, attempt: number, baseDelayMs: number
   if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
     return Math.min(retryAfterSeconds * 1000, maxDelayMs);
   }
-
-  return exponentialDelay(attempt, baseDelayMs, maxDelayMs);
+  return exponentialRetryDelay(attempt, baseDelayMs, maxDelayMs);
 }
 
-function exponentialDelay(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
-  const exponential = baseDelayMs * 2 ** Math.max(0, attempt - 1);
-  const jitter = Math.floor(Math.random() * Math.min(baseDelayMs, 250));
-  return Math.min(exponential + jitter, maxDelayMs);
+function throwIfExternallyAborted(signal: AbortSignal | null | undefined): void {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
 }
 
 function readPositiveInteger(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function abortableDelay(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(done, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    function done() {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }

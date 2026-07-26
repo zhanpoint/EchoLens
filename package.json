@@ -17,7 +17,7 @@
     "@radix-ui/react-select": "^2.3.3",
     "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",
-    "next": "16.2.7",
+    "next": "16.2.11",
     "nodemailer": "^9.0.1",
     "pg": "^8.22.0",
     "react": "19.2.4",
@@ -35,10 +35,16 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.7",
+    "eslint-config-next": "16.2.11",
     "pg-mem": "^3.0.14",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.21",
+      "sharp": "0.35.3"
+    }
   }
 }

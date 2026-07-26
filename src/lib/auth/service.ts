@@ -8,7 +8,7 @@ import {
   findUserByIdentifier,
   insertUser,
   readSessionUser,
-  updateUserPassword,
+  updateUserPasswordAndDeleteSessions,
 } from "@/lib/auth/db";
 import { verifyEmailCode } from "@/lib/auth/email";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
@@ -25,6 +25,8 @@ export type AuthUser = {
   id: string;
   username: string;
 };
+
+const DUMMY_PASSWORD_HASH = "scrypt$echolens-auth-dummy$B8cZGHteDG2v_Z9e0TDy4QkAsXQNpgLfZts8oKg1W_XQdSiHmJfRQH-D3FM3wvUdnTfpQmL1llq2yj-_U0MhyA";
 
 export class AuthError extends Error {
   constructor(message: string, readonly status = 400, readonly code = "AUTH_ERROR") {
@@ -80,15 +82,9 @@ export async function loginUser(input: {
   assertPassword(input.password, "INVALID_PASSWORD_FORMAT");
 
   const user = await findUserByIdentifier(identifier);
-  if (!user) {
-    throw new AuthError(
-      identifier.includes("@") ? "该邮箱尚未注册，请先注册账号。" : "该用户名不存在，请检查后重试。",
-      401,
-      identifier.includes("@") ? "EMAIL_NOT_FOUND" : "USERNAME_NOT_FOUND",
-    );
-  }
-  if (!(await verifyPassword(input.password, user.password_hash))) {
-    throw new AuthError("密码错误，请重新输入，或使用“忘记密码”重置。", 401, "INVALID_PASSWORD");
+  const passwordMatches = await verifyPassword(input.password, user?.password_hash ?? DUMMY_PASSWORD_HASH);
+  if (!user || !passwordMatches) {
+    throw new AuthError("账号或密码错误。", 401, "INVALID_CREDENTIALS");
   }
   return toAuthUser(user);
 }
@@ -125,7 +121,7 @@ export async function resetPassword(input: {
     throw new AuthError("验证码无效或已过期。");
   }
 
-  await updateUserPassword(user.id, await hashPassword(input.password));
+  await updateUserPasswordAndDeleteSessions(user.id, await hashPassword(input.password));
 }
 
 export async function emailExists(email: string): Promise<boolean> {

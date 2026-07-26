@@ -15,13 +15,6 @@ type SessionRow = {
   username: string;
 };
 
-type EmailCodeRow = {
-  attempts: number;
-  code_hash: string;
-  expires_at: number;
-  id: string;
-};
-
 export async function findUserByIdentifier(identifier: string): Promise<UserRow | undefined> {
   return await queryRow<UserRow>(
     `SELECT id, username, email, password_hash, created_at
@@ -61,11 +54,14 @@ export async function insertUser(input: {
   return row;
 }
 
-export async function updateUserPassword(userId: string, passwordHash: string): Promise<void> {
-  await execute(
-    "UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
-    [passwordHash, userId],
-  );
+export async function updateUserPasswordAndDeleteSessions(userId: string, passwordHash: string): Promise<void> {
+  await withTransaction(async (client) => {
+    await client.query(
+      "UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [passwordHash, userId],
+    );
+    await client.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+  });
 }
 
 export async function createSessionRow(input: {
@@ -109,17 +105,7 @@ export async function readSessionUser(tokenHash: string): Promise<SessionRow | u
 export async function cleanupExpiredAuthRows(): Promise<void> {
   await execute("DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP");
   await execute("DELETE FROM email_codes WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL");
-}
-
-export async function readRecentEmailCode(email: string, purpose: string): Promise<{ sent_at: number } | undefined> {
-  return await queryRow<{ sent_at: number }>(
-    `SELECT sent_at
-     FROM email_codes
-     WHERE lower(email) = lower($1) AND purpose = $2 AND used_at IS NULL
-     ORDER BY sent_at DESC
-     LIMIT 1`,
-    [email, purpose],
-  );
+  await execute("DELETE FROM auth_rate_limits WHERE updated_at <= CURRENT_TIMESTAMP - INTERVAL '1 day'");
 }
 
 export async function replaceEmailCode(input: {
@@ -142,21 +128,73 @@ export async function replaceEmailCode(input: {
   });
 }
 
-export async function readActiveEmailCode(email: string, purpose: string): Promise<EmailCodeRow | undefined> {
-  return await queryRow<EmailCodeRow>(
-    `SELECT id, code_hash, attempts, expires_at
-     FROM email_codes
-     WHERE lower(email) = lower($1) AND purpose = $2 AND used_at IS NULL
-     ORDER BY sent_at DESC
-     LIMIT 1`,
-    [email, purpose],
+export async function consumeEmailCode(input: {
+  codeHash: string;
+  email: string;
+  maxAttempts: number;
+  purpose: string;
+}): Promise<boolean> {
+  return await withTransaction(async (client) => {
+    const result = await client.query<{ attempts: number; code_hash: string; expires_at: number; id: string }>(
+      `SELECT id, code_hash, attempts, expires_at
+       FROM email_codes
+       WHERE lower(email) = lower($1) AND purpose = $2 AND used_at IS NULL
+       ORDER BY sent_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [input.email, input.purpose],
+    );
+    const row = result.rows[0];
+    if (!row || row.expires_at <= Date.now() || row.attempts >= input.maxAttempts) {
+      return false;
+    }
+
+    if (row.code_hash !== input.codeHash) {
+      await client.query(
+        "UPDATE email_codes SET attempts = attempts + 1 WHERE id = $1 AND used_at IS NULL",
+        [row.id],
+      );
+      return false;
+    }
+
+    const consumed = await client.query(
+      "UPDATE email_codes SET used_at = CURRENT_TIMESTAMP WHERE id = $1 AND used_at IS NULL RETURNING id",
+      [row.id],
+    );
+    return consumed.rowCount === 1;
+  });
+}
+
+export async function consumeAuthRateLimit(input: {
+  limit: number;
+  scope: string;
+  subjectHash: string;
+  windowSeconds: number;
+}): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+  const now = Date.now();
+  const row = await queryRow<{ attempts: number; window_started_at: number }>(
+    `INSERT INTO auth_rate_limits (scope, subject_hash, attempts, window_started_at, updated_at)
+     VALUES ($1, $2, 1, $3, $3)
+     ON CONFLICT(scope, subject_hash) DO UPDATE SET
+       attempts = CASE WHEN auth_rate_limits.window_started_at <= $4 THEN 1 ELSE auth_rate_limits.attempts + 1 END,
+       window_started_at = CASE WHEN auth_rate_limits.window_started_at <= $4 THEN $3 ELSE auth_rate_limits.window_started_at END,
+       updated_at = $3
+     RETURNING attempts, window_started_at`,
+    [
+      input.scope,
+      input.subjectHash,
+      toPostgresTimestamp(now),
+      toPostgresTimestamp(now - input.windowSeconds * 1000),
+    ],
   );
+  const attempts = Number(row?.attempts ?? input.limit + 1);
+  const startedAt = Number(row?.window_started_at ?? now);
+  return {
+    allowed: attempts <= input.limit,
+    retryAfterSeconds: Math.max(1, Math.ceil((startedAt + input.windowSeconds * 1000 - now) / 1000)),
+  };
 }
 
-export async function markEmailCodeAttempt(id: string, attempts: number): Promise<void> {
-  await execute("UPDATE email_codes SET attempts = $1 WHERE id = $2", [attempts, id]);
-}
-
-export async function markEmailCodeUsed(id: string): Promise<void> {
-  await execute("UPDATE email_codes SET used_at = CURRENT_TIMESTAMP WHERE id = $1", [id]);
+export async function clearAuthRateLimit(scope: string, subjectHash: string): Promise<void> {
+  await execute("DELETE FROM auth_rate_limits WHERE scope = $1 AND subject_hash = $2", [scope, subjectHash]);
 }

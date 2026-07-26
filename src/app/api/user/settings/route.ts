@@ -4,6 +4,8 @@ import { requireUser } from "@/app/api/auth/_shared";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { DEFAULT_DOWNLOAD_ORGANIZATION, DOWNLOAD_ORGANIZATIONS } from "@/lib/download-settings";
+import { normalizeDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { DashScopeModelIdsSchema } from "@/lib/dashscope/model-schema";
 import { isUserSettingsCategory, readUserSettings, upsertUserSetting } from "@/lib/user-settings";
 
 export const runtime = "nodejs";
@@ -23,6 +25,9 @@ const TranscriptSettingsSchema = z.object({
 const DouyinSettingsSchema = z.object({
   cookie: z.string().max(120_000),
 });
+const AiCredentialSettingsSchema = z.object({
+  apiKey: z.string().trim().max(256),
+}).strict();
 const DownloadSettingsSchema = z.object({
   directoryPath: z.string().max(500).catch(""),
   organization: z.enum(DOWNLOAD_ORGANIZATIONS).catch(DEFAULT_DOWNLOAD_ORGANIZATION),
@@ -39,7 +44,7 @@ export async function GET(request: Request) {
     return user;
   }
 
-  return NextResponse.json({ settings: await readUserSettings(user.id) });
+  return NextResponse.json({ settings: toPublicSettings(await readUserSettings(user.id)) });
 }
 
 export async function PUT(request: Request) {
@@ -71,15 +76,23 @@ export async function PUT(request: Request) {
   } else {
     await upsertUserSetting(user.id, parsed.data.category, value.data);
   }
-  return NextResponse.json({ settings: await readUserSettings(user.id) });
+  return NextResponse.json({ settings: toPublicSettings(await readUserSettings(user.id)) });
 }
 
 function parseSettingsValue(
-  category: "douyin" | "download" | "transcript" | "translation",
+  category: "aiCredential" | "aiModels" | "douyin" | "download" | "transcript" | "translation",
   value: unknown,
-): { ok: true; data: z.infer<typeof DouyinSettingsSchema> | z.infer<typeof DownloadSettingsSchema> | z.infer<typeof TranscriptSettingsSchema> | z.infer<typeof TranslationSettingsSchema> } | { ok: false } {
+): { ok: true; data: z.infer<typeof AiCredentialSettingsSchema> | z.infer<typeof DashScopeModelIdsSchema> | z.infer<typeof DouyinSettingsSchema> | z.infer<typeof DownloadSettingsSchema> | z.infer<typeof TranscriptSettingsSchema> | z.infer<typeof TranslationSettingsSchema> } | { ok: false } {
+  if (category === "aiCredential") {
+    const parsed = AiCredentialSettingsSchema.safeParse(value);
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  }
   if (category === "douyin") {
     const parsed = DouyinSettingsSchema.safeParse(value);
+    return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
+  }
+  if (category === "aiModels") {
+    const parsed = DashScopeModelIdsSchema.safeParse(value);
     return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
   }
   if (category === "transcript") {
@@ -95,4 +108,13 @@ function parseSettingsValue(
     return parsed.success ? { ok: true, data: parsed.data } : { ok: false };
   }
   return { ok: false };
+}
+
+function toPublicSettings(settings: Awaited<ReturnType<typeof readUserSettings>>) {
+  const aiCredential = settings.aiCredential as { apiKey?: unknown } | undefined;
+  return {
+    ...settings,
+    aiModels: normalizeDashScopeModelIds(settings.aiModels),
+    ...(aiCredential ? { aiCredential: { configured: typeof aiCredential.apiKey === "string" && Boolean(aiCredential.apiKey) } } : {}),
+  };
 }

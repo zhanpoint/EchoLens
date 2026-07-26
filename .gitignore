@@ -58,16 +58,3 @@ data/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# 测试文件
-/src/test/*
-!/src/test/auth-db.test.ts
-!/src/test/douyin-favorites.test.ts
-!/src/test/postgres-test-utils.ts
-!/src/test/postgres.test.ts
-!/src/test/transcript-db.test.ts
-!/src/test/user-settings-route.test.ts
-!/src/test/auth-email.test.ts
-!/src/test/douyin.test.ts
-!/src/test/download-route.test.ts
-!/src/test/proxy.test.ts

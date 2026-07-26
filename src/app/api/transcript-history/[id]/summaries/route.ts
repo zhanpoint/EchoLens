@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireUser } from "@/app/api/auth/_shared";
+import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/dashscope/summary";
+import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
+import {
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+  NetworkRetryExhaustedError,
+} from "@/lib/http/retry";
 import {
   deleteTranscriptHistorySummary,
   insertTranscriptHistorySummary,
@@ -24,6 +30,7 @@ type RouteContext = {
 
 type SummaryEvent =
   | { type: "delta"; value: string }
+  | { type: "replace"; value: "" }
   | { summary: TranscriptHistorySummary; type: "done"; value: string }
   | { type: "error"; error: string; code?: string };
 
@@ -44,13 +51,17 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
+  const dashScope = await readDashScopeUserConfig(user.id);
   return streamHistorySummary({
+    apiKey: dashScope.apiKey,
     historyRecordId: id,
     prompt: parsed.data.prompt,
     promptId: parsed.data.promptId,
     promptTitle: parsed.data.promptTitle,
+    model: dashScope.models.summary,
     transcript: record.transcriptContent,
     userId: user.id,
+    signal: request.signal,
   });
 }
 
@@ -79,12 +90,15 @@ export async function DELETE(request: Request, context: RouteContext) {
 }
 
 function streamHistorySummary(input: {
+  apiKey?: string;
   historyRecordId: string;
+  model: string;
   prompt: string;
   promptId: string;
   promptTitle: string;
   transcript: string;
   userId: string;
+  signal?: AbortSignal;
 }): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -93,9 +107,13 @@ function streamHistorySummary(input: {
 
       try {
         const result = await streamSummarizeTranscript({
+          apiKey: input.apiKey,
+          model: input.model,
           prompt: input.prompt,
           transcript: input.transcript,
           onDelta: (delta) => send({ type: "delta", value: delta }),
+          onReset: () => send({ type: "replace", value: "" }),
+          signal: input.signal,
         });
 
         if (result.ok) {
@@ -112,7 +130,13 @@ function streamHistorySummary(input: {
           send({ type: "error", error: result.detail, code: result.code });
         }
       } catch (error) {
-        send({ type: "error", error: error instanceof Error ? error.message : "AI处理失败。" });
+        logServerError("transcript.summary", error);
+        const networkFailure = error instanceof NetworkRetryExhaustedError;
+        send({
+          type: "error",
+          error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "AI处理失败，请稍后重试。",
+          ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
+        });
       } finally {
         controller.close();
       }

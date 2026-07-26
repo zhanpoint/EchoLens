@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireUser } from "@/app/api/auth/_shared";
+import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   cancelDashScopeAsrJob,
-  DailyAsrQuotaExceededError,
+  AsrQuotaExceededError,
   getDashScopeAsrModelForProfile,
   refreshDashScopeAsrJobWithOptions,
   transcribeDashScopeAsr,
@@ -12,11 +12,17 @@ import {
   type DashScopeAsrModelProfile,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
-import { runWithTranscriptPostprocessOptions } from "@/lib/dashscope/transcript-postprocess";
-import { isManagedAsrAudioUrl } from "@/lib/oss/asr-audio";
-import { upsertTranscriptHistoryRecord, type TranscriptHistoryRecord } from "@/lib/transcript/db";
+import type { EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
+import { TranscribeWorkSchema } from "@/lib/douyin/transcribe-schema";
+import { ensureHistoryAsset } from "@/lib/transcript/assets";
 import {
-  DOUYIN_KINDS,
+  readTranscriptHistoryRecord,
+  upsertTranscriptHistoryRecord,
+  type StoredAsrHistoryContext,
+  type TranscriptHistoryRecord,
+} from "@/lib/transcript/db";
+import {
   TRANSCRIPT_FEATURE,
   getFeatureLabel,
   type ExtractionResult,
@@ -26,6 +32,8 @@ export const runtime = "nodejs";
 
 const E1_ASR_PROFILE: DashScopeAsrModelProfile = "e1";
 const E2_ASR_PROFILE: DashScopeAsrModelProfile = "e2";
+const CLIENT_JOB_ID_MAX_LENGTH = 128;
+const FALLBACK_JOB_ID_SUFFIX = ":platform";
 
 const SensitiveWordListSchema = z.object({
   word_list: z.array(z.string().trim().min(1)),
@@ -37,39 +45,20 @@ const SpecialWordFilterSchema = z.object({
   system_reserved_filter: z.boolean().optional(),
 }).strict();
 
-const WorkSchema = z.object({
-  authorName: z.string().optional(),
-  authorUrl: z.string().optional(),
-  finalUrl: z.string().url(),
-  id: z.string().regex(/^\d{6,30}$/),
-  inputUrl: z.string(),
-  kind: z.enum(DOUYIN_KINDS),
-  durationSeconds: z.number().positive().optional(),
-  title: z.string().optional(),
-}).strict();
-
-const HistoryWorkSchema = WorkSchema.extend({
-  historyRecordId: z.string().min(1).max(128),
-}).strict();
+const WorkSchema = TranscribeWorkSchema;
 
 const TranscribeSchema = z.object({
-  audioObjectKey: z.string().min(1).max(512),
-  audioUrl: z.string().url().max(4096),
-  clientJobId: z.string().min(1).max(128).optional(),
-  historyRecordId: z.string().min(1).max(128).optional(),
+  clientJobId: z.string().min(1).max(CLIENT_JOB_ID_MAX_LENGTH).optional(),
+  historyRecordId: z.string().min(1).max(128),
   diarizationEnabled: z.boolean().optional(),
   enableItn: z.boolean().optional(),
   model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE]).optional(),
   specialWordFilter: SpecialWordFilterSchema.optional(),
   speakerCount: z.coerce.number().int().min(1).max(10).optional(),
-  thinkingEnabled: z.boolean().optional(),
-  work: WorkSchema,
 }).strict();
 
 const ReadJobSchema = z.object({
-  jobId: z.string().min(1).max(128),
-  thinking: z.enum(["0", "1"]).optional(),
-  title: z.string().max(2000).optional(),
+  jobId: z.string().min(1).max(CLIENT_JOB_ID_MAX_LENGTH),
 }).strict();
 
 type TranscribeStreamEvent =
@@ -82,7 +71,7 @@ type TranscribeStreamEvent =
       status: "successed";
       work?: z.infer<typeof WorkSchema>;
     }
-  | { type: "error"; error: string; code?: string; retryAfter?: number; resetAt?: string; status: "canceled" | "failed"; work?: z.infer<typeof WorkSchema> };
+  | { type: "error"; error: string; code?: string; status: "canceled" | "failed"; work?: z.infer<typeof WorkSchema> };
 
 export async function POST(request: Request) {
   const user = await requireUser(request);
@@ -92,58 +81,109 @@ export async function POST(request: Request) {
 
   const parsed = TranscribeSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
-    return NextResponse.json({ error: "原声音频缓存未就绪，请等待缓存完成后再转录。" }, { status: 400 });
+    logServerError("douyin.transcribe.request", parsed.error);
+    return NextResponse.json({ error: "转录失败，请稍后重试。" }, { status: 400 });
   }
 
   try {
-    const { audioObjectKey, audioUrl, work } = parsed.data;
-    if (!isManagedAsrAudioUrl({ objectKey: audioObjectKey, signedUrl: audioUrl })) {
-      return NextResponse.json({ error: "原声音频缓存地址无效，请重新缓存后再转录。" }, { status: 400 });
+    const history = await readTranscriptHistoryRecord({
+      id: parsed.data.historyRecordId,
+      userId: user.id,
+    });
+    if (!history) {
+      return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
+    }
+    const parsedWork = WorkSchema.safeParse({
+      authorName: history.authorName,
+      authorUrl: history.authorUrl,
+      caption: history.caption,
+      durationSeconds: history.durationSeconds,
+      finalUrl: history.finalUrl,
+      id: history.workId,
+      inputUrl: history.inputUrl,
+      kind: history.workKind,
+    });
+    if (!parsedWork.success) {
+      return NextResponse.json({ error: "会话作品信息不完整，请重新检测作品。" }, { status: 409 });
+    }
+    const work = parsedWork.data;
+    const audio = await ensureHistoryAsset({
+      assetKind: "originalAudio",
+      historyRecordId: history.id,
+      userId: user.id,
+    });
+    if (!audio?.durationSeconds) {
+      return NextResponse.json({ error: "原声音频准备失败，请稍后重试。" }, { status: 502 });
     }
 
-    const asrOptions = buildAsrOptions(parsed.data);
+    const dashScope = await readDashScopeUserConfig(user.id);
+    const preferredModels = dashScope.customApiKey ? dashScope.customModels : dashScope.platformModels;
+    const asrOptions = buildAsrOptions(parsed.data, preferredModels);
     return streamTranscribeOperation(
-      ({ onPostprocessStart }) => runWithTranscriptPostprocessOptions(
-        {
-          thinkingEnabled: parsed.data.thinkingEnabled,
-          title: work.title,
-        },
-        () => transcribeDashScopeAsr(
-          user.id,
-          buildWorkCacheKey(work),
-          {
-            durationSeconds: work.durationSeconds ?? 0,
-            objectKey: audioObjectKey,
-            signedUrl: audioUrl,
-          },
-          asrOptions,
-          {
-            postprocess: {
-              onStart: onPostprocessStart,
+      async ({ onPostprocessStart }) => {
+          const submit = (
+            source: "custom" | "platform",
+            models: EchoLensDashScopeModelIds,
+            apiKey: string | undefined,
+            clientJobId?: string,
+          ) => transcribeDashScopeAsr(
+            user.id,
+            buildWorkCacheKey(work),
+            {
+              durationSeconds: audio.durationSeconds,
+              objectKey: audio.objectKey,
+              signedUrl: audio.url,
             },
-            ...(parsed.data.clientJobId ? { clientJobId: parsed.data.clientJobId } : {}),
-            ...(parsed.data.historyRecordId ? {
+            buildAsrOptions(parsed.data, models),
+            {
+              apiKey,
+              credentialSource: source,
+              ...(clientJobId ? { clientJobId } : {}),
               historyContext: {
-                historyRecordId: parsed.data.historyRecordId,
+                historyRecordId: history.id,
                 work,
               },
-            } : {}),
-            signal: request.signal,
-          },
-        ),
-      ),
+              postprocess: {
+                model: models.transcriptPostprocess,
+                onStart: onPostprocessStart,
+              },
+              signal: request.signal,
+            },
+          );
+
+          if (!dashScope.customApiKey) {
+            return submit("platform", dashScope.platformModels, dashScope.platformApiKey, parsed.data.clientJobId);
+          }
+
+          const customResult = await submit(
+            "custom",
+            dashScope.customModels,
+            dashScope.customApiKey,
+            parsed.data.clientJobId,
+          );
+          return customResult.status === "failed" && customResult.fallbackEligible && dashScope.platformApiKey
+            ? submit(
+                "platform",
+                dashScope.platformModels,
+                dashScope.platformApiKey,
+                parsed.data.clientJobId
+                  ? `${parsed.data.clientJobId.slice(0, CLIENT_JOB_ID_MAX_LENGTH - FALLBACK_JOB_ID_SUFFIX.length)}${FALLBACK_JOB_ID_SUFFIX}`
+                  : undefined,
+              )
+            : customResult;
+      },
       {
         fallbackAsrModel: asrOptions.model,
         work,
         userId: user.id,
       },
       request.signal,
+      (result) => cancelStartedAsrJob(user.id, result, parsed.data.clientJobId),
     );
   } catch (error) {
+    logServerError("douyin.transcribe.submit", error);
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "转录失败。",
-      },
+      { error: "转录失败，请稍后重试。" },
       { status: 500 },
     );
   }
@@ -158,30 +198,32 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const parsed = ReadJobSchema.safeParse({
     jobId: url.searchParams.get("jobId"),
-    thinking: url.searchParams.get("thinking") ?? undefined,
-    title: url.searchParams.get("title") ?? undefined,
   });
   if (!parsed.success) {
     return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
   }
 
+  const dashScope = await readDashScopeUserConfig(user.id);
   return streamTranscribeOperation(
-    ({ onPostprocessStart }) => runWithTranscriptPostprocessOptions(
-      {
-        thinkingEnabled: parsed.data.thinking === "1",
-        title: parsed.data.title,
-      },
-      () => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+    ({ onPostprocessStart }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+        apiKeys: {
+          custom: dashScope.customApiKey,
+          platform: dashScope.platformApiKey,
+        },
         postprocess: {
           onStart: onPostprocessStart,
         },
+        postprocessModels: {
+          custom: dashScope.customModels.transcriptPostprocess,
+          platform: dashScope.platformModels.transcriptPostprocess,
+        },
         signal: request.signal,
       }),
-    ),
     {
       userId: user.id,
     },
     request.signal,
+    (result) => cancelStartedAsrJob(user.id, result),
   );
 }
 
@@ -199,7 +241,15 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "jobId 无效。" }, { status: 400 });
   }
 
-  const canceled = await cancelDashScopeAsrJob(user.id, parsed.data.jobId);
+  const dashScope = await readDashScopeUserConfig(user.id);
+  const canceled = await cancelDashScopeAsrJob(
+    user.id,
+    parsed.data.jobId,
+    {
+      custom: dashScope.customApiKey,
+      platform: dashScope.platformApiKey,
+    },
+  );
   return NextResponse.json({ canceled });
 }
 
@@ -211,6 +261,7 @@ function streamTranscribeOperation(
     work?: z.infer<typeof WorkSchema>;
   },
   signal?: AbortSignal,
+  onAbort?: (result: DashScopeAsrJobResult | null) => Promise<void>,
 ): Response {
   const encoder = new TextEncoder();
   let closed = false;
@@ -242,6 +293,7 @@ function streamTranscribeOperation(
           },
         });
         if (signal?.aborted) {
+          await onAbort?.(result);
           return;
         }
 
@@ -265,12 +317,12 @@ function streamTranscribeOperation(
         }
 
         const resultItem = transcriptionResult(result.result, options.fallbackAsrModel);
-        const historyContext = parseHistoryContext(result.historyContext);
+        const historyContext = result.historyContext;
         const historyRecord = resultItem.content && historyContext && options.userId
           ? await saveTranscriptHistory({
               result: resultItem,
               userId: options.userId,
-              work: historyContext,
+              context: historyContext,
             })
           : undefined;
 
@@ -279,28 +331,26 @@ function streamTranscribeOperation(
           historyRecord,
           results: [resultItem],
           status: "successed",
-          work: options.work ?? historyContext,
+          work: options.work ?? historyContext?.work,
         });
       } catch (error) {
         if (signal?.aborted) {
           return;
         }
-        if (error instanceof DailyAsrQuotaExceededError) {
-          const retryAfter = Math.max(1, Math.ceil((error.resetAt - Date.now()) / 1000));
+        if (error instanceof AsrQuotaExceededError) {
           send({
             type: "error",
             error: error.message,
-            resetAt: new Date(error.resetAt).toISOString(),
-            retryAfter,
             status: "failed",
             work: options.work,
           });
           return;
         }
 
+        logServerError("douyin.transcribe.stream", error);
         send({
           type: "error",
-          error: error instanceof Error ? error.message : "转录失败。",
+          error: "转录失败，请稍后重试。",
           status: "failed",
           work: options.work,
         });
@@ -320,46 +370,46 @@ function streamTranscribeOperation(
   });
 }
 
-function parseHistoryContext(value: unknown): z.infer<typeof HistoryWorkSchema> | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
+async function cancelStartedAsrJob(
+  userId: string,
+  result: DashScopeAsrJobResult | null,
+  fallbackJobId?: string,
+): Promise<void> {
+  const jobId = result?.status === "running" ? result.jobId : fallbackJobId;
+  if (jobId) {
+    await cancelDashScopeAsrJob(userId, jobId).catch(() => undefined);
   }
-  const context = value as { historyRecordId?: unknown; work?: unknown };
-  const parsed = HistoryWorkSchema.safeParse({
-    ...(context.work && typeof context.work === "object" ? context.work as Record<string, unknown> : {}),
-    historyRecordId: context.historyRecordId,
-  });
-  return parsed.success ? parsed.data : undefined;
 }
 
 async function saveTranscriptHistory(input: {
+  context: StoredAsrHistoryContext;
   result: ExtractionResult;
   userId: string;
-  work: z.infer<typeof HistoryWorkSchema>;
 }): Promise<TranscriptHistoryRecord | undefined> {
   if (!input.result.content) {
     return undefined;
   }
 
   return await upsertTranscriptHistoryRecord({
-    authorName: input.work.authorName,
-    durationSeconds: input.work.durationSeconds,
-    finalUrl: input.work.finalUrl,
-    id: input.work.historyRecordId,
-    inputUrl: input.work.inputUrl,
-    originalTitle: input.work.title,
+    authorName: input.context.work.authorName,
+    authorUrl: input.context.work.authorUrl,
+    caption: input.context.work.caption,
+    durationSeconds: input.context.work.durationSeconds,
+    finalUrl: input.context.work.finalUrl,
+    id: input.context.historyRecordId,
+    inputUrl: input.context.work.inputUrl,
     transcriptContent: input.result.content,
     transcriptSegments: input.result.transcriptSegments,
     userId: input.userId,
-    workId: input.work.id,
-    workKey: buildWorkCacheKey(input.work),
-    workKind: input.work.kind,
+    workId: input.context.work.id,
+    workKey: buildWorkCacheKey(input.context.work),
+    workKind: input.context.work.kind,
   });
 }
 
-function buildAsrOptions(input: z.infer<typeof TranscribeSchema>) {
+function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLensDashScopeModelIds) {
   const profile = input.model ?? E1_ASR_PROFILE;
-  const model = getDashScopeAsrModelForProfile(profile);
+  const model = getDashScopeAsrModelForProfile(profile, models);
   const isE1 = profile === E1_ASR_PROFILE;
   const isE2 = profile === E2_ASR_PROFILE;
 
@@ -394,22 +444,18 @@ function buildWorkCacheKey(work: { id: string; kind: string }): string {
   return `${work.kind}:${work.id}`;
 }
 
-function transcriptionResult(result: ProviderResult, fallbackAsrModel?: DashScopeAsrModel): ExtractionResult {
-  return result.ok
-    ? {
-        asrModel: result.asrModel ?? fallbackAsrModel,
-        feature: TRANSCRIPT_FEATURE,
-        label: getFeatureLabel(TRANSCRIPT_FEATURE),
-        status: "success",
-        source: "dashscope",
-        content: result.content,
-        emotions: result.emotions,
-        transcriptSegments: result.transcriptSegments,
-      }
-    : {
-        feature: TRANSCRIPT_FEATURE,
-        label: getFeatureLabel(TRANSCRIPT_FEATURE),
-        status: result.code,
-        detail: result.detail,
-      };
+function transcriptionResult(
+  result: Extract<ProviderResult, { ok: true }>,
+  fallbackAsrModel?: DashScopeAsrModel,
+): ExtractionResult {
+  return {
+    asrModel: result.asrModel ?? fallbackAsrModel,
+    feature: TRANSCRIPT_FEATURE,
+    label: getFeatureLabel(TRANSCRIPT_FEATURE),
+    status: "success",
+    source: "dashscope",
+    content: result.content,
+    emotions: result.emotions,
+    transcriptSegments: result.transcriptSegments,
+  };
 }

@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import {
-  deleteTranscriptHistoryRecord,
+  listTranscriptHistoryAssets,
   listTranscriptHistorySummaries,
   readTranscriptHistoryRecord,
   renameTranscriptHistoryRecord,
+  setTranscriptHistoryRecordPinned,
   updateTranscriptHistoryRecordTranscript,
 } from "@/lib/transcript/db";
 
@@ -22,11 +23,12 @@ const TranscriptSegmentSchema = z.object({
 });
 
 const UpdateHistoryRecordSchema = z.object({
-  displayTitle: z.string().trim().min(1).max(120).optional(),
+  pinned: z.boolean().optional(),
+  sessionName: z.string().trim().min(1).max(120).optional(),
   transcriptContent: z.string().trim().min(1).max(200_000).optional(),
   transcriptSegments: z.array(TranscriptSegmentSchema).max(20_000).optional(),
 }).strict()
-  .refine((value) => value.displayTitle !== undefined || value.transcriptContent !== undefined, {
+  .refine((value) => Object.values(value).some((field) => field !== undefined), {
     message: "at least one update field is required",
   })
   .refine((value) => value.transcriptSegments === undefined || value.transcriptContent !== undefined, {
@@ -50,6 +52,10 @@ export async function GET(request: Request, context: RouteContext) {
   }
 
   return NextResponse.json({
+    assets: await listTranscriptHistoryAssets({
+      historyRecordId: id,
+      userId: user.id,
+    }),
     record,
     summaries: await listTranscriptHistorySummaries({
       historyRecordId: id,
@@ -75,10 +81,18 @@ export async function PATCH(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
-  if (parsed.data.displayTitle !== undefined) {
+  if (parsed.data.sessionName !== undefined) {
     record = await renameTranscriptHistoryRecord({
-      displayTitle: parsed.data.displayTitle,
+      sessionName: parsed.data.sessionName,
       id,
+      userId: user.id,
+    });
+  }
+
+  if (parsed.data.pinned !== undefined) {
+    record = await setTranscriptHistoryRecordPinned({
+      id,
+      pinned: parsed.data.pinned,
       userId: user.id,
     });
   }
@@ -97,19 +111,4 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   return NextResponse.json({ record });
-}
-
-export async function DELETE(request: Request, context: RouteContext) {
-  const user = await requireUser(request);
-  if (user instanceof NextResponse) {
-    return user;
-  }
-
-  const { id } = await context.params;
-  const deleted = await deleteTranscriptHistoryRecord({ id, userId: user.id });
-  if (!deleted) {
-    return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
-  }
-
-  return NextResponse.json({ deleted: true });
 }

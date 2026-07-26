@@ -1,14 +1,14 @@
 import { execute, queryRows } from "@/lib/storage/postgres";
 import { decryptSensitiveValue, encryptSensitiveValue, isEncryptedValue } from "@/lib/sensitive-data";
 
-export type UserSettingsCategory = "douyin" | "download" | "transcript" | "translation";
+export type UserSettingsCategory = "aiCredential" | "aiModels" | "douyin" | "download" | "transcript" | "translation";
 
 type UserSettingRow = {
   category: string;
   value: unknown;
 };
 
-const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["douyin", "download", "transcript", "translation"]);
+const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["aiCredential", "aiModels", "douyin", "download", "transcript", "translation"]);
 
 export function isUserSettingsCategory(value: string): value is UserSettingsCategory {
   return USER_SETTINGS_CATEGORIES.has(value as UserSettingsCategory);
@@ -44,26 +44,41 @@ export async function upsertUserSetting(
   );
 }
 
+export async function readUserSetting(userId: string, category: UserSettingsCategory): Promise<unknown> {
+  const rows = await queryRows<UserSettingRow>(
+    "SELECT category, value FROM user_settings WHERE user_id = $1 AND category = $2 LIMIT 1",
+    [userId, category],
+  );
+  const row = rows[0];
+  return row ? readSettingValue(userId, category, row.value) : undefined;
+}
+
 async function readSettingValue(userId: string, category: UserSettingsCategory, value: unknown): Promise<unknown> {
-  if (category !== "douyin" || !value || typeof value !== "object") {
+  if (!isSensitiveCategory(category) || !value || typeof value !== "object") {
     return value;
   }
   const stored = value as Record<string, unknown>;
-  if (isEncryptedValue(stored.cookie)) {
-    return { ...stored, cookie: decryptSensitiveValue(stored.cookie, `${userId}:douyin:cookie`) };
+  const field = category === "douyin" ? "cookie" : "apiKey";
+  if (isEncryptedValue(stored[field])) {
+    return { ...stored, [field]: decryptSensitiveValue(stored[field], `${userId}:${category}:${field}`) };
   }
-  if (typeof stored.cookie === "string" && stored.cookie) {
+  if (typeof stored[field] === "string" && stored[field]) {
     await upsertUserSetting(userId, category, stored);
   }
   return stored;
 }
 
 function protectSettingValue(userId: string, category: UserSettingsCategory, value: unknown): unknown {
-  if (category !== "douyin" || !value || typeof value !== "object") {
+  if (!isSensitiveCategory(category) || !value || typeof value !== "object") {
     return value;
   }
   const setting = value as Record<string, unknown>;
-  return typeof setting.cookie === "string" && setting.cookie
-    ? { ...setting, cookie: encryptSensitiveValue(setting.cookie, `${userId}:douyin:cookie`) }
+  const field = category === "douyin" ? "cookie" : "apiKey";
+  return typeof setting[field] === "string" && setting[field]
+    ? { ...setting, [field]: encryptSensitiveValue(setting[field], `${userId}:${category}:${field}`) }
     : setting;
+}
+
+function isSensitiveCategory(category: UserSettingsCategory): category is "aiCredential" | "douyin" {
+  return category === "aiCredential" || category === "douyin";
 }

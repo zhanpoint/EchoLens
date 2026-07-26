@@ -1,9 +1,18 @@
+import {
+  NetworkRetryExhaustedError,
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+} from "@/lib/http/retry";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   streamDashScopeChatCompletion,
   type DashScopeChatCompletionError,
   type DashScopeChatConfig,
 } from "@/lib/dashscope/chat";
+import {
+  DASHSCOPE_FIXED_COMPATIBLE_BASE_URL,
+} from "@/lib/dashscope/fixed-config";
+import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
 
 export type QwenMtTerm = {
   source: string;
@@ -25,7 +34,7 @@ export type QwenMtTranslationItem = {
 
 export type QwenMtTranslationItemResult =
   | { key: string; ok: true; content: string }
-  | { key: string; ok: false; detail: string };
+  | { key: string; ok: false; detail: string; code?: Extract<ProviderResult, { ok: false }>["code"] };
 
 type PreparedTranslationItem = QwenMtTranslationItem & {
   frameLength: number;
@@ -40,8 +49,12 @@ const BATCH_SEGMENT_END_PREFIX = "⟦/";
 const BATCH_SEGMENT_MARKER_SUFFIX = "⟧";
 
 export async function streamQwenMtText(input: {
+  apiKey?: string;
+  model?: string;
   onDelta: (delta: string) => void;
+  onReset?: () => void;
   options: QwenMtTranslationOptions;
+  signal?: AbortSignal;
   text: string;
 }): Promise<ProviderResult> {
   const text = normalizeTranslationText(input.text);
@@ -56,11 +69,19 @@ export async function streamQwenMtText(input: {
     }
 
     assertTranslationPayloadWithinLimit(text, options);
-    const config = readDashScopeTranslationConfig();
+    const config = readDashScopeTranslationConfig(
+      input.apiKey,
+      input.model ?? DEFAULT_DASHSCOPE_MODELS.translation,
+    );
     return await streamDashScopeChatCompletion({
       config,
+      contentMode: input.model === "qwen-mt-plus" || input.model === "qwen-mt-turbo"
+        ? "cumulative"
+        : "incremental",
       prompt: text,
       onDelta: input.onDelta,
+      onReset: input.onReset,
+      signal: input.signal,
       timeoutMs: QWEN_MT_REQUEST_TIMEOUT_MS,
       extraBody: { translation_options: options },
       emptyBodyDetail: "Qwen-MT 没有返回流式内容。",
@@ -73,8 +94,11 @@ export async function streamQwenMtText(input: {
 }
 
 export async function translateQwenMtTextItems(input: {
+  apiKey?: string;
   items: QwenMtTranslationItem[];
+  model?: string;
   options: QwenMtTranslationOptions;
+  signal?: AbortSignal;
 }): Promise<QwenMtTranslationItemResult[]> {
   const options = normalizeTranslationOptions(input.options);
   if (!options.target_lang) {
@@ -106,7 +130,13 @@ export async function translateQwenMtTextItems(input: {
     const chunks = createTranslationItemChunks(preparedItems.filter((item) => item.text));
 
     for (const chunk of chunks) {
-      const chunkResults = await translatePreparedChunk(chunk, options);
+      const chunkResults = await translatePreparedChunk(
+        chunk,
+        options,
+        input.model ?? DEFAULT_DASHSCOPE_MODELS.translation,
+        input.apiKey,
+        input.signal,
+      );
       for (const result of chunkResults) {
         results.set(result.key, result);
       }
@@ -114,9 +144,10 @@ export async function translateQwenMtTextItems(input: {
   } catch (error) {
     const failure = formatQwenMtThrownError(error);
     const detail = failure.ok ? "翻译失败。" : failure.detail;
+    const code = failure.ok ? undefined : failure.code;
     for (const item of preparedItems) {
       if (!results.has(item.key)) {
-        results.set(item.key, { key: item.key, ok: false, detail });
+        results.set(item.key, { key: item.key, ok: false, detail, ...(code ? { code } : {}) });
       }
     }
   }
@@ -211,26 +242,35 @@ function prepareTranslationItem(item: QwenMtTranslationItem, index: number): Pre
 async function translatePreparedChunk(
   items: PreparedTranslationItem[],
   options: QwenMtTranslationOptions,
+  model: string,
+  apiKey?: string,
+  signal?: AbortSignal,
 ): Promise<QwenMtTranslationItemResult[]> {
   if (items.length === 1) {
     const item = items[0];
     const result = await streamQwenMtText({
+      apiKey,
+      model,
       text: item.text,
       options,
+      signal,
       onDelta: () => undefined,
     });
     return [result.ok
       ? { key: item.key, ok: true, content: result.content }
-      : { key: item.key, ok: false, detail: result.detail }];
+      : { key: item.key, ok: false, detail: result.detail, code: result.code }];
   }
 
   const result = await streamQwenMtText({
+    apiKey,
+    model,
     text: buildBatchTranslationText(items),
     options,
+    signal,
     onDelta: () => undefined,
   });
   if (!result.ok) {
-    return items.map((item) => ({ key: item.key, ok: false, detail: result.detail }));
+    return items.map((item) => ({ key: item.key, ok: false, detail: result.detail, code: result.code }));
   }
 
   const parsed = parseBatchTranslationText(result.content, items);
@@ -244,8 +284,8 @@ async function translatePreparedChunk(
 
   const splitIndex = Math.ceil(items.length / 2);
   return [
-    ...await translatePreparedChunk(items.slice(0, splitIndex), options),
-    ...await translatePreparedChunk(items.slice(splitIndex), options),
+    ...await translatePreparedChunk(items.slice(0, splitIndex), options, model, apiKey, signal),
+    ...await translatePreparedChunk(items.slice(splitIndex), options, model, apiKey, signal),
   ];
 }
 
@@ -285,38 +325,25 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
-function readDashScopeTranslationConfig(): DashScopeChatConfig {
-  const apiKey = process.env.DASHSCOPE_API_KEY?.trim();
+function readDashScopeTranslationConfig(userApiKey: string | undefined, model: string): DashScopeChatConfig {
+  const apiKey = userApiKey?.trim() || process.env.DASHSCOPE_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("DASHSCOPE_API_KEY 未配置。");
   }
 
   return {
     apiKey,
-    baseUrl: readDashScopeTranslationBaseUrl(),
-    model: readRequiredEnv("DASHSCOPE_TRANSLATION_MODEL"),
+    baseUrl: DASHSCOPE_FIXED_COMPATIBLE_BASE_URL,
+    model,
   };
 }
 
-function readRequiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`${name} 未配置。`);
-  }
-  return value;
-}
-
-function readDashScopeTranslationBaseUrl(): string {
-  const baseUrl = process.env.DASHSCOPE_TRANSLATION_BASE_URL?.trim().replace(/\/+$/u, "");
-  if (!baseUrl) {
-    throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
-  }
-  return baseUrl;
-}
-
 function formatQwenMtThrownError(error: unknown): ProviderResult {
+  if (error instanceof NetworkRetryExhaustedError) {
+    return { ok: false, code: NETWORK_RETRY_ERROR_CODE, detail: NETWORK_RETRY_ERROR_MESSAGE };
+  }
   if (error instanceof Error) {
-    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL|TRANSLATION_MODEL)/.test(error.message)) {
+    if (/DASHSCOPE_API_KEY/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {

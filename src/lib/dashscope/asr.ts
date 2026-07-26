@@ -1,19 +1,28 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ProviderResult } from "@/lib/ai/provider-result";
-import { fetchWithRetry } from "@/lib/http/retry";
-import type { UploadedAsrAudio } from "@/lib/oss/asr-audio";
-import { streamQwenTranscriptPostprocess } from "@/lib/dashscope/transcript-postprocess";
+import {
+  fetchWithRetry,
+  NetworkRetryExhaustedError,
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+} from "@/lib/http/retry";
+import { streamTranscriptPostprocess } from "@/lib/dashscope/transcript-postprocess";
+import {
+  DASHSCOPE_FIXED_BASE_URL,
+} from "@/lib/dashscope/fixed-config";
+import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
+import { readDashScopeApiKeyForUser } from "@/lib/dashscope/user-credential";
 import {
   attachAsrTaskProviderTask,
+  deleteAsrTask,
   markAsrTaskCanceled,
   markAsrTaskFailed,
   markAsrTaskRunning,
   markAsrTaskSucceeded,
-  nextAsrQuotaResetAt,
   readAsrTask,
-  readDailySucceededAsrDurationSeconds,
   readRunningAsrTask,
   reserveAsrTask,
+  type AsrCredentialSource,
   type StoredAsrTask,
   type StoredAsrHistoryContext,
 } from "@/lib/transcript/db";
@@ -38,11 +47,16 @@ export type DashScopeAsrOptions = {
 };
 
 export type DashScopeAsrRuntimeOptions = {
+  apiKey?: string;
+  apiKeys?: Partial<Record<AsrCredentialSource, string>>;
   clientJobId?: string;
+  credentialSource?: AsrCredentialSource;
   historyContext?: StoredAsrHistoryContext;
   postprocess?: {
+    model?: string;
     onStart?: () => void;
   };
+  postprocessModels?: Partial<Record<AsrCredentialSource, string>>;
   signal?: AbortSignal;
 };
 
@@ -51,8 +65,10 @@ export type DashScopeSpecialWordFilter = {
   filter_with_signed?: DashScopeSensitiveWordList;
   system_reserved_filter?: boolean;
 };
-export type DashScopeAsrAudio = UploadedAsrAudio & {
+export type DashScopeAsrAudio = {
   durationSeconds?: number;
+  objectKey: string;
+  signedUrl: string;
 };
 
 type DashScopeSensitiveWordList = {
@@ -66,17 +82,57 @@ type TranscriptPayload = {
 };
 export type DashScopeAsrJobResult =
   | { historyContext?: StoredAsrHistoryContext; jobId: string; status: "running" }
-  | { historyContext?: StoredAsrHistoryContext; result: ProviderResult; status: "canceled" | "failed" | "successed" };
+  | { fallbackEligible?: boolean; historyContext?: StoredAsrHistoryContext; result: ProviderResult; status: "canceled" | "failed" | "successed" };
 
 const DASH_SCOPE_REQUEST_TIMEOUT_MS = 60_000;
 const DASH_SCOPE_SUBMIT_TIMEOUT_MS = 15_000;
-const DASH_SCOPE_SUBMIT_ATTEMPTS = 2;
 const DASH_SCOPE_QUERY_TIMEOUT_MS = 20_000;
-const DAILY_TRANSCRIPTION_QUOTA_SECONDS = 5 * 60 * 60;
+export const PLATFORM_ASR_QUOTA_SECONDS = 5 * 60 * 60;
+const NO_SPEECH_DETAIL = "未检测到可识别的语音。暂不支持转录纯静音、仅背景噪声或没有人声的音频。";
+const NO_SPEECH_TASK_CODES = new Set([
+  "ASR_RESPONSE_HAVE_NO_WORDS",
+  "SUCCESS_WITH_NO_VALID_FRAGMENT",
+]);
+const FALLBACK_PROVIDER_ERROR_CATEGORIES = new Set([
+  "accessdenied",
+  "allocationquota",
+  "arrearage",
+  "forbidden",
+  "invalidapikey",
+  "modelaccessdenied",
+  "throttling",
+]);
 
-export class DailyAsrQuotaExceededError extends Error {
-  constructor(readonly resetAt: number) {
-    super("您已达到今日 5 小时语音转录额度，请明天再继续使用。");
+export class AsrQuotaExceededError extends Error {
+  constructor() {
+    super("平台转录剩余额度不足，无法转录当前音频。请前往设置，配置正确且可用的自定义 API Key 后继续使用。");
+  }
+}
+
+class DashScopeConfigurationError extends Error {}
+
+class DashScopeRequestError extends Error {
+  private constructor(
+    message: string,
+    readonly kind: "http" | "network",
+    readonly providerCode?: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+
+  static fromNetwork(error: unknown): DashScopeRequestError {
+    const detail = error instanceof Error ? error.message : "未知错误";
+    return new DashScopeRequestError(`DashScope 网络请求失败：${detail}`, "network");
+  }
+
+  static fromResponse(status: number, payload: unknown): DashScopeRequestError {
+    return new DashScopeRequestError(
+      formatDashScopeError(status, payload),
+      "http",
+      readDashScopeErrorCode(payload) ?? undefined,
+      status,
+    );
   }
 }
 
@@ -87,16 +143,30 @@ export async function submitDashScopeAsrJob(
   options: DashScopeAsrOptions,
   runtimeOptions: DashScopeAsrRuntimeOptions = {},
 ): Promise<DashScopeAsrJobResult> {
-  if (!audio?.signedUrl || !audio.objectKey) {
-    return { status: "failed", result: { ok: false, code: "unavailable", detail: "原声音频缓存未就绪。" } };
+  if (!audio?.signedUrl || !audio.objectKey || !audio.durationSeconds) {
+    return { status: "failed", result: { ok: false, code: "unavailable", detail: "原声音频资源不可用。" } };
   }
 
+  let reservedJobId: string | undefined;
   try {
-    const config = readDashScopeConfig();
+    const credentialSource = runtimeOptions.credentialSource ?? "platform";
+    const config = await readDashScopeConfig(
+      userId,
+      resolveRuntimeApiKey(runtimeOptions, credentialSource),
+      runtimeOptions.credentialSource === undefined && runtimeOptions.apiKeys === undefined,
+    );
     const normalizedOptions = normalizeDashScopeAsrOptions(options);
     const model = normalizedOptions.model;
-    const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions);
-    const runningTask = await readRunningAsrTask({ cacheKey, userId });
+    const cacheKey = buildTranscriptCacheKey(model, audio.objectKey, normalizedOptions, credentialSource);
+    const existingClientTask = runtimeOptions.clientJobId
+      ? await readAsrTask({ id: runtimeOptions.clientJobId, userId })
+      : null;
+    if (existingClientTask) {
+      return readStoredAsrTaskResult(existingClientTask);
+    }
+    const runningTask = runtimeOptions.clientJobId
+      ? null
+      : await readRunningAsrTask({ cacheKey, userId });
     if (runningTask) {
       return { status: "running", historyContext: runningTask.historyContext, jobId: runningTask.id };
     }
@@ -104,8 +174,9 @@ export async function submitDashScopeAsrJob(
     const jobId = runtimeOptions.clientJobId ?? randomUUID();
     const historyContext = runtimeOptions.historyContext;
     const taskInput = {
-      audioDurationSeconds: audio.durationSeconds ?? 0,
+      audioDurationSeconds: audio.durationSeconds,
       cacheKey,
+      credentialSource,
       historyContext,
       id: jobId,
       model,
@@ -113,21 +184,33 @@ export async function submitDashScopeAsrJob(
       userId,
       workKey,
     };
-    if (audio.durationSeconds && audio.durationSeconds > 0) {
-      await assertDailyAsrQuotaAvailable(userId, audio.durationSeconds);
+    const reserved = await reserveAsrTask(
+      taskInput,
+      credentialSource === "platform" ? PLATFORM_ASR_QUOTA_SECONDS : undefined,
+    );
+    if (!reserved) {
+      throw new AsrQuotaExceededError();
     }
-    await reserveAsrTask(taskInput);
+    reservedJobId = jobId;
     const taskId = await submitDashScopeAsrTask(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
     if (!(await attachAsrTaskProviderTask({ id: jobId, taskId }))) {
-      await cancelDashScopeAsrTask(taskId).catch(() => undefined);
+      await cancelDashScopeAsrTask(config, taskId).catch(() => undefined);
       return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
     }
     return { status: "running", historyContext, jobId };
   } catch (error) {
-    if (error instanceof DailyAsrQuotaExceededError) {
+    if (reservedJobId) {
+      const detail = error instanceof Error ? error.message : "转录任务提交失败。";
+      await markAsrTaskFailed(reservedJobId, detail).catch(() => undefined);
+    }
+    if (error instanceof AsrQuotaExceededError) {
       throw error;
     }
-    return { status: "failed", result: toProviderFailure(error) };
+    return {
+      status: "failed",
+      fallbackEligible: isFallbackEligibleRequestError(error),
+      result: toProviderFailure(error),
+    };
   }
 }
 
@@ -172,6 +255,7 @@ function buildTranscriptPayload(content: string, segments: TranscriptSegment[]):
 }
 
 async function settleDashScopeAsrTask(
+  config: DashScopeConfig,
   job: StoredAsrTask,
   taskPayload: unknown,
   runtimeOptions: DashScopeAsrRuntimeOptions,
@@ -179,10 +263,20 @@ async function settleDashScopeAsrTask(
   const status = readTaskStatus(taskPayload);
   if (status === "SUCCEEDED") {
     const transcript = await readDashScopeTranscript(taskPayload, runtimeOptions.signal);
+    if (!transcript) {
+      await markAsrTaskFailed(job.id, NO_SPEECH_DETAIL);
+      return {
+        status: "failed",
+        historyContext: job.historyContext,
+        result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL },
+      };
+    }
     const model = job.model;
     const result = await postprocessTranscript({
+      apiKey: config.apiKey,
       model,
       runtimeOptions,
+      title: job.historyContext?.work.caption,
       transcript: {
         asrModel: model,
         ok: true,
@@ -192,7 +286,13 @@ async function settleDashScopeAsrTask(
       },
     });
     if (result.ok) {
-      await markAsrTaskSucceeded(job.id);
+      if ((await markAsrTaskSucceeded(job.id)) === false) {
+        return {
+          status: "canceled",
+          historyContext: job.historyContext,
+          result: { ok: false, code: "error", detail: "转录任务已取消。" },
+        };
+      }
       return { status: "successed", historyContext: job.historyContext, result };
     }
 
@@ -207,9 +307,9 @@ async function settleDashScopeAsrTask(
   }
 
   if (status === "FAILED") {
-    const detail = formatDashScopeTaskFailure(status, taskPayload);
-    await markAsrTaskFailed(job.id, detail);
-    return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
+    const result = readDashScopeTaskFailure(taskPayload);
+    await markAsrTaskFailed(job.id, result.detail);
+    return { status: "failed", historyContext: job.historyContext, result };
   }
 
   if (status === "PENDING" || status === "RUNNING") {
@@ -239,23 +339,59 @@ export async function refreshDashScopeAsrJobWithOptions(
     return readStoredAsrTaskResult(job);
   }
 
-  const payload = await queryDashScopeAsrTask(job.taskId, runtimeOptions.signal);
-  return await settleDashScopeAsrTask(job, payload, runtimeOptions);
+  const source = job.credentialSource;
+  const config = await readDashScopeConfig(
+    userId,
+    resolveRuntimeApiKey(runtimeOptions, source),
+    runtimeOptions.apiKeys === undefined,
+  );
+  try {
+    const payload = await queryDashScopeAsrTask(config, job.taskId, runtimeOptions.signal);
+    return await settleDashScopeAsrTask(config, job, payload, {
+      ...runtimeOptions,
+      postprocess: {
+        ...runtimeOptions.postprocess,
+        model: runtimeOptions.postprocessModels?.[source] ?? runtimeOptions.postprocess?.model,
+      },
+    });
+  } catch (error) {
+    if (runtimeOptions.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    return {
+      status: "failed",
+      historyContext: job.historyContext,
+      result: toProviderFailure(error),
+    };
+  }
 }
 
-export async function cancelDashScopeAsrJob(userId: string, jobId: string): Promise<boolean> {
+export async function cancelDashScopeAsrJob(
+  userId: string,
+  jobId: string,
+  apiKeyOrMap?: string | Partial<Record<AsrCredentialSource, string>>,
+): Promise<boolean> {
   const job = await readAsrTask({ id: jobId, userId });
   if (!job) {
     return false;
   }
-  if (job.status !== "running") {
+  if (job.status !== "running" && job.status !== "canceled") {
     return true;
   }
 
-  await markAsrTaskCanceled(job.id);
-  if (!job.taskId.startsWith("pending:")) {
-    await cancelDashScopeAsrTask(job.taskId).catch(() => undefined);
+  if (job.status === "running") {
+    await markAsrTaskCanceled(job.id);
   }
+  if (!job.taskId.startsWith("pending:")) {
+    const apiKey = typeof apiKeyOrMap === "string" ? apiKeyOrMap : apiKeyOrMap?.[job.credentialSource];
+    const config = await readDashScopeConfig(userId, apiKey, apiKeyOrMap === undefined);
+    try {
+      await cancelDashScopeAsrTask(config, job.taskId);
+    } catch {
+      return false;
+    }
+  }
+  await deleteAsrTask({ id: job.id, userId });
   return true;
 }
 
@@ -277,10 +413,10 @@ async function submitDashScopeAsrTask(
       parameters: buildDashScopeAsrParameters(options),
     }),
     signal,
-  });
+  }, { retryNetworkErrors: false });
   const payload = await readJson(response);
   if (!response.ok) {
-    throw new Error(formatDashScopeError(response.status, payload));
+    throw DashScopeRequestError.fromResponse(response.status, payload);
   }
 
   const taskId = readStringPath(payload, ["output", "task_id"]) || readStringPath(payload, ["task_id"]);
@@ -290,8 +426,7 @@ async function submitDashScopeAsrTask(
   return taskId;
 }
 
-async function queryDashScopeAsrTask(taskId: string, signal?: AbortSignal): Promise<unknown> {
-  const config = readDashScopeConfig();
+async function queryDashScopeAsrTask(config: DashScopeConfig, taskId: string, signal?: AbortSignal): Promise<unknown> {
   const response = await dashScopeFetch(config, `/tasks/${encodeURIComponent(taskId)}`, {
     method: "GET",
     headers: {
@@ -301,14 +436,13 @@ async function queryDashScopeAsrTask(taskId: string, signal?: AbortSignal): Prom
   });
   const payload = await readJson(response);
   if (!response.ok) {
-    throw new Error(formatDashScopeError(response.status, payload));
+    throw DashScopeRequestError.fromResponse(response.status, payload);
   }
 
   return payload;
 }
 
-async function cancelDashScopeAsrTask(taskId: string): Promise<void> {
-  const config = readDashScopeConfig();
+async function cancelDashScopeAsrTask(config: DashScopeConfig, taskId: string): Promise<void> {
   const response = await dashScopeFetch(config, `/tasks/${encodeURIComponent(taskId)}/cancel`, {
     method: "POST",
     headers: {
@@ -316,6 +450,9 @@ async function cancelDashScopeAsrTask(taskId: string): Promise<void> {
     },
   });
   await response.body?.cancel();
+  if (!response.ok) {
+    throw new Error(`DashScope 取消任务失败：HTTP ${response.status}`);
+  }
 }
 
 function readTaskStatus(payload: unknown): string {
@@ -325,7 +462,7 @@ function readTaskStatus(payload: unknown): string {
     "";
 }
 
-async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSignal): Promise<TranscriptPayload> {
+async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSignal): Promise<TranscriptPayload | null> {
   const resultUrls = readTranscriptionUrls(taskPayload);
 
   const transcripts: TranscriptPayload[] = [];
@@ -333,7 +470,6 @@ async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSigna
     const response = await fetchWithRetry(url, {
       method: "GET",
       retry: {
-        attempts: 2,
         timeoutMs: DASH_SCOPE_REQUEST_TIMEOUT_MS,
       },
       signal,
@@ -351,14 +487,14 @@ async function readDashScopeTranscript(taskPayload: unknown, signal?: AbortSigna
 
   const content = joinTranscriptText(transcripts.map((transcript) => transcript.content));
   if (!content) {
-    throw new Error("DashScope 没有识别到可用转录文本。");
+    return null;
   }
 
   const transcriptSegments = transcripts.flatMap((transcript) => transcript.transcriptSegments ?? []);
   const emotions = [...new Set(transcripts.flatMap((transcript) => transcript.emotions ?? []))];
   const transcript = buildTranscriptPayload(content, transcriptSegments);
   if (!transcript) {
-    throw new Error("DashScope 没有识别到可用转录文本。");
+    return null;
   }
 
   return {
@@ -371,6 +507,7 @@ async function dashScopeFetch(
   config: DashScopeConfig,
   path: string,
   init: RequestInit,
+  retryOptions: { retryNetworkErrors?: boolean } = {},
 ): Promise<Response> {
   try {
     return await fetchWithRetry(`${config.baseUrl}${path}`, {
@@ -380,12 +517,18 @@ async function dashScopeFetch(
         ...init.headers,
       },
       retry: {
-        attempts: DASH_SCOPE_SUBMIT_ATTEMPTS,
+        retryNetworkErrors: retryOptions.retryNetworkErrors,
         timeoutMs: init.method === "GET" ? DASH_SCOPE_QUERY_TIMEOUT_MS : DASH_SCOPE_SUBMIT_TIMEOUT_MS,
       },
     });
   } catch (error) {
-    throw new Error(`DashScope 网络请求失败：${error instanceof Error ? error.message : "未知错误"}`);
+    if (init.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    if (error instanceof NetworkRetryExhaustedError || error instanceof DashScopeRequestError) {
+      throw error;
+    }
+    throw DashScopeRequestError.fromNetwork(error);
   }
 }
 
@@ -412,23 +555,35 @@ function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
 }
 
 async function postprocessTranscript(input: {
+  apiKey: string;
   model: DashScopeAsrModel;
   runtimeOptions: DashScopeAsrRuntimeOptions;
+  title?: string;
   transcript: Extract<ProviderResult, { ok: true }>;
 }): Promise<ProviderResult> {
   input.runtimeOptions.postprocess?.onStart?.();
-  const result = await streamQwenTranscriptPostprocess({
+  const result = await streamTranscriptPostprocess({
+    apiKey: input.apiKey,
     content: input.transcript.content,
+    model: input.runtimeOptions.postprocess?.model ?? DEFAULT_DASHSCOPE_MODELS.transcriptPostprocess,
     segments: input.transcript.transcriptSegments,
     signal: input.runtimeOptions.signal,
+    title: input.title,
   });
 
-  return result.ok
-    ? {
-        ...result,
-        asrModel: input.model,
-      }
-    : result;
+  if (result.ok) {
+    return {
+      ...result,
+      asrModel: input.model,
+    };
+  }
+  if (result.code === "invalid_response") {
+    return {
+      ...input.transcript,
+      asrModel: input.model,
+    };
+  }
+  return result;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -503,29 +658,36 @@ function readTranscriptionUrls(value: unknown): string[] {
   throw new Error("DashScope 任务结果格式无效：缺少 output.result.transcription_url 或 output.results[].transcription_url。");
 }
 
-function readDashScopeConfig(): DashScopeConfig {
-  const apiKey = readRequiredEnv("DASHSCOPE_API_KEY");
-  const baseUrl = readRequiredEnv("DASHSCOPE_BASE_URL").replace(/\/+$/, "");
+async function readDashScopeConfig(
+  userId: string,
+  explicitApiKey?: string,
+  allowUserFallback = true,
+): Promise<DashScopeConfig> {
+  const apiKey = explicitApiKey?.trim() || (allowUserFallback ? await readDashScopeApiKeyForUser(userId) : undefined);
+  if (!apiKey) {
+    throw new DashScopeConfigurationError("DASHSCOPE_API_KEY 未配置。");
+  }
 
   return {
     apiKey,
-    baseUrl,
+    baseUrl: DASHSCOPE_FIXED_BASE_URL,
   };
+}
+
+function resolveRuntimeApiKey(
+  runtimeOptions: DashScopeAsrRuntimeOptions,
+  source: AsrCredentialSource,
+): string | undefined {
+  return runtimeOptions.apiKeys?.[source] ?? runtimeOptions.apiKey;
 }
 
 function buildTranscriptCacheKey(
   model: string,
-  audioObjectKey: string,
+  objectKey: string,
   options: DashScopeAsrOptions,
+  credentialSource: AsrCredentialSource,
 ): string {
-  return `${model}:asr-v5:${sha256(JSON.stringify([audioObjectKey, options]))}`;
-}
-
-async function assertDailyAsrQuotaAvailable(userId: string, nextDurationSeconds: number): Promise<void> {
-  const usedSeconds = await readDailySucceededAsrDurationSeconds({ userId });
-  if (usedSeconds + nextDurationSeconds > DAILY_TRANSCRIPTION_QUOTA_SECONDS) {
-    throw new DailyAsrQuotaExceededError(nextAsrQuotaResetAt());
-  }
+  return `${credentialSource}:${model}:asr-v6:${sha256(JSON.stringify([objectKey, options]))}`;
 }
 
 function readStringField(value: unknown, field: string): string | null {
@@ -696,9 +858,11 @@ function buildDashScopeAsrInput(options: DashScopeAsrOptions, fileUrl: string): 
     : { file_urls: [fileUrl] };
 }
 
-export function getDashScopeAsrModelForProfile(profile: DashScopeAsrModelProfile): DashScopeAsrModel {
-  const envName = profile === "e1" ? "DASHSCOPE_ASR_MODEL_E1" : "DASHSCOPE_ASR_MODEL_E2";
-  return readRequiredEnv(envName);
+export function getDashScopeAsrModelForProfile(
+  profile: DashScopeAsrModelProfile,
+  models = DEFAULT_DASHSCOPE_MODELS,
+): DashScopeAsrModel {
+  return profile === "e1" ? models.asrE1 : models.asrE2;
 }
 
 function formatDashScopeError(status: number, payload: unknown): string {
@@ -714,6 +878,12 @@ function formatDashScopeError(status: number, payload: unknown): string {
   return `DashScope 请求失败：HTTP ${status}${message ? `，${message}` : ""}`;
 }
 
+function readDashScopeErrorCode(payload: unknown): string | null {
+  return readStringField(payload, "code") ||
+    readStringPath(payload, ["error", "code"]) ||
+    readStringPath(payload, ["output", "code"]);
+}
+
 function formatDashScopeTaskFailure(status: string, payload: unknown): string {
   const message =
     readStringPath(payload, ["output", "message"]) ||
@@ -724,25 +894,48 @@ function formatDashScopeTaskFailure(status: string, payload: unknown): string {
   return `DashScope ASR 任务${status === "FAILED" ? "失败" : "未完成"}${message ? `：${message}` : "。"}`;
 }
 
-function isConfigurationError(detail: string): boolean {
-  return /未配置|认证失败|401|403/.test(detail);
+function readDashScopeTaskFailure(payload: unknown): Extract<ProviderResult, { ok: false }> {
+  const providerCode = readStringPath(payload, ["output", "code"]);
+  if (providerCode && NO_SPEECH_TASK_CODES.has(providerCode)) {
+    return { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL };
+  }
+  return { ok: false, code: "error", detail: formatDashScopeTaskFailure("FAILED", payload) };
+}
+
+function isFallbackEligibleRequestError(error: unknown): boolean {
+  if (!(error instanceof DashScopeRequestError)) {
+    return false;
+  }
+  if (error.kind === "network") {
+    return true;
+  }
+  if (error.status && ([401, 402, 403, 408, 409, 429].includes(error.status) || error.status >= 500)) {
+    return true;
+  }
+
+  const category = error.providerCode?.toLowerCase().split(/[.:]/u, 1)[0];
+  return Boolean(category && FALLBACK_PROVIDER_ERROR_CATEGORIES.has(category));
 }
 
 function toProviderFailure(error: unknown): Extract<ProviderResult, { ok: false }> {
+  if (error instanceof NetworkRetryExhaustedError ||
+    (error instanceof DashScopeRequestError && error.kind === "network")) {
+    return {
+      ok: false,
+      code: NETWORK_RETRY_ERROR_CODE,
+      detail: NETWORK_RETRY_ERROR_MESSAGE,
+    };
+  }
+
   const detail = error instanceof Error ? error.message : "转录文本失败。";
   return {
     ok: false,
-    code: isConfigurationError(detail) ? "not_configured" : "error",
+    code: error instanceof DashScopeConfigurationError ||
+      (error instanceof DashScopeRequestError && (error.status === 401 || error.status === 403))
+      ? "not_configured"
+      : "error",
     detail,
   };
-}
-
-function readRequiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`${name} 未配置。`);
-  }
-  return value;
 }
 
 function sha256(value: string): string {

@@ -34,14 +34,22 @@ export function createDouyinWebClient(value: string): DouyinWebClient {
   if (!cookie || !hasLoginCookie(cookieMap)) {
     throw new DouyinApiError("访问凭证不完整，请重新获取。", "INVALID_COOKIE");
   }
+  return createWebClient(cookie, cookieMap);
+}
 
-  const headers = {
+function createWebClient(
+  cookie: string,
+  cookieMap: Record<string, string>,
+): DouyinWebClient {
+  const headers: Record<string, string> = {
     accept: "application/json, text/plain, */*",
     "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    cookie,
-    referer: "https://www.douyin.com/user/self",
+    referer: "https://www.douyin.com/?recommend=1",
     "user-agent": DEFAULT_USER_AGENT,
   };
+  if (cookie) {
+    headers.cookie = cookie;
+  }
 
   async function request(
     path: string,
@@ -107,7 +115,7 @@ export function createDouyinWebClient(value: string): DouyinWebClient {
       support_h265: "1",
       support_dash: "1",
       uifid: "",
-      msToken: cookieMap.msToken || randomBytes(80).toString("base64url"),
+      msToken: cookieMap.msToken || randomBytes(136).toString("base64url"),
     };
   }
 

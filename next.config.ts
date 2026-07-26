@@ -8,6 +8,7 @@ const localDevOrigins = Object.values(networkInterfaces())
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  serverExternalPackages: ["@ffmpeg-installer/ffmpeg"],
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
   allowedDevOrigins: localDevOrigins,

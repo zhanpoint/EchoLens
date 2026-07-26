@@ -4,12 +4,10 @@ import path from "node:path";
 import nodemailer from "nodemailer";
 import {
   cleanupExpiredAuthRows,
-  markEmailCodeAttempt,
-  markEmailCodeUsed,
-  readActiveEmailCode,
-  readRecentEmailCode,
+  consumeEmailCode,
   replaceEmailCode,
 } from "@/lib/auth/db";
+import { AuthRateLimitError, enforceAuthRateLimits } from "@/lib/auth/rate-limit";
 
 export const EMAIL_CODE_TTL_SECONDS = 5 * 60;
 const EMAIL_CODE_RESEND_SECONDS = 60;
@@ -45,10 +43,19 @@ const AUTH_EMAIL_COPY: Record<EmailCodePurpose, AuthEmailCopy> = {
 export async function sendEmailCode(email: string, purpose: EmailCodePurpose): Promise<void> {
   await cleanupExpiredAuthRows();
 
-  const recent = await readRecentEmailCode(email, purpose);
-  const waitSeconds = recent ? EMAIL_CODE_RESEND_SECONDS - Math.floor((Date.now() - recent.sent_at) / 1000) : 0;
-  if (waitSeconds > 0) {
-    throw new EmailRateLimitError(waitSeconds);
+  try {
+    await enforceAuthRateLimits([{
+      limit: 1,
+      scope: `email-code-send:${purpose}`,
+      subject: email,
+      windowSeconds: EMAIL_CODE_RESEND_SECONDS,
+    }]);
+  } catch (error) {
+    if (error instanceof AuthRateLimitError) {
+      const waitSeconds = Number(error.message.match(/(\d+)/)?.[1]) || EMAIL_CODE_RESEND_SECONDS;
+      throw new EmailRateLimitError(waitSeconds);
+    }
+    throw error;
   }
 
   const code = generateEmailCode();
@@ -65,19 +72,12 @@ export async function sendEmailCode(email: string, purpose: EmailCodePurpose): P
 
 export async function verifyEmailCode(email: string, purpose: EmailCodePurpose, code: string): Promise<boolean> {
   await cleanupExpiredAuthRows();
-  const row = await readActiveEmailCode(email, purpose);
-  if (!row || row.expires_at <= Date.now() || row.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
-    return false;
-  }
-
-  const ok = row.code_hash === hashEmailCode(email, purpose, code);
-  if (!ok) {
-    await markEmailCodeAttempt(row.id, row.attempts + 1);
-    return false;
-  }
-
-  await markEmailCodeUsed(row.id);
-  return true;
+  return await consumeEmailCode({
+    codeHash: hashEmailCode(email, purpose, code),
+    email,
+    maxAttempts: EMAIL_CODE_MAX_ATTEMPTS,
+    purpose,
+  });
 }
 
 export class EmailRateLimitError extends Error {

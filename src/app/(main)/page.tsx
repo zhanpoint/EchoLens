@@ -6,16 +6,19 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
+  ArrowLeftRight,
   AudioLines,
-  Brain,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Check,
   CornerUpLeft,
   Copy,
   Download,
   ExternalLink,
+  GripVertical,
   History,
+  Heart,
   Image as ImageIcon,
   Info,
   Languages,
@@ -23,10 +26,13 @@ import {
   LogIn,
   LogOut,
   Loader2,
+  MessageCircle,
   Pause,
   PencilLine,
+  Pin,
   Play,
   Plus,
+  Redo2,
   Save,
   Search,
   Settings,
@@ -36,7 +42,7 @@ import {
   SquarePen,
   Star,
   Trash2,
-  type LucideIcon,
+  Undo2,
   UserRound,
   Volume2,
   X,
@@ -44,9 +50,10 @@ import {
 import { useRouter } from "next/navigation";
 import {
   type CSSProperties,
-  type FormEvent,
   type Dispatch,
   Fragment,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SetStateAction,
   type TextareaHTMLAttributes,
@@ -70,15 +77,31 @@ import {
   type ResolvedDouyinWork,
   type TranscriptSegment,
 } from "@/types/douyin";
+import type { DouyinCommentsPayload } from "@/lib/douyin/comments";
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
-import { estimateMediaProcessingDurationSeconds } from "@/lib/douyin/cache-estimate";
-import { buildMediaDownloadPath } from "@/lib/douyin/download";
+import { clearProgressStartedAt, estimateMediaProcessingDurationSeconds, readProgressStartedAt } from "@/lib/douyin/cache-estimate";
+import {
+  mergeWorkMetadata,
+  type WorkMetadataPatch,
+} from "@/lib/douyin/client-metadata";
+import {
+  deleteClientSessionCache,
+  readClientSessionCache,
+  writeClientSessionCache,
+} from "@/lib/transcript/client-session-cache";
 import {
   cacheDownloadOrganization,
   saveToDownloadDirectory,
 } from "@/lib/browser-download-directory";
 import { isDownloadOrganization, type DownloadOrganization } from "@/lib/download-settings";
 import { cn } from "@/lib/utils";
+import { AsrQuotaIndicator, type AsrQuota } from "@/components/asr-quota-indicator";
+import { NetworkRetryButton } from "@/components/network-retry-button";
+import {
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+} from "@/lib/http/retry";
+import { applyStreamTextEvent } from "@/lib/http/retry-ui";
 
 type ApiError = {
   error: string;
@@ -89,6 +112,7 @@ type ApiError = {
 type ApiPayload = ApiError | Record<string, unknown>;
 type SegmentTranslation = {
   error?: string;
+  errorCode?: string;
   isLoading: boolean;
   text?: string;
 };
@@ -134,12 +158,14 @@ type TranslationTargetRequest =
 type TranslationStreamEvent =
   | { type: "segment_start"; key: string }
   | { type: "delta"; key: string; value: string }
+  | { type: "replace"; key: string; value: "" }
   | { type: "segment_done"; key: string; value: string }
-  | { type: "segment_error"; key: string; error: string }
+  | { type: "segment_error"; key: string; error: string; code?: string }
   | { type: "done" }
   | { type: "error"; error: string; code?: string };
 type SummaryStreamEvent =
   | { type: "delta"; value: string }
+  | { type: "replace"; value: "" }
   | { summary?: TranscriptHistorySummary; type: "done"; value: string }
   | { type: "error"; error: string; code?: string };
 type CustomSummaryPrompt = SummaryPrompt & {
@@ -164,49 +190,88 @@ type TranscribeStreamOutcome =
   | { type: "done" }
   | { type: "running"; jobId: string };
 type LiveTranscribeSession = {
-  historyRecordId: string;
+  input: string;
+  isRunning: boolean;
   jobId: string;
   persisted: boolean;
-  thinkingEnabled?: boolean;
+  results: ExtractionResult[];
+  statusMessage: string;
+  work: ResolvedDouyinWork;
   workKey: string;
 };
-type TranscriptPostprocessControls = {
-  thinkingEnabled: boolean;
-  title?: string;
-};
-type CurrentTranscriptSnapshot = {
+type DouyinWorkflowSession = {
+  asrModel: AsrModelId;
+  createdAt: number;
+  sessionName: string;
+  emptyFilterWords: string;
+  error: string | null;
+  errorCode?: string;
+  historyRecordId: string;
   input: string;
+  isResolving: boolean;
+  isResultProcessing: boolean;
   lastResolvedInput: string;
-  liveHistorySummariesByRecordId: Record<string, TranscriptHistorySummary[]>;
-  liveTranscribeSession: LiveTranscribeSession | null;
+  qwenAsrItnEnabled: boolean;
   results: ExtractionResult[];
+  signedFilterWords: string;
+  speakerCount: string;
+  speakerDiarizationEnabled: boolean;
+  specialWordFilterEnabled: boolean;
+  specialWordFilterPanelOpen: boolean;
+  systemReservedFilter: boolean;
+  work: ResolvedDouyinWork | null;
+};
+type SidebarEntry = {
+  hasRecord: boolean;
+  id: string;
+  isBusy: boolean;
+  isPinned: boolean;
+  isSession: boolean;
+  sortAt: number;
+  statusMessage: string;
+  title: string;
+};
+type CurrentWorkflowSnapshot = {
+  activeHistoryDetail?: TranscriptHistoryDetail;
+  activeHistoryRecordId: string;
+  activeView?: {
+    id: string;
+    kind: "history" | "workflow";
+  };
+  liveHistorySummariesByRecordId: Record<string, TranscriptHistorySummary[]>;
+  liveTranscribeSessions: Record<string, LiveTranscribeSession>;
+  sessions: Record<string, DouyinWorkflowSession>;
   userId: string;
-  work: ResolvedDouyinWork;
 };
 type CurrentUser = {
   email: string;
   id: string;
   username: string;
 };
+type ClientCacheAsset = "avatar" | MediaAssetKind;
 type CachedMediaAsset = {
-  asrAudioObjectKey?: string;
-  asrAudioUrl?: string;
   downloadName: string;
   error?: string;
+  errorCode?: string;
   isLoading: boolean;
+  objectKey?: string;
   url?: string;
+  verified?: boolean;
   workKey: string;
 };
+const assetCacheMemory = new Map<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>();
 
 type TranscriptHistoryRecord = {
   authorName?: string;
+  authorUrl?: string;
+  caption: string;
   createdAt: number;
-  displayTitle: string;
+  sessionName: string;
   durationSeconds?: number;
   finalUrl: string;
   id: string;
   inputUrl: string;
-  originalTitle: string;
+  pinnedAt?: number;
   transcriptContent: string;
   transcriptSegments?: TranscriptSegment[];
   updatedAt: number;
@@ -266,6 +331,10 @@ type SubtitleCue = {
 type TranscriptDownloadFormat = "json" | "md" | "srt" | "txt" | "vtt";
 type TextTranscriptDownloadFormat = Exclude<TranscriptDownloadFormat, "srt" | "vtt">;
 type TranscriptViewMode = "subtitles" | "transcript";
+type EditHistory = {
+  future: string[][];
+  past: string[][];
+};
 
 class AuthRequiredError extends Error {
   constructor() {
@@ -301,19 +370,25 @@ function getApiError(payload: unknown): ApiError | undefined {
   };
 }
 
-function isResolvedWorkPayload(payload: unknown): payload is { work: ResolvedDouyinWork } {
-  if (!payload || typeof payload !== "object" || !("work" in payload)) {
+function isResolvedWorkPayload(payload: unknown): payload is
+  | { sameAsCurrent: true }
+  | { work: ResolvedDouyinWork } {
+  if (!payload || typeof payload !== "object") {
     return false;
+  }
+  if ((payload as { sameAsCurrent?: unknown }).sameAsCurrent === true) {
+    return true;
   }
   const workValue = (payload as { work?: unknown }).work;
   if (!workValue || typeof workValue !== "object") {
     return false;
   }
   const work = workValue as Partial<ResolvedDouyinWork>;
-  return typeof work.finalUrl === "string" &&
+  return typeof work.caption === "string" && work.caption.trim().length > 0 &&
+    typeof work.finalUrl === "string" &&
     typeof work.id === "string" &&
     typeof work.inputUrl === "string" &&
-    (work.kind === "video" || work.kind === "note");
+    work.kind === "video";
 }
 
 function getAvatarInitial(user: CurrentUser): string {
@@ -482,43 +557,42 @@ function readUserFacingError(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) {
     return fallback;
   }
+  if (readUserFacingErrorCode(error) === NETWORK_RETRY_ERROR_CODE) {
+    return NETWORK_RETRY_ERROR_MESSAGE;
+  }
   const message = error.message.trim();
   if (error.name === "AbortError") {
-    return "请求超时，请稍后重试。";
-  }
-  if (/^(Failed to fetch|NetworkError|Load failed|fetch failed)$/i.test(message)) {
-    return "网络连接异常，请检查网络后重试。";
-  }
-  if (/非 JSON 响应|JSON 格式无效|HTTP 5\d\d|服务响应异常/.test(message)) {
-    return "服务暂时不可用，请稍后重试。";
+    return "请求已取消。";
   }
 
   return message || fallback;
 }
 
-function throwApiError(payload: ApiError | undefined, fallback: string): never {
-  const error = new Error(payload?.error || fallback) as Error & { code?: string };
-  error.code = payload?.code;
-  throw error;
+function readUserFacingErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const code = (error as Error & { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  return /^(Failed to fetch|NetworkError|Load failed|fetch failed)$/i.test(error.message.trim())
+    ? NETWORK_RETRY_ERROR_CODE
+    : undefined;
 }
 
-function isLinkHintResolveError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
+function codedError(message: string, code?: string): Error {
+  const error = new Error(message) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
 
-  const code = (error as Error & { code?: string }).code;
-  return code === "invalid_url" ||
-    code === "no_url" ||
-    code === "unsupported_host" ||
-    code === "unsupported_type";
+function throwApiError(payload: ApiError | undefined, fallback: string): never {
+  throw codedError(payload?.error || fallback, payload?.code);
 }
 
 async function streamTranslationContent(input: {
   items: Array<{ key: string; text: string }>;
   onDelta: (key: string, delta: string) => void;
+  onReplace: (key: string) => void;
   onDone: (key: string, text: string) => void;
-  onError: (key: string, error: string) => void;
+  onError: (key: string, error: string, code?: string) => void;
   options: TranslationOptions;
 }): Promise<void> {
   const response = await fetch("/api/douyin/translate", {
@@ -534,18 +608,20 @@ async function streamTranslationContent(input: {
     if (isUnauthenticatedApiResponse(response, payload)) {
       throw new AuthRequiredError();
     }
-    throw new Error(getApiError(payload)?.error || "翻译失败。");
+    throwApiError(getApiError(payload), "翻译失败。");
   }
 
   for await (const event of readJsonEventStream<TranslationStreamEvent>(response.body)) {
     if (event.type === "delta") {
       input.onDelta(event.key, event.value);
+    } else if (event.type === "replace") {
+      input.onReplace(event.key);
     } else if (event.type === "segment_done") {
       input.onDone(event.key, event.value);
     } else if (event.type === "segment_error") {
-      input.onError(event.key, event.error);
+      input.onError(event.key, event.error, event.code);
     } else if (event.type === "error") {
-      throw new Error(event.error);
+      throw codedError(event.error, event.code);
     }
   }
 }
@@ -553,6 +629,7 @@ async function streamTranslationContent(input: {
 async function streamSummaryContent(input: {
   historyRecordId?: string;
   onDelta: (delta: string) => void;
+  onReplace: () => void;
   onDone: (text: string, summary?: TranscriptHistorySummary) => void;
   prompt: string;
   promptId: string;
@@ -578,16 +655,18 @@ async function streamSummaryContent(input: {
     if (isUnauthenticatedApiResponse(response, payload)) {
       throw new AuthRequiredError();
     }
-    throw new Error(getApiError(payload)?.error || "AI处理失败。");
+    throwApiError(getApiError(payload), "AI处理失败。");
   }
 
   for await (const event of readJsonEventStream<SummaryStreamEvent>(response.body)) {
     if (event.type === "delta") {
       input.onDelta(event.value);
+    } else if (event.type === "replace") {
+      input.onReplace();
     } else if (event.type === "done") {
       input.onDone(event.value, event.summary);
     } else if (event.type === "error") {
-      throw new Error(event.error);
+      throw codedError(event.error, event.code);
     }
   }
 }
@@ -679,24 +758,26 @@ async function fetchTranscriptHistoryList(query = ""): Promise<TranscriptHistory
 }
 
 const TRANSCRIPT_HISTORY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const HISTORY_LIST_CACHE_KEY = "history-list";
+const WORKFLOW_CACHE_KEY = "current-workflow";
 
-let transcriptHistoryCache: {
+type TranscriptHistoryCache = {
   records: TranscriptHistoryRecord[];
   refreshedAt: number;
-  userId: string;
-} | null = null;
+};
 
 function updateTranscriptHistoryCache(
   userId: string,
   update: (records: TranscriptHistoryRecord[]) => TranscriptHistoryRecord[],
 ): void {
-  if (transcriptHistoryCache?.userId === userId) {
-    transcriptHistoryCache = {
-      records: update(transcriptHistoryCache.records),
-      refreshedAt: Date.now(),
-      userId,
-    };
-  }
+  void readClientSessionCache<TranscriptHistoryCache>(userId, HISTORY_LIST_CACHE_KEY)
+    .then((cached) => cached
+      ? writeClientSessionCache(userId, HISTORY_LIST_CACHE_KEY, {
+          records: update(cached.records),
+          refreshedAt: Date.now(),
+        } satisfies TranscriptHistoryCache)
+      : undefined)
+    .catch(() => undefined);
 }
 
 async function fetchTranscriptHistoryDetail(id: string): Promise<TranscriptHistoryDetail> {
@@ -711,9 +792,9 @@ async function fetchTranscriptHistoryDetail(id: string): Promise<TranscriptHisto
   return payload as TranscriptHistoryDetail;
 }
 
-async function renameTranscriptHistory(id: string, displayTitle: string): Promise<TranscriptHistoryRecord> {
+async function renameTranscriptHistory(id: string, sessionName: string): Promise<TranscriptHistoryRecord> {
   const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, {
-    body: JSON.stringify({ displayTitle }),
+    body: JSON.stringify({ sessionName }),
     headers: { "content-type": "application/json" },
     method: "PATCH",
   });
@@ -722,6 +803,19 @@ async function renameTranscriptHistory(id: string, displayTitle: string): Promis
     throw new Error(getApiError(payload)?.error || "历史记录名称保存失败。");
   }
   return "record" in payload ? payload.record : Promise.reject(new Error("历史记录名称保存失败。"));
+}
+
+async function setTranscriptHistoryPinned(id: string, pinned: boolean): Promise<TranscriptHistoryRecord> {
+  const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, {
+    body: JSON.stringify({ pinned }),
+    headers: { "content-type": "application/json" },
+    method: "PATCH",
+  });
+  const payload = await readApiPayload(response, "会话置顶状态保存失败。") as ApiError | { record: TranscriptHistoryRecord };
+  if (!response.ok) {
+    throw new Error(getApiError(payload)?.error || "会话置顶状态保存失败。");
+  }
+  return "record" in payload ? payload.record : Promise.reject(new Error("会话置顶状态保存失败。"));
 }
 
 async function updateTranscriptHistoryTranscript(input: {
@@ -748,7 +842,7 @@ async function updateTranscriptHistoryTranscript(input: {
 }
 
 async function deleteTranscriptHistory(id: string): Promise<void> {
-  const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const response = await fetch(`/api/transcript-history?id=${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!response.ok) {
     const payload = await readApiPayload(response, "历史记录删除失败。") as ApiError;
     throw new Error(payload.error || "历史记录删除失败。");
@@ -767,6 +861,16 @@ async function deleteTranscriptHistorySummary(recordId: string, summaryId: strin
     }
     throw new Error(getApiError(payload)?.error || "总结记录删除失败。");
   }
+}
+
+async function cancelTranscribeJob(jobId: string): Promise<void> {
+  if (!jobId) {
+    return;
+  }
+  await fetch(`/api/douyin/transcribe?jobId=${encodeURIComponent(jobId)}`, {
+    cache: "no-store",
+    method: "DELETE",
+  }).catch(() => undefined);
 }
 
 async function* readJsonEventStream<T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
@@ -895,7 +999,6 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "originalAudio", icon: AudioLines, label: "下载原声", previewLabel: "试听原声" },
 ];
 
-const WORK_LINK_HINT = "未识别到可处理的抖音作品。请重新粘贴正确的作品分享链接，或直接粘贴作品 URL 地址。";
 const CLIPBOARD_PRIVACY_HINT = "自动粘贴功能：检测到剪贴板最新记录包含抖音链接会自动填入输入框，但不会读取粘贴板历史记录，保护您的隐私。";
 const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
 const TRAILING_URL_PUNCTUATION_PATTERN = /[)\]}.,!?;:，。！？；：、]+$/u;
@@ -904,8 +1007,6 @@ const SOCIAL_TOKEN_PATTERN = /([#@][\p{L}\p{N}_-]+)/gu;
 const CLIPBOARD_INPUT_LIMIT = 5000;
 const USAGE_CONSENT_EVENT = "echolens:usage-consent";
 const USAGE_CONSENT_STORAGE_KEY = "echolens:usage-consent";
-let currentTranscriptCache: CurrentTranscriptSnapshot | null = null;
-
 function subscribeUsageConsent(onStoreChange: () => void): () => void {
   window.addEventListener("storage", onStoreChange);
   window.addEventListener(USAGE_CONSENT_EVENT, onStoreChange);
@@ -923,12 +1024,29 @@ function readServerUsageConsent(): boolean {
   return false;
 }
 
-function readCurrentTranscript(): CurrentTranscriptSnapshot | null {
-  return currentTranscriptCache;
+function isCanonicalWorkflowSnapshot(snapshot: CurrentWorkflowSnapshot): boolean {
+  const sessions = Object.entries(snapshot.sessions);
+  const activeViewIsValid = snapshot.activeView === undefined
+    || (snapshot.activeView.kind === "workflow"
+      ? snapshot.activeView.id === snapshot.activeHistoryRecordId
+      : snapshot.activeView.id === snapshot.activeHistoryDetail?.record.id);
+  return sessions.length > 0 &&
+    Boolean(snapshot.sessions[snapshot.activeHistoryRecordId]) &&
+    activeViewIsValid &&
+    sessions.every(([id, session]) => id === session.historyRecordId) &&
+    Object.keys(snapshot.liveTranscribeSessions).every((id) => Boolean(snapshot.sessions[id]));
 }
 
-function writeCurrentTranscript(snapshot: CurrentTranscriptSnapshot | null): void {
-  currentTranscriptCache = snapshot;
+async function readCurrentWorkflow(userId: string): Promise<CurrentWorkflowSnapshot | null> {
+  return await readClientSessionCache<CurrentWorkflowSnapshot>(userId, WORKFLOW_CACHE_KEY).catch(() => null);
+}
+
+function writeCurrentWorkflow(snapshot: CurrentWorkflowSnapshot): void {
+  void writeClientSessionCache(snapshot.userId, WORKFLOW_CACHE_KEY, snapshot).catch(() => undefined);
+}
+
+function clearCurrentWorkflow(userId: string): void {
+  void deleteClientSessionCache(userId, WORKFLOW_CACHE_KEY).catch(() => undefined);
 }
 const SPEAKER_COUNT_MIN = 1;
 const SPEAKER_COUNT_MAX = 10;
@@ -937,10 +1055,13 @@ const SUBTITLE_MAX_LINE_LENGTH = 42;
 const ASR_MODEL_PANEL_WIDTH = 220;
 const TRANSCRIBE_POLL_INTERVAL_MS = 1_000;
 const TRANSCRIBE_POLL_TIMEOUT_MS = 10 * 60_000;
-const ASSET_CACHE_RETRY_ATTEMPTS = 3;
-const ASSET_CACHE_RETRY_BASE_DELAY_MS = 800;
-const AUTO_RESOLVE_DELAY_MS = 350;
 const RESULT_PANEL_BODY_CLASS = "content-scroll h-[min(65dvh,36rem)] min-h-[20rem] overflow-auto sm:h-[36rem]";
+const RESULT_SPLIT_STORAGE_KEY = "echolens:result-split-ratio";
+const RESULT_SPLIT_DEFAULT_RATIO = 55;
+const RESULT_SPLIT_MIN_RATIO = 32;
+const RESULT_SPLIT_MAX_RATIO = 68;
+const RESULT_SPLIT_KEYBOARD_STEP = 2;
+const RESULT_SPLITTER_WIDTH = 12;
 const DEFAULT_TRANSLATION_CONFIG: TranslationConfig = {
   domains: "",
   targetLang: "",
@@ -988,10 +1109,6 @@ const ASR_MODEL_OPTIONS: AsrModelOption[] = [
   },
 ];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.reject(new DOMException("Aborted", "AbortError"));
@@ -1011,16 +1128,69 @@ function createClientJobId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function createHistoryRecordId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `history-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function getPostprocessStatusMessage(thinkingEnabled: boolean): string {
-  return `正在${thinkingEnabled ? "思考" : "极速"}优化转录结果...`;
+function createWorkflowSessionId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createWorkflowSession(historyRecordId = createWorkflowSessionId()): DouyinWorkflowSession {
+  return {
+    asrModel: "e1",
+    createdAt: Date.now(),
+    sessionName: "",
+    emptyFilterWords: "",
+    error: null,
+    historyRecordId,
+    input: "",
+    isResolving: false,
+    isResultProcessing: false,
+    lastResolvedInput: "",
+    qwenAsrItnEnabled: false,
+    results: [],
+    signedFilterWords: "",
+    speakerCount: "",
+    speakerDiarizationEnabled: false,
+    specialWordFilterEnabled: false,
+    specialWordFilterPanelOpen: false,
+    systemReservedFilter: true,
+    work: null,
+  };
+}
+
+function mergeHistoryDetailIntoWorkflowSession(
+  detail: TranscriptHistoryDetail,
+  session = createWorkflowSession(detail.record.id),
+): DouyinWorkflowSession {
+  const record = detail.record;
+  return {
+    ...session,
+    input: record.inputUrl,
+    lastResolvedInput: record.inputUrl,
+    results: [historyRecordToResult(record)],
+    work: historyRecordToWork(record),
+  };
+}
+
+function getPostprocessStatusMessage(): string {
+  return "正在优化转录结果...";
+}
+
+function historyRecordToWork(record: TranscriptHistoryRecord): ResolvedDouyinWork {
+  return {
+    authorName: record.authorName,
+    authorUrl: record.authorUrl,
+    caption: record.caption,
+    durationSeconds: record.durationSeconds,
+    finalUrl: record.finalUrl,
+    id: record.workId,
+    inputUrl: record.inputUrl,
+    kind: record.workKind,
+  };
 }
 
 function historyRecordToResult(record: TranscriptHistoryRecord): ExtractionResult {
@@ -1038,14 +1208,83 @@ function getWorkKey(work: Pick<ResolvedDouyinWork, "id" | "kind">): string {
   return `${work.kind}:${work.id}`;
 }
 
+function getWorkflowSessionStatus(
+  session: DouyinWorkflowSession,
+  liveSession: LiveTranscribeSession | undefined,
+  isCaching: boolean,
+): Pick<SidebarEntry, "isBusy" | "statusMessage"> {
+  if (session.isResolving) {
+    return { isBusy: true, statusMessage: "正在检测抖音链接" };
+  }
+  if (isCaching) {
+    return { isBusy: true, statusMessage: "正在缓存抖音资源" };
+  }
+  if (liveSession?.isRunning) {
+    return { isBusy: true, statusMessage: liveSession.statusMessage || "正在转录" };
+  }
+  if (session.isResultProcessing) {
+    return { isBusy: true, statusMessage: "正在生成翻译或 AI 总结" };
+  }
+  return { isBusy: false, statusMessage: "等待继续处理" };
+}
+
+/**
+ * 会话列表的唯一真相：持久化记录与内存工作会话按 id 合并去重。
+ * 排序键取记录的 updatedAt，打开会话不会改写它，因此切换会话不会打乱顺序。
+ */
+function buildSidebarEntries(input: {
+  historyRecords: TranscriptHistoryRecord[];
+  liveTranscribeSessions: Record<string, LiveTranscribeSession>;
+  loadingWorkKeys: ReadonlySet<string>;
+  workflowSessions: Record<string, DouyinWorkflowSession>;
+}): SidebarEntry[] {
+  const recordById = new Map(input.historyRecords.map((record) => [record.id, record]));
+  const ids = new Set([...recordById.keys(), ...Object.keys(input.workflowSessions)]);
+
+  return [...ids].flatMap((id) => {
+    const record = recordById.get(id);
+    const session = input.workflowSessions[id];
+    if (!record && !(session?.input || session?.work || session?.results.length)) return [];
+
+    const workKey = session?.work ? getWorkKey(session.work) : "";
+    const status = session
+      ? getWorkflowSessionStatus(
+          session,
+          input.liveTranscribeSessions[id],
+          Boolean(workKey && input.loadingWorkKeys.has(workKey)),
+        )
+      : { isBusy: false, statusMessage: "" };
+
+    return [{
+      hasRecord: Boolean(record),
+      id,
+      isBusy: status.isBusy,
+      isPinned: record?.pinnedAt !== undefined,
+      isSession: Boolean(session),
+      sortAt: record?.updatedAt ?? session?.createdAt ?? 0,
+      statusMessage: status.statusMessage,
+      title: session?.sessionName.trim()
+        || session?.work?.caption?.trim()
+        || record?.sessionName
+        || "未命名会话",
+    }];
+  }).sort((first, second) => second.sortAt - first.sortAt);
+}
+
+function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
+  return typeof action === "function" ? (action as (value: T) => T)(current) : action;
+}
+
 export default function HomePage() {
   const router = useRouter();
-  const [input, setInput] = useState("");
-  const [work, setWork] = useState<ResolvedDouyinWork | null>(null);
-  const [results, setResults] = useState<ExtractionResult[]>([]);
-  const [liveTranscribeSession, setLiveTranscribeSession] = useState<LiveTranscribeSession | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ message: string } | null>(null);
+  const [initialSession] = useState(() => createWorkflowSession());
+  const [activeSessionId, setActiveSessionId] = useState(initialSession.historyRecordId);
+  const [inputDraft, setInputDraft] = useState<{ sessionId: string; value: string } | null>(null);
+  const [workflowSessions, setWorkflowSessions] = useState<Record<string, DouyinWorkflowSession>>(() => ({
+    [initialSession.historyRecordId]: initialSession,
+  }));
+  const [liveTranscribeSessions, setLiveTranscribeSessions] = useState<Record<string, LiveTranscribeSession>>({});
+  const [toast, setToast] = useState<{ message: string; tone: "error" | "info" } | null>(null);
   const [historyDetail, setHistoryDetail] = useState<TranscriptHistoryDetail | null>(null);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [historyList, setHistoryList] = useState<TranscriptHistoryRecord[]>([]);
@@ -1058,134 +1297,304 @@ export default function HomePage() {
     readUsageConsent,
     readServerUsageConsent,
   );
-  const [isResolving, setIsResolving] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [asrModel, setAsrModel] = useState<AsrModelId>("e1");
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
-  const [qwenAsrItnEnabled, setQwenAsrItnEnabled] = useState(false);
-  const [speakerDiarizationEnabled, setSpeakerDiarizationEnabled] = useState(false);
-  const [speakerCount, setSpeakerCount] = useState("");
-  const [specialWordFilterEnabled, setSpecialWordFilterEnabled] = useState(false);
-  const [specialWordFilterPanelOpen, setSpecialWordFilterPanelOpen] = useState(false);
-  const [signedFilterWords, setSignedFilterWords] = useState("");
-  const [emptyFilterWords, setEmptyFilterWords] = useState("");
-  const [systemReservedFilter, setSystemReservedFilter] = useState(true);
-  const [transcribeStatusMessage, setTranscribeStatusMessage] = useState("");
-  const [lastResolvedInput, setLastResolvedInput] = useState("");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
+  const [asrQuota, setAsrQuota] = useState<AsrQuota | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const historyListRequestIdRef = useRef(0);
-  const hasRestoredCurrentTranscriptRef = useRef(false);
+  const hasRestoredCurrentWorkflowRef = useRef(false);
   const isReadingClipboardRef = useRef(false);
-  const resolveRequestIdRef = useRef(0);
-  const transcribeAbortControllerRef = useRef<AbortController | null>(null);
-  const transcribeRequestIdRef = useRef(0);
+  const resolveRequestIdsRef = useRef(new Map<string, number>());
+  const activeSessionIdRef = useRef(activeSessionId);
+  const transcribeAbortControllersRef = useRef(new Map<string, AbortController>());
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const activeSession = workflowSessions[activeSessionId] ?? initialSession;
+  const {
+    asrModel,
+    emptyFilterWords,
+    error,
+    errorCode,
+    input: committedInput,
+    isResolving,
+    qwenAsrItnEnabled,
+    results,
+    signedFilterWords,
+    speakerCount,
+    speakerDiarizationEnabled,
+    specialWordFilterEnabled,
+    specialWordFilterPanelOpen,
+    systemReservedFilter,
+    work,
+  } = activeSession;
+  const input = inputDraft?.sessionId === activeSessionId ? inputDraft.value : committedInput;
+  const updateWorkflowSession = useCallback((
+    sessionId: string,
+    update: (session: DouyinWorkflowSession) => DouyinWorkflowSession,
+  ) => {
+    setWorkflowSessions((current) => {
+      const session = current[sessionId];
+      return session ? { ...current, [sessionId]: update(session) } : current;
+    });
+  }, []);
+  const setWorkflowSessionResultProcessing = useCallback((sessionId: string, isResultProcessing: boolean) => {
+    updateWorkflowSession(sessionId, (session) => session.isResultProcessing === isResultProcessing
+      ? session
+      : { ...session, isResultProcessing });
+  }, [updateWorkflowSession]);
+  const setWork = useCallback<Dispatch<SetStateAction<ResolvedDouyinWork | null>>>((action) => {
+    updateWorkflowSession(activeSessionId, (session) => ({
+      ...session,
+      work: resolveStateAction(action, session.work),
+    }));
+  }, [activeSessionId, updateWorkflowSession]);
+  const setResults = useCallback<Dispatch<SetStateAction<ExtractionResult[]>>>((action) => {
+    updateWorkflowSession(activeSessionId, (session) => ({
+      ...session,
+      results: resolveStateAction(action, session.results),
+    }));
+  }, [activeSessionId, updateWorkflowSession]);
+  const setError = useCallback<Dispatch<SetStateAction<string | null>>>((action) => {
+    updateWorkflowSession(activeSessionId, (session) => ({
+      ...session,
+      error: resolveStateAction(action, session.error),
+      errorCode: undefined,
+    }));
+  }, [activeSessionId, updateWorkflowSession]);
+  const setErrorCode = useCallback((code: string | undefined) => {
+    updateWorkflowSession(activeSessionId, (session) => ({ ...session, errorCode: code }));
+  }, [activeSessionId, updateWorkflowSession]);
+  const setLastResolvedInput = useCallback<Dispatch<SetStateAction<string>>>((action) => {
+    updateWorkflowSession(activeSessionId, (session) => ({
+      ...session,
+      lastResolvedInput: resolveStateAction(action, session.lastResolvedInput),
+    }));
+  }, [activeSessionId, updateWorkflowSession]);
+  function setActiveSessionField<K extends keyof DouyinWorkflowSession>(
+    field: K,
+    action: SetStateAction<DouyinWorkflowSession[K]>,
+  ) {
+    updateWorkflowSession(activeSessionId, (session) => ({
+      ...session,
+      [field]: resolveStateAction(action, session[field]),
+    }));
+  }
+  const setAsrModel: Dispatch<SetStateAction<AsrModelId>> = (action) => setActiveSessionField("asrModel", action);
+  const setEmptyFilterWords: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("emptyFilterWords", action);
+  const setQwenAsrItnEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("qwenAsrItnEnabled", action);
+  const setSignedFilterWords: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("signedFilterWords", action);
+  const setSpeakerCount: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("speakerCount", action);
+  const setSpeakerDiarizationEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("speakerDiarizationEnabled", action);
+  const setSpecialWordFilterEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("specialWordFilterEnabled", action);
+  const setSpecialWordFilterPanelOpen: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("specialWordFilterPanelOpen", action);
+  const setSystemReservedFilter: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("systemReservedFilter", action);
   const closeUserMenu = useCallback(() => {
     setUserMenuOpen(false);
   }, []);
-  const showToast = useCallback((message: string) => {
-    setToast({ message });
+  const showToast = useCallback((message: string, tone: "error" | "info" = "error") => {
+    setToast({ message, tone });
+  }, []);
+  const loadAsrQuota = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch("/api/douyin/transcribe/quota", { cache: "no-store", signal });
+      if (!response.ok) {
+        setAsrQuota(null);
+        return;
+      }
+      setAsrQuota(await response.json() as AsrQuota);
+    } catch (quotaError) {
+      if (isAbortError(quotaError)) {
+        return;
+      }
+      setAsrQuota(null);
+    }
   }, []);
   const redirectToLogin = useCallback(() => {
-    setError(null);
     const next = typeof window === "undefined" ? "/" : `${window.location.pathname}${window.location.search}`;
     router.push(`/login?next=${encodeURIComponent(next || "/")}`);
   }, [router]);
-  const cachedAssets = useWorkAssetCache(work, redirectToLogin);
+  const historyWork = useMemo(
+    () => historyDetail ? historyRecordToWork(historyDetail.record) : null,
+    [historyDetail],
+  );
+  const workflowWorks = useMemo(
+    () => [
+      ...Object.values(workflowSessions).flatMap((session) => session.work ? [session.work] : []),
+      ...(historyWork ? [historyWork] : []),
+    ],
+    [historyWork, workflowSessions],
+  );
+  const applyWorkMetadata = useCallback((workKey: string, metadata: WorkMetadataPatch) => {
+    setWorkflowSessions((current) => Object.fromEntries(Object.entries(current).map(([sessionId, session]) => {
+      if (!session.work || getWorkKey(session.work) !== workKey) return [sessionId, session];
+      return [sessionId, {
+        ...session,
+        work: mergeWorkMetadata(session.work, metadata),
+      }];
+    })));
+    setHistoryDetail((current) => current && current.record.workKey === workKey
+      ? {
+          ...current,
+          record: {
+            ...current.record,
+            ...metadata,
+          },
+        }
+      : current);
+  }, []);
+  const displayedWork = historyWork ?? work;
+  const cachedAssetWorkKey = displayedWork ? getWorkKey(displayedWork) : "";
+  const {
+    avatar: cachedAvatar,
+    avatarUrl: cachedAuthorAvatarUrl,
+    cachedAssets,
+    loadingWorkKeys,
+    retryAsset,
+    retryWork,
+  } = useWorkPreparation(
+    workflowWorks,
+    cachedAssetWorkKey,
+    historyDetail?.record.id ?? activeSession.historyRecordId,
+    applyWorkMetadata,
+    redirectToLogin,
+  );
   const isHistoryMode = Boolean(historyDetail);
 
   const normalizedInput = input.trim();
-  const isInputDirty = Boolean(!isHistoryMode && work && normalizedInput !== lastResolvedInput);
-  const activeKind = hasAcceptedUsage && work && !isInputDirty ? work.kind : null;
-  const displayWork = activeKind ? work : null;
+  const activeKind = displayedWork && (isHistoryMode || hasAcceptedUsage) ? displayedWork.kind : null;
+  const displayWork = activeKind ? displayedWork : null;
   const activeWorkKey = displayWork ? getWorkKey(displayWork) : "";
-  const activeLiveSession = liveTranscribeSession?.workKey === activeWorkKey ? liveTranscribeSession : null;
+  const activeLiveSession = liveTranscribeSessions[activeSessionId] ?? null;
+  const isTranscribing = Boolean(activeLiveSession?.isRunning);
+  const transcribeStatusMessage = activeLiveSession?.statusMessage ?? "";
+  const sidebarEntries = useMemo(() => buildSidebarEntries({
+    historyRecords: historyList,
+    liveTranscribeSessions,
+    loadingWorkKeys,
+    workflowSessions,
+  }), [historyList, liveTranscribeSessions, loadingWorkKeys, workflowSessions]);
+  const activeSidebarId = historyDetail ? historyDetail.record.id : activeSessionId;
 
-  const restoreCurrentTranscript = useCallback((snapshot: CurrentTranscriptSnapshot | null) => {
-    if (!snapshot) {
-      setInput("");
-      setLastResolvedInput("");
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const restoreCurrentWorkflow = useCallback((snapshot: CurrentWorkflowSnapshot | null) => {
+    if (!snapshot || !isCanonicalWorkflowSnapshot(snapshot)) {
       setLiveHistorySummariesByRecordId({});
-      setLiveTranscribeSession(null);
-      setThinkingEnabled(false);
-      setResults([]);
-      setWork(null);
+      setLiveTranscribeSessions({});
+      setHistoryDetail(null);
+      setActiveSessionId(initialSession.historyRecordId);
+      setWorkflowSessions({ [initialSession.historyRecordId]: initialSession });
       return;
     }
-    setInput(snapshot.input);
-    setLastResolvedInput(snapshot.lastResolvedInput);
+    const restoredHistoryDetail = snapshot.activeView?.kind === "history"
+      ? snapshot.activeHistoryDetail ?? null
+      : null;
+    const restoredSessions = restoredHistoryDetail
+      ? {
+          ...snapshot.sessions,
+          [restoredHistoryDetail.record.id]: mergeHistoryDetailIntoWorkflowSession(
+            restoredHistoryDetail,
+            snapshot.sessions[restoredHistoryDetail.record.id],
+          ),
+        }
+      : snapshot.sessions;
+    setActiveSessionId(restoredHistoryDetail?.record.id ?? snapshot.activeHistoryRecordId);
+    setHistoryDetail(restoredHistoryDetail);
     setLiveHistorySummariesByRecordId(snapshot.liveHistorySummariesByRecordId);
-    setLiveTranscribeSession(snapshot.liveTranscribeSession);
-    setThinkingEnabled(snapshot.liveTranscribeSession?.thinkingEnabled ?? false);
-    setResults(snapshot.results);
-    setWork(snapshot.work);
-  }, []);
+    setLiveTranscribeSessions(snapshot.liveTranscribeSessions);
+    setWorkflowSessions(restoredSessions);
+  }, [initialSession]);
 
   useEffect(() => {
-    if (currentUser === undefined) {
+    if (!currentUser) {
       return;
     }
 
-    const restoreTimer = window.setTimeout(() => {
-      const snapshot = readCurrentTranscript();
-      const navigationInput = new URL(window.location.href).searchParams.get("transcribe")?.trim();
-      if (snapshot && currentUser?.id !== snapshot.userId) {
-        writeCurrentTranscript(null);
-      } else if (!navigationInput) {
-        restoreCurrentTranscript(snapshot);
+    const controller = new AbortController();
+    const refresh = () => void loadAsrQuota(controller.signal);
+    queueMicrotask(refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refresh);
+    };
+  }, [currentUser, loadAsrQuota]);
+
+  useEffect(() => {
+    if (currentUser === undefined) return;
+
+    let canceled = false;
+    const navigationInput = new URL(window.location.href).searchParams.get("transcribe")?.trim();
+    queueMicrotask(async () => {
+      const snapshot = currentUser
+        ? await readCurrentWorkflow(currentUser.id)
+        : null;
+      if (canceled) return;
+      if (navigationInput) {
+        setInputDraft({
+          sessionId: initialSession.historyRecordId,
+          value: navigationInput,
+        });
+        const url = new URL(window.location.href);
+        url.searchParams.delete("transcribe");
+        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      } else {
+        restoreCurrentWorkflow(snapshot);
       }
-      hasRestoredCurrentTranscriptRef.current = true;
-    }, 0);
-    return () => window.clearTimeout(restoreTimer);
-  }, [currentUser, restoreCurrentTranscript]);
+      hasRestoredCurrentWorkflowRef.current = true;
+    });
+    return () => {
+      canceled = true;
+    };
+  }, [currentUser, initialSession.historyRecordId, restoreCurrentWorkflow]);
 
   useEffect(() => {
-    if (!hasRestoredCurrentTranscriptRef.current || !currentUser || !work || !lastResolvedInput) {
+    if (!hasRestoredCurrentWorkflowRef.current || !currentUser) {
       return;
     }
-    const currentSummaries = liveTranscribeSession
-      ? liveHistorySummariesByRecordId[liveTranscribeSession.historyRecordId] ?? []
-      : [];
-    writeCurrentTranscript({
-      input,
-      lastResolvedInput,
-      liveHistorySummariesByRecordId: liveTranscribeSession
-        ? { [liveTranscribeSession.historyRecordId]: currentSummaries }
-        : {},
-      liveTranscribeSession,
-      results,
+    writeCurrentWorkflow({
+      activeHistoryDetail: historyDetail ?? undefined,
+      activeHistoryRecordId: activeSessionId,
+      activeView: historyDetail
+        ? { id: historyDetail.record.id, kind: "history" }
+        : { id: activeSessionId, kind: "workflow" },
+      liveHistorySummariesByRecordId,
+      liveTranscribeSessions,
+      sessions: workflowSessions,
       userId: currentUser.id,
-      work,
     });
-  }, [currentUser, input, lastResolvedInput, liveHistorySummariesByRecordId, liveTranscribeSession, results, work]);
+  }, [activeSessionId, currentUser, historyDetail, liveHistorySummariesByRecordId, liveTranscribeSessions, workflowSessions]);
   const originalAudioCache = activeKind === "video" && cachedAssets.originalAudio?.workKey === activeWorkKey
     ? cachedAssets.originalAudio
     : undefined;
   const isOriginalAudioReady = Boolean(
-    originalAudioCache?.asrAudioUrl &&
-    originalAudioCache.asrAudioObjectKey,
+    originalAudioCache?.url &&
+    originalAudioCache.objectKey &&
+    originalAudioCache.verified === true,
   );
   const isOriginalAudioPreparing = activeKind === "video" &&
     !isOriginalAudioReady &&
-    (!originalAudioCache || originalAudioCache.isLoading);
+    originalAudioCache?.isLoading === true;
+  const failedCachedAsset = activeKind === "video"
+    ? Object.values(cachedAssets).find((asset) => asset?.error && !asset.url)
+    : undefined;
+  const assetCacheError = failedCachedAsset?.error || "";
+  const isFailedAssetRetrying = activeKind === "video"
+    && Object.values(cachedAssets).some((asset) => asset?.error && asset.isLoading);
   const originalAudioError = activeKind === "video" && !isOriginalAudioReady && originalAudioCache?.error
     ? originalAudioCache.error
     : "";
-  const visibleResults = useMemo(
-    () => {
-      const sourceResults = historyDetail ? [historyRecordToResult(historyDetail.record)] : results;
-      return sourceResults.filter((result) => result.feature === TRANSCRIPT_FEATURE);
-    },
-    [historyDetail, results],
-  );
+  const resourceCacheError = originalAudioError || assetCacheError;
+  const resourceCacheErrorCode = originalAudioError
+    ? originalAudioCache?.errorCode
+    : failedCachedAsset?.errorCode;
+  const sourceResults = historyDetail ? [historyRecordToResult(historyDetail.record)] : results;
+  const visibleResults = sourceResults.filter((result) => result.feature === TRANSCRIPT_FEATURE);
   const hasVisibleResults = visibleResults.length > 0;
-  const showTranscribeStage = Boolean(!isHistoryMode && activeKind && !hasVisibleResults);
+  const showTranscribeControls = Boolean(activeKind);
   const canTranscribe = Boolean(
     hasAcceptedUsage &&
     work?.kind === "video" &&
-    !isHistoryMode &&
-    !isInputDirty &&
     isOriginalAudioReady &&
     !isTranscribing,
   );
@@ -1199,8 +1608,8 @@ export default function HomePage() {
     : undefined;
   const supportsQwenAsrOptions = asrModel === "e1";
   const supportsAsrEnhancementOptions = asrModel === "e2";
-  const signedFilterWordList = useMemo(() => parseSpecialWordInput(signedFilterWords), [signedFilterWords]);
-  const emptyFilterWordList = useMemo(() => parseSpecialWordInput(emptyFilterWords), [emptyFilterWords]);
+  const signedFilterWordList = parseSpecialWordInput(signedFilterWords);
+  const emptyFilterWordList = parseSpecialWordInput(emptyFilterWords);
   const specialWordFilter = specialWordFilterEnabled && supportsAsrEnhancementOptions
     ? buildSpecialWordFilterRequest({
         emptyWords: emptyFilterWordList,
@@ -1211,15 +1620,13 @@ export default function HomePage() {
   const canStartTranscribe = canTranscribe &&
     (!speakerDiarizationEnabled || !supportsAsrEnhancementOptions || hasValidSpeakerCount);
   const hasPendingTranscribeJob = Boolean(activeLiveSession?.jobId);
-  const transcribeActionLabel = isTranscribing ? "正在转录" : hasPendingTranscribeJob ? "获取结果" : "转录文本";
-  const canRunTranscribeAction = hasPendingTranscribeJob
+  const transcribeActionLabel = "转录";
+  const canRunTranscribeAction = isOriginalAudioReady && (hasPendingTranscribeJob
     ? Boolean(
         hasAcceptedUsage &&
-        work?.kind === "video" &&
-        !isHistoryMode &&
-        !isInputDirty
+        work?.kind === "video"
       )
-    : canStartTranscribe;
+    : canStartTranscribe);
   const canUseTranscribeAction = isTranscribing || canRunTranscribeAction;
 
   const ensureAuthenticated = useCallback((): boolean => {
@@ -1248,15 +1655,13 @@ export default function HomePage() {
     }
 
     const normalizedQuery = query.trim();
-    const cachedHistory = !normalizedQuery && transcriptHistoryCache?.userId === currentUser.id
-      ? transcriptHistoryCache
+    const cachedHistory = !normalizedQuery
+      ? await readClientSessionCache<TranscriptHistoryCache>(currentUser.id, HISTORY_LIST_CACHE_KEY).catch(() => null)
       : null;
     if (cachedHistory) {
       setHistoryList(cachedHistory.records);
       setHistoryLoading(false);
-      if (Date.now() - cachedHistory.refreshedAt < TRANSCRIPT_HISTORY_CACHE_TTL_MS) {
-        return;
-      }
+      if (Date.now() - cachedHistory.refreshedAt < TRANSCRIPT_HISTORY_CACHE_TTL_MS) return;
     }
 
     const isBackgroundRefresh = Boolean(cachedHistory);
@@ -1267,11 +1672,10 @@ export default function HomePage() {
     try {
       const records = await fetchTranscriptHistoryList(normalizedQuery);
       if (!normalizedQuery) {
-        transcriptHistoryCache = {
+        void writeClientSessionCache(currentUser.id, HISTORY_LIST_CACHE_KEY, {
           records,
           refreshedAt: Date.now(),
-          userId: currentUser.id,
-        };
+        } satisfies TranscriptHistoryCache).catch(() => undefined);
       }
       if (requestId !== historyListRequestIdRef.current) {
         return;
@@ -1293,15 +1697,63 @@ export default function HomePage() {
     }
   }, [currentUser, historySearchQuery, redirectToLogin, showToast]);
 
+  function activateHistoryDetail(detail: TranscriptHistoryDetail) {
+    const record = detail.record;
+    const sessionId = record.id;
+
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+    setWorkflowSessions((current) => ({
+      ...current,
+      [sessionId]: mergeHistoryDetailIntoWorkflowSession(detail, current[sessionId]),
+    }));
+    setHistoryDetail(detail);
+    setHistoryDrawerOpen(false);
+  }
+
   async function openHistoryRecord(id: string) {
     if (!ensureAuthenticated()) {
       return;
     }
+    if (asrQuota?.exhausted && !asrQuota.configuredCustomApiKey) {
+      setError("平台转录剩余额度不足，无法转录当前音频。请前往设置，配置正确且可用的自定义 API Key 后继续使用。");
+      return;
+    }
 
     try {
+      const detailCacheKey = `history-detail:${id}`;
+      const cachedDetail = currentUser
+        ? await readClientSessionCache<TranscriptHistoryDetail>(currentUser.id, detailCacheKey).catch(() => null)
+        : null;
+      if (cachedDetail?.record.transcriptContent.trim()) {
+        activateHistoryDetail(cachedDetail);
+      }
       const detail = await fetchTranscriptHistoryDetail(id);
-      setHistoryDetail(detail);
-      setHistoryDrawerOpen(false);
+      if (currentUser) {
+        void writeClientSessionCache(currentUser.id, detailCacheKey, detail).catch(() => undefined);
+      }
+      if (!detail.record.transcriptContent.trim()) {
+        const existing = workflowSessions[id];
+        if (existing) {
+          openWorkflowSession(existing.historyRecordId);
+          return;
+        }
+        const record = detail.record;
+        const sessionId = record.id;
+        const session: DouyinWorkflowSession = {
+          ...createWorkflowSession(sessionId),
+          input: record.inputUrl,
+          lastResolvedInput: record.inputUrl,
+          work: historyRecordToWork(record),
+        };
+        activeSessionIdRef.current = sessionId;
+        setActiveSessionId(sessionId);
+        setWorkflowSessions((current) => ({ ...current, [sessionId]: session }));
+        setHistoryDetail(null);
+        setHistoryDrawerOpen(false);
+        return;
+      }
+      activateHistoryDetail(detail);
     } catch (loadError) {
       showToast(readUserFacingError(loadError, "转录历史加载失败。"));
     }
@@ -1312,28 +1764,84 @@ export default function HomePage() {
     setHistoryDrawerOpen(false);
   }
 
-  function startNewLiveSession() {
-    writeCurrentTranscript(null);
+  function openWorkflowSession(sessionId: string) {
+    if (!workflowSessions[sessionId]) {
+      return;
+    }
+
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
     setHistoryDetail(null);
-    setLiveHistorySummariesByRecordId({});
-    setLiveTranscribeSession(null);
     setHistoryDrawerOpen(false);
-    setError(null);
-    setInput("");
-    setLastResolvedInput("");
-    setResults([]);
-    setTranscribeStatusMessage("");
-    setWork(null);
   }
 
-  async function renameHistoryRecord(id: string, displayTitle: string) {
-    try {
-      const nextRecord = await renameTranscriptHistory(id, displayTitle);
-      setHistoryList((current) => current.map((record) => record.id === id ? nextRecord : record));
-      if (currentUser) {
-        updateTranscriptHistoryCache(currentUser.id, (records) =>
-          records.map((record) => record.id === id ? nextRecord : record));
+  function activateWorkflowSession(session: DouyinWorkflowSession) {
+    activeSessionIdRef.current = session.historyRecordId;
+    setActiveSessionId(session.historyRecordId);
+    setWorkflowSessions((current) => ({ ...current, [session.historyRecordId]: session }));
+    setHistoryDetail(null);
+    setHistoryDrawerOpen(false);
+  }
+
+  function createAndActivateWorkflowSession(input = ""): DouyinWorkflowSession {
+    const session = { ...createWorkflowSession(), input };
+    activateWorkflowSession(session);
+    return session;
+  }
+
+  function renameWorkflowSession(id: string, sessionName: string) {
+    updateWorkflowSession(id, (session) => ({ ...session, sessionName }));
+  }
+
+  function removeWorkflowSession(id: string) {
+    if (!workflowSessions[id]) {
+      return;
+    }
+
+    const liveSession = liveTranscribeSessions[id];
+    const jobId = liveSession?.isRunning ? liveSession.jobId : "";
+    resolveRequestIdsRef.current.delete(id);
+    transcribeAbortControllersRef.current.get(id)?.abort();
+    transcribeAbortControllersRef.current.delete(id);
+    void cancelTranscribeJob(jobId);
+    setLiveTranscribeSessions((current) => {
+      if (!current[id]) {
+        return current;
       }
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+
+    const fallbackSession = Object.values(workflowSessions)
+      .filter((session) => session.historyRecordId !== id)
+      .sort((first, second) => second.createdAt - first.createdAt)[0];
+    const nextSession = fallbackSession ?? createWorkflowSession();
+    const fallbackSessionId = nextSession.historyRecordId;
+    if (activeSessionIdRef.current === id) {
+      activeSessionIdRef.current = fallbackSessionId;
+      setActiveSessionId(fallbackSessionId);
+      setHistoryDetail(null);
+      setHistoryDrawerOpen(false);
+    }
+    setWorkflowSessions((current) => {
+      const next = { ...current };
+      delete next[id];
+      if (!Object.keys(next).length) {
+        next[nextSession.historyRecordId] = nextSession;
+      }
+      return next;
+    });
+  }
+
+  function startNewLiveSession() {
+    createAndActivateWorkflowSession();
+  }
+
+  async function renameHistoryRecord(id: string, sessionName: string) {
+    try {
+      const nextRecord = await renameTranscriptHistory(id, sessionName);
+      replaceHistoryRecord(nextRecord);
       setHistoryDetail((current) =>
         current?.record.id === id ? { ...current, record: nextRecord } : current
       );
@@ -1348,12 +1856,52 @@ export default function HomePage() {
       setHistoryList((current) => current.filter((record) => record.id !== id));
       if (currentUser) {
         updateTranscriptHistoryCache(currentUser.id, (records) => records.filter((record) => record.id !== id));
+        void deleteClientSessionCache(currentUser.id, `history-detail:${id}`).catch(() => undefined);
       }
       if (historyDetail?.record.id === id) {
         showLiveSession();
       }
     } catch (deleteError) {
       showToast(readUserFacingError(deleteError, "历史记录删除失败。"));
+    }
+  }
+
+  function replaceHistoryRecord(nextRecord: TranscriptHistoryRecord) {
+    const replace = (records: TranscriptHistoryRecord[]) =>
+      records.map((record) => record.id === nextRecord.id ? nextRecord : record);
+    setHistoryList(replace);
+    if (currentUser) {
+      updateTranscriptHistoryCache(currentUser.id, replace);
+    }
+  }
+
+  function openSidebarEntry(entry: SidebarEntry) {
+    if (entry.isSession) {
+      openWorkflowSession(entry.id);
+      return;
+    }
+    void openHistoryRecord(entry.id);
+  }
+
+  function renameSidebarEntry(entry: SidebarEntry, sessionName: string) {
+    if (entry.isSession) renameWorkflowSession(entry.id, sessionName);
+    if (entry.hasRecord) void renameHistoryRecord(entry.id, sessionName);
+  }
+
+  function deleteSidebarEntry(entry: SidebarEntry) {
+    if (entry.isSession) removeWorkflowSession(entry.id);
+    if (entry.hasRecord) void removeHistoryRecord(entry.id);
+  }
+
+  async function toggleSidebarEntryPin(entry: SidebarEntry) {
+    if (!entry.hasRecord) {
+      showToast("会话完成转录并保存后才能置顶。");
+      return;
+    }
+    try {
+      replaceHistoryRecord(await setTranscriptHistoryPinned(entry.id, !entry.isPinned));
+    } catch (pinError) {
+      showToast(readUserFacingError(pinError, "会话置顶状态保存失败。"));
     }
   }
 
@@ -1396,7 +1944,7 @@ export default function HomePage() {
     recordId: string;
     transcriptContent: string;
     transcriptSegments: TranscriptSegment[];
-  }): Promise<TranscriptHistoryRecord> {
+  }, workflowSessionId?: string): Promise<TranscriptHistoryRecord> {
     const nextRecord = await updateTranscriptHistoryTranscript({
       id: input.recordId,
       transcriptContent: input.transcriptContent,
@@ -1407,21 +1955,22 @@ export default function HomePage() {
     setHistoryDetail((current) =>
       current?.record.id === nextRecord.id ? { ...current, record: nextRecord } : current
     );
-    setResults((current) =>
-      current.map((result) =>
-        result.feature === TRANSCRIPT_FEATURE
+    if (workflowSessionId) {
+      updateWorkflowSession(workflowSessionId, (session) => ({
+        ...session,
+        results: session.results.map((result) => result.feature === TRANSCRIPT_FEATURE
           ? {
               ...result,
               content: nextRecord.transcriptContent,
               transcriptSegments: nextRecord.transcriptSegments,
             }
-          : result
-      )
-    );
+          : result),
+      }));
+    }
     return nextRecord;
   }
 
-  function upsertHistoryListItem(record: TranscriptHistoryRecord) {
+  const upsertHistoryListItem = useCallback((record: TranscriptHistoryRecord) => {
     const upsert = (current: TranscriptHistoryRecord[]) => [
       record,
       ...current.filter((item) => item.id !== record.id),
@@ -1430,7 +1979,7 @@ export default function HomePage() {
     if (currentUser) {
       updateTranscriptHistoryCache(currentUser.id, upsert);
     }
-  }
+  }, [currentUser]);
 
   function updateSpecialWordFilterEnabled(checked: boolean) {
     setSpecialWordFilterEnabled(checked);
@@ -1513,13 +2062,24 @@ export default function HomePage() {
     };
   }, [closeUserMenu, userMenuOpen]);
 
-  const resolveInput = useCallback(async (value: string, options?: { showLinkHint?: boolean; silent?: boolean }) => {
-    const valueToResolve = value.trim();
-    const requestId = resolveRequestIdRef.current + 1;
-    resolveRequestIdRef.current = requestId;
+  async function resolveInput(input: {
+    compareWithFinalUrl?: string;
+    compareWithWorkKey?: string;
+    createSessionOnSuccess: boolean;
+    sourceSessionId: string;
+    targetSession: DouyinWorkflowSession;
+    value: string;
+  }) {
+    const valueToResolve = input.value.trim();
+    const sessionId = input.sourceSessionId;
+    const clearSubmittedDraft = () => setInputDraft((current) =>
+      current?.sessionId === sessionId && current.value.trim() === valueToResolve ? null : current
+    );
+    const requestId = (resolveRequestIdsRef.current.get(sessionId) ?? 0) + 1;
+    resolveRequestIdsRef.current.set(sessionId, requestId);
 
     if (!valueToResolve) {
-      setError("请输入抖音分享链接。");
+      updateWorkflowSession(sessionId, (session) => ({ ...session, error: "请输入抖音分享链接。" }));
       return;
     }
 
@@ -1527,16 +2087,23 @@ export default function HomePage() {
       return;
     }
 
-    setIsResolving(true);
-    if (!options?.silent) {
-      setError(null);
-    }
+    updateWorkflowSession(sessionId, (session) => ({
+      ...session,
+      error: null,
+      input: input.createSessionOnSuccess ? session.input : valueToResolve,
+      isResolving: true,
+    }));
 
     try {
       const response = await fetch("/api/douyin/resolve", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ input: valueToResolve }),
+        body: JSON.stringify({
+          currentFinalUrl: input.compareWithFinalUrl,
+          currentWorkKey: input.compareWithWorkKey,
+          historyRecordId: input.targetSession.historyRecordId,
+          input: valueToResolve,
+        }),
       });
       const payload = await readApiPayload(response, "识别链接失败。");
       if (isUnauthenticatedApiResponse(response, payload)) {
@@ -1547,56 +2114,66 @@ export default function HomePage() {
         throwApiError(getApiError(payload), "识别链接失败。");
       }
 
-      if (requestId !== resolveRequestIdRef.current) {
+      if (requestId !== resolveRequestIdsRef.current.get(sessionId)) {
         return;
       }
-      const resolvedWorkKey = getWorkKey(payload.work);
-      if (resolvedWorkKey !== activeWorkKey) {
-        setLiveHistorySummariesByRecordId({});
-        setLiveTranscribeSession(null);
+      if ("sameAsCurrent" in payload) {
+        clearSubmittedDraft();
+        showToast("该链接与当前作品相同，无需重复处理。", "info");
+        return;
       }
-      setLastResolvedInput(valueToResolve);
-      setWork(payload.work);
-      setResults([]);
-      setError(null);
+      const resolvedPayload = payload as {
+        historyRecord?: TranscriptHistoryRecord;
+        reusedExistingSession?: boolean;
+        work: ResolvedDouyinWork;
+      };
+
+      const historyRecord = resolvedPayload.historyRecord;
+      if (resolvedPayload.reusedExistingSession && historyRecord) {
+        clearSubmittedDraft();
+        upsertHistoryListItem(historyRecord);
+        if (!input.createSessionOnSuccess && sessionId !== historyRecord.id) {
+          removeWorkflowSession(sessionId);
+        }
+        await openHistoryRecord(historyRecord.id);
+        showToast("该作品已有会话，已为你恢复。", "info");
+        return;
+      }
+
+      const resolvedSession: DouyinWorkflowSession = {
+        ...input.targetSession,
+        error: null,
+        input: valueToResolve,
+        lastResolvedInput: valueToResolve,
+        results: [],
+        work: resolvedPayload.work,
+      };
+      if (input.createSessionOnSuccess) {
+        activateWorkflowSession(resolvedSession);
+      } else {
+        updateWorkflowSession(resolvedSession.historyRecordId, () => resolvedSession);
+      }
+      clearSubmittedDraft();
+      if (historyRecord) upsertHistoryListItem(historyRecord);
     } catch (resolveError) {
-      if (requestId !== resolveRequestIdRef.current) {
+      if (requestId !== resolveRequestIdsRef.current.get(sessionId)) {
         return;
       }
-      setWork(null);
-      setResults([]);
       if (isAuthRequiredError(resolveError)) {
         redirectToLogin();
         return;
       }
-      if (!options?.silent) {
-        setError(readUserFacingError(resolveError, "识别链接失败。"));
-      } else if (options.showLinkHint && isLinkHintResolveError(resolveError)) {
-        setError(WORK_LINK_HINT);
-      }
+      updateWorkflowSession(sessionId, (session) => ({
+        ...session,
+        error: readUserFacingError(resolveError, "识别链接失败。"),
+        errorCode: readUserFacingErrorCode(resolveError),
+      }));
     } finally {
-      if (requestId === resolveRequestIdRef.current) {
-        setIsResolving(false);
+      if (requestId === resolveRequestIdsRef.current.get(sessionId)) {
+        updateWorkflowSession(sessionId, (session) => ({ ...session, isResolving: false }));
       }
     }
-  }, [activeWorkKey, ensureAuthenticated, redirectToLogin]);
-
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const navigationInput = url.searchParams.get("transcribe")?.trim();
-    if (!navigationInput) {
-      return;
-    }
-
-    // The URL is an external input that initializes this controlled field once.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setInput(navigationInput);
-    url.searchParams.delete("transcribe");
-    const timer = window.setTimeout(() => {
-      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
+  }
 
   useEffect(() => {
     let isActive = true;
@@ -1610,8 +2187,9 @@ export default function HomePage() {
       const clipboard = await readClipboardDouyinInput();
       isReadingClipboardRef.current = false;
 
-      if (isActive && !work && clipboard && !isSameDouyinInput(input, clipboard)) {
-        setInput(clipboard.text);
+      const hasInputDraft = inputDraft?.sessionId === activeSessionId;
+      if (isActive && !hasInputDraft && clipboard && !isSameDouyinInput(input, clipboard)) {
+        setInputDraft({ sessionId: activeSessionId, value: clipboard.text });
       }
     }
 
@@ -1631,76 +2209,62 @@ export default function HomePage() {
       window.removeEventListener("keydown", retryFromClipboard, { capture: true });
       document.removeEventListener("visibilitychange", retryFromClipboard);
     };
-  }, [input, work]);
-
-  useEffect(() => {
-    if (!hasAcceptedUsage || !normalizedInput || normalizedInput === lastResolvedInput || !extractDouyinInput(normalizedInput)) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      void resolveInput(normalizedInput, { showLinkHint: true, silent: true });
-    }, AUTO_RESOLVE_DELAY_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [hasAcceptedUsage, lastResolvedInput, normalizedInput, resolveInput]);
+  }, [activeSessionId, input, inputDraft?.sessionId]);
 
   async function transcribe() {
     if (isTranscribing) {
       await cancelTranscribe();
       return;
     }
-    if (!work || isInputDirty || isTranscribing) {
+    if (!work || isTranscribing) {
       return;
     }
     if (!ensureAuthenticated()) {
       return;
     }
+    if (
+      !activeLiveSession?.jobId &&
+      (!canStartTranscribe || !activeWorkKey)
+    ) {
+      return;
+    }
 
-    const requestId = transcribeRequestIdRef.current + 1;
-    transcribeRequestIdRef.current = requestId;
     const controller = new AbortController();
+    const sessionId = activeSessionId;
     const sessionWorkKey = activeWorkKey;
+    const sessionInput = committedInput.trim();
+    const sessionWork = work;
     const clientJobId = activeLiveSession?.jobId || createClientJobId();
-    const historyRecordId = activeLiveSession?.historyRecordId || createHistoryRecordId();
-    const nextLiveSession = {
-      historyRecordId,
-      jobId: clientJobId,
+    const historyRecordId = activeSession.historyRecordId;
+    const nextLiveSession: LiveTranscribeSession = {
+      input: sessionInput,
+      isRunning: true,
+      jobId: activeLiveSession?.jobId ?? "",
       persisted: false,
-      thinkingEnabled,
+      results: activeLiveSession?.results ?? [],
+      statusMessage: "转录任务处理中，完成后会自动展示结果...",
+      work: sessionWork,
       workKey: sessionWorkKey,
     };
-    transcribeAbortControllerRef.current = controller;
-    setIsTranscribing(true);
+    transcribeAbortControllersRef.current.set(sessionId, controller);
+    setLiveTranscribeSessions((current) => ({ ...current, [sessionId]: nextLiveSession }));
     setError(null);
-    setTranscribeStatusMessage("");
 
     try {
       if (activeLiveSession?.jobId) {
         await pollPendingTranscribeResult(
           activeLiveSession.jobId,
-          requestId,
+          sessionId,
+          sessionInput,
           controller.signal,
-          {
-            thinkingEnabled: activeLiveSession.thinkingEnabled ?? thinkingEnabled,
-            title: work.title,
-          },
         );
         return;
       }
 
-      if (!canStartTranscribe || !sessionWorkKey || !originalAudioCache?.asrAudioUrl || !originalAudioCache.asrAudioObjectKey) {
-        return;
-      }
-
-      setLiveTranscribeSession(nextLiveSession);
-      setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
       const response = await fetch("/api/douyin/transcribe", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          audioObjectKey: originalAudioCache.asrAudioObjectKey,
-          audioUrl: originalAudioCache.asrAudioUrl,
           clientJobId,
           diarizationEnabled: supportsAsrEnhancementOptions && speakerDiarizationEnabled,
           ...(supportsQwenAsrOptions && qwenAsrItnEnabled ? { enableItn: true } : {}),
@@ -1708,19 +2272,16 @@ export default function HomePage() {
           model: asrModel,
           specialWordFilter,
           speakerCount: effectiveSpeakerCount,
-          thinkingEnabled,
-          work,
         }),
         signal: controller.signal,
       });
-      const outcome = await consumeTranscribeResponse(response, "转录失败。");
+      const outcome = await consumeTranscribeResponse(response, "转录失败。", {
+        input: sessionInput,
+        sessionId,
+      });
       if (outcome.type === "running") {
-        setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
         setResults([]);
-        await pollPendingTranscribeResult(outcome.jobId, requestId, controller.signal, {
-          thinkingEnabled,
-          title: work.title,
-        });
+        await pollPendingTranscribeResult(outcome.jobId, sessionId, sessionInput, controller.signal);
       }
     } catch (transcribeError) {
       if (isAbortError(transcribeError)) {
@@ -1730,38 +2291,50 @@ export default function HomePage() {
         redirectToLogin();
         return;
       }
-      setTranscribeStatusMessage("");
-      setError(readUserFacingError(transcribeError, "转录失败。"));
+      const message = readUserFacingError(transcribeError, "转录失败。");
+      setLiveTranscribeSessions((current) => {
+        const session = current[sessionId];
+        return session ? {
+          ...current,
+          [sessionId]: { ...session, isRunning: false, statusMessage: message },
+        } : current;
+      });
+      setError(message);
+      setErrorCode(readUserFacingErrorCode(transcribeError));
     } finally {
-      if (transcribeAbortControllerRef.current === controller) {
-        transcribeAbortControllerRef.current = null;
+      if (transcribeAbortControllersRef.current.get(sessionId) === controller) {
+        transcribeAbortControllersRef.current.delete(sessionId);
       }
-      setIsTranscribing(false);
+      setLiveTranscribeSessions((current) => {
+        const session = current[sessionId];
+        return session ? { ...current, [sessionId]: { ...session, isRunning: false } } : current;
+      });
     }
   }
 
   async function cancelTranscribe() {
     const jobId = activeLiveSession?.jobId ?? "";
-    transcribeRequestIdRef.current += 1;
-    transcribeAbortControllerRef.current?.abort();
-    transcribeAbortControllerRef.current = null;
-    setLiveTranscribeSession(null);
-    setTranscribeStatusMessage("");
-    setIsTranscribing(false);
+    const sessionId = activeSessionId;
+    transcribeAbortControllersRef.current.get(sessionId)?.abort();
+    transcribeAbortControllersRef.current.delete(sessionId);
+    setLiveTranscribeSessions((current) => {
+      if (!current[sessionId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
     setError(null);
 
     if (!jobId) {
       return;
     }
 
-    await fetch(`/api/douyin/transcribe?jobId=${encodeURIComponent(jobId)}`, {
-      cache: "no-store",
-      method: "DELETE",
-    }).catch(() => undefined);
+    await cancelTranscribeJob(jobId);
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function detectInput() {
     if (!hasAcceptedUsage) {
       setError("请先确认仅用于个人学习和非商业用途，并尊重原作者版权。");
       return;
@@ -1770,7 +2343,18 @@ export default function HomePage() {
       return;
     }
 
-    void resolveInput(normalizedInput);
+    const createSessionOnSuccess = Boolean(work);
+    const targetSession = createSessionOnSuccess
+      ? { ...createWorkflowSession(), input: normalizedInput }
+      : { ...activeSession, input: normalizedInput };
+    void resolveInput({
+      compareWithFinalUrl: createSessionOnSuccess ? work?.finalUrl : undefined,
+      compareWithWorkKey: createSessionOnSuccess ? activeWorkKey : undefined,
+      createSessionOnSuccess,
+      sourceSessionId: activeSessionId,
+      targetSession,
+      value: normalizedInput,
+    });
   }
 
   function updateUsageConsent(value: boolean) {
@@ -1787,21 +2371,34 @@ export default function HomePage() {
 
   async function pollPendingTranscribeResult(
     jobId: string,
-    requestId: number,
+    sessionId: string,
+    sessionInput: string,
     signal: AbortSignal,
-    postprocess: TranscriptPostprocessControls,
   ) {
     let elapsedMs = 0;
-    setLiveTranscribeSession((current) => current ? { ...current, jobId } : current);
+    setLiveTranscribeSessions((current) => {
+      const session = current[sessionId];
+      return session ? { ...current, [sessionId]: { ...session, jobId } } : current;
+    });
 
-    while (requestId === transcribeRequestIdRef.current && !signal.aborted) {
-      const settled = await fetchPendingTranscribeResult(jobId, signal, postprocess);
+    while (!signal.aborted) {
+      const settled = await fetchPendingTranscribeResult(jobId, sessionId, sessionInput, signal);
       if (settled) {
         return;
       }
 
       if (elapsedMs >= TRANSCRIBE_POLL_TIMEOUT_MS) {
-        setTranscribeStatusMessage("转录任务仍在处理中，稍后点击“获取结果”继续刷新。");
+        setLiveTranscribeSessions((current) => {
+          const session = current[sessionId];
+          return session ? {
+            ...current,
+            [sessionId]: {
+              ...session,
+              isRunning: false,
+              statusMessage: "转录任务仍在处理中，稍后点击“转录”继续刷新。",
+            },
+          } : current;
+        });
         return;
       }
 
@@ -1812,150 +2409,174 @@ export default function HomePage() {
 
   async function fetchPendingTranscribeResult(
     jobId: string,
+    sessionId: string,
+    sessionInput: string,
     signal: AbortSignal,
-    postprocess: TranscriptPostprocessControls,
   ): Promise<boolean> {
     if (!jobId) {
       return false;
     }
 
     const query = new URLSearchParams({ jobId });
-    if (postprocess.thinkingEnabled) {
-      query.set("thinking", "1");
-    }
-    if (postprocess.title) {
-      query.set("title", postprocess.title);
-    }
     const response = await fetch(`/api/douyin/transcribe?${query}`, {
       cache: "no-store",
       signal,
     });
-    const outcome = await consumeTranscribeResponse(response, "转录结果获取失败。");
+    const outcome = await consumeTranscribeResponse(response, "转录结果获取失败。", {
+      input: sessionInput,
+      sessionId,
+    });
     return outcome.type === "done";
   }
 
-  async function consumeTranscribeResponse(response: Response, fallback: string): Promise<TranscribeStreamOutcome> {
+  async function consumeTranscribeResponse(
+    response: Response,
+    fallback: string,
+    sessionContext: { input: string; sessionId: string },
+  ): Promise<TranscribeStreamOutcome> {
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.includes("text/event-stream") || !response.body) {
       const payload = await readApiPayload(response, fallback) as ApiError;
       if (isUnauthenticatedApiResponse(response, payload)) {
         throw new AuthRequiredError();
       }
-      throw new Error(payload.error || fallback);
+      throwApiError(getApiError(payload), fallback);
     }
 
     for await (const event of readJsonEventStream<TranscribeStreamEvent>(response.body)) {
       if (event.type === "postprocess_start") {
-        setTranscribeStatusMessage(getPostprocessStatusMessage(thinkingEnabled));
+        setLiveTranscribeSessions((current) => {
+          const session = current[sessionContext.sessionId];
+          return session ? {
+            ...current,
+            [sessionContext.sessionId]: { ...session, statusMessage: getPostprocessStatusMessage() },
+          } : current;
+        });
       } else if (event.type === "running") {
+        void loadAsrQuota();
         const eventWork = event.work;
         if (eventWork) {
-          setLastResolvedInput(normalizedInput);
+          setLastResolvedInput(sessionContext.input);
           setWork((current) => mergeResolvedWork(current, eventWork));
         }
-        const eventWorkKey = eventWork ? getWorkKey(eventWork) : activeWorkKey;
-        setLiveTranscribeSession((current) =>
-          current
-            ? { ...current, jobId: event.jobId }
-            : {
-                historyRecordId: createHistoryRecordId(),
-                jobId: event.jobId,
-                persisted: false,
-                thinkingEnabled,
-                workKey: eventWorkKey,
-              }
-        );
-        setTranscribeStatusMessage("转录任务处理中，完成后会自动展示结果...");
+        setLiveTranscribeSessions((current) => {
+          const session = current[sessionContext.sessionId];
+          return session ? {
+            ...current,
+            [sessionContext.sessionId]: {
+              ...session,
+              jobId: event.jobId,
+              statusMessage: "转录任务处理中，完成后会自动展示结果...",
+              work: eventWork ? mergeResolvedWork(session.work, eventWork) : session.work,
+            },
+          } : current;
+        });
         return { type: "running", jobId: event.jobId };
       } else if (event.type === "done") {
+        void loadAsrQuota();
         const eventWork = event.work;
         if (eventWork) {
           setWork((current) => mergeResolvedWork(current, eventWork));
         }
-        let persistedSession: LiveTranscribeSession | null = null;
+        const orderedResults = orderResults(event.results, [TRANSCRIPT_FEATURE]);
+        let persisted = false;
         if (event.historyRecord) {
           const record = event.historyRecord;
           upsertHistoryListItem(record);
-          const historyWorkKey = getWorkKey({
-            id: record.workId,
-            kind: record.workKind,
-          });
-          persistedSession = { historyRecordId: record.id, jobId: "", persisted: true, workKey: historyWorkKey };
+          setHistoryDetail((current) => current?.record.id === record.id
+            ? { ...current, record }
+            : current);
+          persisted = true;
         }
-        setLastResolvedInput(normalizedInput);
-        setLiveTranscribeSession((current) => persistedSession ?? (current ? { ...current, jobId: "" } : current));
-        setTranscribeStatusMessage("");
-        setResults(orderResults(event.results, [TRANSCRIPT_FEATURE]));
+        setLiveTranscribeSessions((current) => {
+          const session = current[sessionContext.sessionId];
+          if (!session) {
+            return current;
+          }
+          return {
+            ...current,
+            [sessionContext.sessionId]: {
+              ...session,
+              isRunning: false,
+              jobId: "",
+              persisted,
+              results: orderedResults,
+              statusMessage: "",
+              work: eventWork ? mergeResolvedWork(session.work, eventWork) : session.work,
+            },
+          };
+        });
+        setLastResolvedInput(sessionContext.input);
+        setResults(orderedResults);
         return { type: "done" };
       } else if (event.type === "error") {
-        throw new Error(event.error);
+        void loadAsrQuota();
+        setLiveTranscribeSessions((current) => {
+          const session = current[sessionContext.sessionId];
+          return session ? {
+            ...current,
+            [sessionContext.sessionId]: {
+              ...session,
+              isRunning: false,
+              jobId: "",
+              statusMessage: event.error,
+            },
+          } : current;
+        });
+        throw codedError(event.error, event.code);
       }
     }
 
     throw new Error(fallback);
   }
   function updateInput(value: string) {
-    const nextValue = value.trim();
-    if (!nextValue || nextValue !== lastResolvedInput) {
-      resolveRequestIdRef.current += 1;
-      transcribeRequestIdRef.current += 1;
-      setLiveTranscribeSession(null);
-      setTranscribeStatusMessage("");
-      setHistoryDetail(null);
-      setWork(null);
-      setResults([]);
-      setLastResolvedInput("");
-    }
-    setInput(value);
-    if (!nextValue) {
+    setInputDraft({ sessionId: activeSessionId, value });
+    if (!value.trim()) {
       setError(null);
-      return;
     }
   }
 
   function clearInput() {
-    writeCurrentTranscript(null);
-    resolveRequestIdRef.current += 1;
-    transcribeRequestIdRef.current += 1;
-    setLiveTranscribeSession(null);
-    setTranscribeStatusMessage("");
-    setHistoryDetail(null);
-    setLiveHistorySummariesByRecordId({});
-    setInput("");
-    setWork(null);
-    setResults([]);
-    setLastResolvedInput("");
+    setInputDraft({ sessionId: activeSessionId, value: "" });
     setError(null);
   }
 
   async function logout() {
     closeUserMenu();
+    for (const controller of transcribeAbortControllersRef.current.values()) {
+      controller.abort();
+    }
+    transcribeAbortControllersRef.current.clear();
     await fetch("/api/auth/logout", { method: "POST" });
-    writeCurrentTranscript(null);
-    transcriptHistoryCache = null;
+    if (currentUser) clearCurrentWorkflow(currentUser.id);
+    setLiveTranscribeSessions({});
+    setHistoryList([]);
+    setHistoryDetail(null);
+    setAsrQuota(null);
     setCurrentUser(null);
     router.refresh();
   }
 
   return (
     <main className="app-shell h-[100dvh] overflow-hidden bg-background text-foreground">
-      {toast ? <TopErrorToast message={toast.message} onDismiss={() => setToast(null)} /> : null}
+      {toast ? <TopToast message={toast.message} onDismiss={() => setToast(null)} tone={toast.tone} /> : null}
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
-          activeId={historyDetail?.record.id}
+          activeId={activeSidebarId}
+          entries={sidebarEntries}
           isDrawerOpen={historyDrawerOpen}
           isOpen={historySidebarOpen}
           isLoading={historyLoading}
           onCloseDrawer={() => setHistoryDrawerOpen(false)}
-          onDelete={(id) => void removeHistoryRecord(id)}
+          onDelete={deleteSidebarEntry}
           onNew={startNewLiveSession}
-          onOpen={(id) => void openHistoryRecord(id)}
-          onRename={(id, displayTitle) => void renameHistoryRecord(id, displayTitle)}
+          onOpen={openSidebarEntry}
+          onRename={renameSidebarEntry}
           onReturnLive={showLiveSession}
           onSearch={setHistorySearchQuery}
           onToggle={() => setHistorySidebarOpen((open) => !open)}
+          onTogglePin={toggleSidebarEntryPin}
           query={historySearchQuery}
-          records={historyList}
           showReturnLive={Boolean(historyDetail)}
         />
         <div
@@ -2074,13 +2695,14 @@ export default function HomePage() {
         </div>
 
         {!isHistoryMode ? (
-        <form onSubmit={submit} className="flex flex-col gap-2">
-          <label className="order-1 flex min-w-0 cursor-pointer items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
+        <div className="flex flex-col gap-2">
+          <div className="order-1 flex min-w-0 items-start gap-3 rounded-md bg-black/20 px-0 py-2 text-left md:order-2">
             <span className="relative mt-0.5 shrink-0">
               <input
                 type="checkbox"
                 checked={hasAcceptedUsage}
                 onChange={(event) => updateUsageConsent(event.target.checked)}
+                aria-labelledby="usage-consent-description"
                 className="peer absolute inset-0 z-10 cursor-pointer opacity-0"
               />
               <span
@@ -2090,7 +2712,7 @@ export default function HomePage() {
                 <Check className="size-[0.82rem] text-cyan opacity-0 drop-shadow-[0_0_6px_rgba(34,211,238,0.45)] transition duration-150 ease-out" strokeWidth={3.4} />
               </span>
             </span>
-            <span className="mobile-readable min-w-0 flex-1 text-[13px] leading-5 text-muted-foreground">
+            <span id="usage-consent-description" className="mobile-readable min-w-0 flex-1 text-[13px] leading-5 text-muted-foreground">
               我确认仅用于个人学习和非商业用途，并尊重原作者版权；已阅读并同意
               <Link
                 href="/legal"
@@ -2099,7 +2721,7 @@ export default function HomePage() {
                 法律声明
               </Link>
             </span>
-          </label>
+          </div>
 
           <div className="order-2 flex flex-col gap-3 md:order-1 md:flex-row md:items-center">
             <div
@@ -2111,14 +2733,20 @@ export default function HomePage() {
               )}
             >
               <Link2 className={cn("size-5 shrink-0", hasAcceptedUsage ? "text-amber" : "text-muted-foreground")} />
-              <span
-                tabIndex={0}
-                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none"
-                aria-label={CLIPBOARD_PRIVACY_HINT}
-                title={CLIPBOARD_PRIVACY_HINT}
-              >
-                <AlertCircle className="size-4" aria-hidden="true" />
-              </span>
+              <details className="group relative shrink-0">
+                <summary
+                  className="inline-flex size-7 cursor-pointer list-none items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber focus-visible:bg-cyan/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 group-open:bg-cyan/[0.08] group-open:text-amber [&::-webkit-details-marker]:hidden"
+                  aria-label="查看自动粘贴隐私说明"
+                >
+                  <AlertCircle className="size-4" aria-hidden="true" />
+                </summary>
+                <div
+                  role="note"
+                  className="absolute left-0 top-full z-30 mt-2 w-[min(20rem,calc(100vw-3rem))] rounded-md border border-cyan/30 bg-[#0b1118]/95 px-3 py-2.5 text-xs leading-5 text-muted-foreground shadow-[0_12px_32px_rgb(0_0_0_/_0.45)] backdrop-blur"
+                >
+                  {CLIPBOARD_PRIVACY_HINT}
+                </div>
+              </details>
               <input
                 value={input}
                 onChange={(event) => updateInput(event.target.value)}
@@ -2139,17 +2767,17 @@ export default function HomePage() {
               ) : null}
             </div>
             <button
-              type="submit"
+              type="button"
+              onClick={detectInput}
               disabled={!hasAcceptedUsage || isResolving || !normalizedInput}
               className="inline-flex h-11 w-full items-center justify-center rounded-md border border-cyan/65 bg-cyan px-4 text-sm font-semibold text-black shadow-lg shadow-cyan/20 transition duration-150 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0 active:scale-[0.98] disabled:cursor-not-allowed disabled:translate-y-0 disabled:border-transparent disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none md:w-auto"
             >
               {isResolving ? "检测中" : "智能检测"}
             </button>
           </div>
-        </form>
+        </div>
         ) : null}
 
-        {!isHistoryMode ? (
         <section
           className={cn(
             "work-flow-panel shrink-0 rounded-lg border border-white/25 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
@@ -2158,15 +2786,34 @@ export default function HomePage() {
         >
           {activeKind ? (
             <div className={cn("relative z-10", hasVisibleResults ? "" : "px-4 pt-4 sm:px-5 sm:pt-5")}>
-              <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-5 gap-y-4 text-left text-sm xl:flex-nowrap">
+              <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-2 gap-y-4 text-left text-sm xl:flex-nowrap">
                 <dl className="contents">
-                  <InfoRow className="w-24 shrink-0" label="作品类型" singleLine value={KIND_LABELS[activeKind]} />
+                  <InfoRow className="w-20 shrink-0" label="作品类型" singleLine value={KIND_LABELS[activeKind]} />
                   <InfoRow
-                    className="w-44 shrink-0"
+                    className="w-40 shrink-0"
                     label="作者"
                     singleLine
                     value={displayWork?.authorName ?? "未识别"}
                     href={displayWork?.authorUrl}
+                    leading={cachedAvatar?.errorCode === NETWORK_RETRY_ERROR_CODE ? (
+                      <NetworkRetryButton
+                        className="size-6 text-amber hover:text-cyan"
+                        code={cachedAvatar.errorCode}
+                        isRetrying={cachedAvatar.isLoading}
+                        onRetry={() => retryAsset(activeWorkKey, "avatar")}
+                      />
+                    ) : cachedAvatar?.isLoading ? (
+                      <Loader2 className="size-5 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" />
+                    ) : (cachedAuthorAvatarUrl ?? displayWork?.authorAvatarUrl) ? (
+                      <Image
+                        src={cachedAuthorAvatarUrl ?? displayWork!.authorAvatarUrl!}
+                        alt=""
+                        width={24}
+                        height={24}
+                        unoptimized
+                        className="size-6 shrink-0 rounded-full object-cover"
+                      />
+                    ) : null}
                   />
                   <InfoRow
                     className="w-48 shrink-0"
@@ -2179,11 +2826,13 @@ export default function HomePage() {
                 {displayWork ? (
                   <WorkDownloadActions
                     cachedAssets={cachedAssets}
+                    historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
+                    onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
                   />
                 ) : null}
               </div>
-              <WorkTitleRow title={displayWork?.title} />
+              <WorkTitleRow title={displayWork?.caption} />
             </div>
           ) : (
             <div className="relative z-10 px-4 py-8 sm:px-5">
@@ -2200,18 +2849,23 @@ export default function HomePage() {
             </div>
           )}
 
-          {error ? (
+          {!isHistoryMode && error ? (
             <div className={cn(
               "relative z-10 flex items-center justify-center gap-2 px-4 py-2 text-center text-sm text-destructive",
               hasVisibleResults ? "mt-5" : "mt-3 sm:px-5",
             )}>
               <AlertCircle className="size-4 shrink-0" />
               <span>{error}</span>
+              <NetworkRetryButton
+                code={errorCode}
+                isRetrying={isResolving || isTranscribing}
+                onRetry={() => (work ? void transcribe() : detectInput())}
+              />
             </div>
           ) : null}
 
-          {showTranscribeStage ? (
-            <EmptyResults
+          {showTranscribeControls ? (
+            <TranscribeControls
               actionBusy={isTranscribing}
               actionDisabled={!canUseTranscribeAction}
               actionLabel={transcribeActionLabel}
@@ -2232,16 +2886,18 @@ export default function HomePage() {
               notice={
                 activeKind === "video" ? (
                   <>
-                    {!isOriginalAudioReady ? (
+                    {!isOriginalAudioReady || resourceCacheError ? (
                       <AudioCacheNotice
                         key={activeWorkKey}
-                        error={originalAudioError}
-                        isLoading={isOriginalAudioPreparing}
+                        error={resourceCacheError}
+                        errorCode={resourceCacheErrorCode}
+                        isLoading={isOriginalAudioPreparing || isFailedAssetRetrying}
+                        onRetry={() => retryWork(activeWorkKey)}
                         progressKey={activeWorkKey}
                         videoDurationSeconds={displayWork?.durationSeconds}
                       />
                     ) : null}
-                    {hasPendingTranscribeJob ? (
+                    {isTranscribing || hasPendingTranscribeJob ? (
                       <p className="mt-2 text-center text-xs text-muted-foreground">
                         <LoadingText>
                           {transcribeStatusMessage || "转录任务处理中，完成后会自动展示结果..."}
@@ -2275,52 +2931,36 @@ export default function HomePage() {
               }
               modelSlot={
                 activeKind === "video" ? (
-                  <div className="flex items-center gap-1">
-                    <PostprocessToggle
-                      checked={thinkingEnabled}
-                      description="深入推理"
-                      disabled={isTranscribing}
-                      icon={Brain}
-                      label="思考"
-                      onCheckedChange={setThinkingEnabled}
-                    />
-                    <AsrModelSelect
-                      disabled={isTranscribing}
-                      model={asrModel}
-                      onChange={updateAsrModel}
-                    />
-                  </div>
+                  <AsrModelSelect
+                    disabled={isTranscribing}
+                    model={asrModel}
+                    onChange={updateAsrModel}
+                  />
                 ) : undefined
+              }
+              quotaSlot={
+                currentUser ? <AsrQuotaIndicator quota={asrQuota} /> : undefined
               }
               onAction={activeKind === "video" ? transcribe : undefined}
             />
           ) : null}
         </section>
-        ) : null}
 
-        {historyDetail ? <HistoryWorkInfoPanel record={historyDetail.record} /> : null}
-
-        {hasVisibleResults ? (
+        {historyDetail && hasVisibleResults ? (
           <section
             className="rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
           >
             <div className="grid gap-5">
               {visibleResults.map((result) => (
                 <ResultBlock
-                  history={historyDetail ? {
+                  history={{
                     onSummaryDeleted: removeHistorySummary,
                     onSummarySaved: addHistorySummary,
                     onTranscriptSaved: updateHistoryTranscript,
                     recordId: historyDetail.record.id,
                     summaries: historyDetail.summaries,
-                  } : activeLiveSession?.persisted ? {
-                    onSummaryDeleted: removeHistorySummary,
-                    onSummarySaved: addHistorySummary,
-                    onTranscriptSaved: updateHistoryTranscript,
-                    recordId: activeLiveSession.historyRecordId,
-                    summaries: liveHistorySummariesByRecordId[activeLiveSession.historyRecordId] ?? [],
-                  } : undefined}
-                  key={result.feature}
+                  }}
+                  key={`${historyDetail.record.id}:${result.feature}`}
                   onAuthRequired={redirectToLogin}
                   result={result}
                 />
@@ -2328,6 +2968,42 @@ export default function HomePage() {
             </div>
           </section>
         ) : null}
+
+        {Object.values(workflowSessions).map((session) => {
+          const sessionResults = session.results.filter((result) => result.feature === TRANSCRIPT_FEATURE);
+          if (sessionResults.length === 0) {
+            return null;
+          }
+          const liveSession = liveTranscribeSessions[session.historyRecordId];
+          return (
+            <section
+              className={cn(
+                "rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
+                historyDetail || session.historyRecordId !== activeSessionId ? "hidden" : "",
+              )}
+              key={session.historyRecordId}
+            >
+              <div className="grid gap-5">
+                {sessionResults.map((result) => (
+                  <ResultBlock
+                    history={liveSession?.persisted ? {
+                      onSummaryDeleted: removeHistorySummary,
+                      onSummarySaved: addHistorySummary,
+                      onTranscriptSaved: (input) => updateHistoryTranscript(input, session.historyRecordId),
+                      recordId: session.historyRecordId,
+                      summaries: liveHistorySummariesByRecordId[session.historyRecordId] ?? [],
+                    } : undefined}
+                    key={`${session.historyRecordId}:${result.feature}`}
+                    onAuthRequired={redirectToLogin}
+                    onSessionActivityChange={setWorkflowSessionResultProcessing}
+                    result={result}
+                    sessionId={session.historyRecordId}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
 
         <LegalNoticeFooter />
         </div>
@@ -2344,14 +3020,29 @@ function LegalNoticeFooter() {
   );
 }
 
-function TopErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+function TopToast({
+  message,
+  onDismiss,
+  tone,
+}: {
+  message: string;
+  onDismiss: () => void;
+  tone: "error" | "info";
+}) {
   return (
     <div className="pointer-events-none fixed inset-x-0 top-[max(1rem,env(safe-area-inset-top))] z-[60] flex justify-center px-4">
       <div
-        className="pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-md border border-destructive/35 bg-background/95 px-4 py-3 text-sm text-foreground shadow-2xl shadow-black/40 backdrop-blur-xl motion-safe:animate-[toast-enter_180ms_ease-out]"
-        role="alert"
+        className={cn(
+          "pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-md bg-background/95 px-4 py-3 text-sm text-foreground shadow-2xl shadow-black/40 backdrop-blur-xl motion-safe:animate-[toast-enter_180ms_ease-out]",
+          tone === "error" && "border border-destructive/35",
+        )}
+        role={tone === "error" ? "alert" : "status"}
       >
-        <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+        {tone === "info" ? (
+          <Info className="mt-0.5 size-4 shrink-0 text-cyan" aria-hidden="true" />
+        ) : (
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+        )}
         <span className="min-w-0 flex-1 leading-5">{message}</span>
         <button
           type="button"
@@ -2380,26 +3071,40 @@ function TranscriptHistorySidebar({
   onReturnLive,
   onSearch,
   onToggle,
+  onTogglePin,
+  entries,
   query,
-  records,
   showReturnLive,
 }: {
   activeId?: string;
+  entries: SidebarEntry[];
   isDrawerOpen: boolean;
   isLoading: boolean;
   isOpen: boolean;
   onCloseDrawer: () => void;
-  onDelete: (id: string) => void;
+  onDelete: (entry: SidebarEntry) => void;
   onNew: () => void;
-  onOpen: (id: string) => void;
-  onRename: (id: string, displayTitle: string) => void;
+  onOpen: (entry: SidebarEntry) => void;
+  onRename: (entry: SidebarEntry, sessionName: string) => void;
   onReturnLive: () => void;
   onSearch: (query: string) => void;
   onToggle: () => void;
+  onTogglePin: (entry: SidebarEntry) => void;
   query: string;
-  records: TranscriptHistoryRecord[];
   showReturnLive: boolean;
 }) {
+  const [collapsedSections, toggleSection] = useCollapsedSidebarSections();
+  const pinnedEntries = entries.filter((entry) => entry.isPinned);
+  const recentEntries = entries.filter((entry) => !entry.isPinned);
+  const sectionProps = {
+    activeId,
+    collapsedSections,
+    onDelete,
+    onOpen,
+    onRename,
+    onToggleSection: toggleSection,
+    onTogglePin,
+  };
   const content = (
     <div className="flex h-full min-h-0 flex-col px-1.5 py-2">
       <div className="mb-4 flex h-9 items-center justify-between px-1">
@@ -2468,25 +3173,18 @@ function TranscriptHistorySidebar({
           收藏与关注
         </Link>
       </div>
-      <div className="mt-5 px-2.5 text-[13px] font-semibold text-foreground">最近</div>
-      <div className="content-scroll mt-2 min-h-0 flex-1 overflow-auto pb-3">
+      <div className="content-scroll mt-5 min-h-0 flex-1 overflow-auto pb-3">
         {isLoading ? (
           <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin text-cyan" />
             加载中
           </div>
         ) : null}
-        {records.map((record) => (
-          <TranscriptHistoryItem
-            active={record.id === activeId}
-            key={`${record.id}:${record.displayTitle}`}
-            onDelete={() => onDelete(record.id)}
-            onOpen={() => onOpen(record.id)}
-            onRename={(displayTitle) => onRename(record.id, displayTitle)}
-            record={record}
-          />
-        ))}
-        {!isLoading && records.length === 0 ? (
+        {pinnedEntries.length ? (
+          <SidebarSection {...sectionProps} entries={pinnedEntries} section="pinned" title="置顶" />
+        ) : null}
+        <SidebarSection {...sectionProps} entries={recentEntries} section="recent" title="最近" />
+        {!isLoading && entries.length === 0 ? (
           <div className="px-2 py-10 text-center text-xs leading-5 text-muted-foreground">暂无转录历史</div>
         ) : null}
       </div>
@@ -2564,119 +3262,223 @@ function TranscriptHistorySidebar({
   );
 }
 
-function TranscriptHistoryItem({
-  active,
+const SIDEBAR_COLLAPSED_SECTIONS_KEY = "echolens.sidebar.collapsed-sections";
+const SIDEBAR_COLLAPSED_SECTIONS_EVENT = "echolens:sidebar-sections";
+
+function subscribeCollapsedSidebarSections(onStoreChange: () => void): () => void {
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener(SIDEBAR_COLLAPSED_SECTIONS_EVENT, onStoreChange);
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener(SIDEBAR_COLLAPSED_SECTIONS_EVENT, onStoreChange);
+  };
+}
+
+function useCollapsedSidebarSections(): [ReadonlySet<string>, (section: string) => void] {
+  const stored = useSyncExternalStore(
+    subscribeCollapsedSidebarSections,
+    () => window.localStorage.getItem(SIDEBAR_COLLAPSED_SECTIONS_KEY) ?? "",
+    () => "",
+  );
+  const collapsed = useMemo(() => new Set(stored.split(",").filter(Boolean)), [stored]);
+
+  const toggle = useCallback((section: string) => {
+    const next = new Set(collapsed);
+    if (!next.delete(section)) next.add(section);
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_SECTIONS_KEY, [...next].join(","));
+    window.dispatchEvent(new Event(SIDEBAR_COLLAPSED_SECTIONS_EVENT));
+  }, [collapsed]);
+
+  return [collapsed, toggle];
+}
+
+function SidebarSection({
+  activeId,
+  collapsedSections,
+  entries,
   onDelete,
   onOpen,
   onRename,
-  record,
+  onToggleSection,
+  onTogglePin,
+  section,
+  title,
+}: {
+  activeId?: string;
+  collapsedSections: ReadonlySet<string>;
+  entries: SidebarEntry[];
+  onDelete: (entry: SidebarEntry) => void;
+  onOpen: (entry: SidebarEntry) => void;
+  onRename: (entry: SidebarEntry, sessionName: string) => void;
+  onToggleSection: (section: string) => void;
+  onTogglePin: (entry: SidebarEntry) => void;
+  section: string;
+  title: string;
+}) {
+  const isCollapsed = collapsedSections.has(section);
+
+  return (
+    <section className="mb-2">
+      <button
+        type="button"
+        onClick={() => onToggleSection(section)}
+        className="flex h-8 w-full items-center justify-between rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08]"
+        aria-expanded={!isCollapsed}
+      >
+        {title}
+        <ChevronRight
+          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !isCollapsed && "rotate-90")}
+          aria-hidden="true"
+        />
+      </button>
+      {isCollapsed ? null : (
+        <div className="mt-1">
+          {entries.map((entry) => (
+            <SidebarEntryItem
+              active={entry.id === activeId}
+              entry={entry}
+              key={entry.id}
+              onDelete={() => onDelete(entry)}
+              onOpen={() => onOpen(entry)}
+              onRename={(sessionName) => onRename(entry, sessionName)}
+              onTogglePin={() => onTogglePin(entry)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SidebarEntryItem({
+  active,
+  entry,
+  onDelete,
+  onOpen,
+  onRename,
+  onTogglePin,
 }: {
   active: boolean;
+  entry: SidebarEntry;
   onDelete: () => void;
   onOpen: () => void;
-  onRename: (displayTitle: string) => void;
-  record: TranscriptHistoryRecord;
+  onRename: (sessionName: string) => void;
+  onTogglePin: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(record.displayTitle);
+  const [draft, setDraft] = useState(entry.title);
 
   function save() {
     const title = draft.trim();
-    if (!title) {
-      setDraft(record.displayTitle);
-      setEditing(false);
-      return;
-    }
-    if (title !== record.displayTitle) {
-      onRename(title);
-    }
+    if (title && title !== entry.title) onRename(title);
+    setDraft(title || entry.title);
     setEditing(false);
   }
 
   function cancelEditing() {
-    setDraft(record.displayTitle);
+    setDraft(entry.title);
     setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+        className="mb-1 flex items-center gap-1 rounded-md p-1"
+      >
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEditing();
+            }
+          }}
+          className="h-7 min-w-0 flex-1 rounded bg-black/30 px-2 text-[13px] outline-none ring-1 ring-cyan/40"
+        />
+        <button
+          type="button"
+          onClick={cancelEditing}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+          aria-label="取消修改历史名称"
+          title="取消"
+        >
+          <X className="size-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="submit"
+          disabled={!draft.trim()}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded text-cyan transition hover:bg-cyan/[0.1] disabled:cursor-not-allowed disabled:text-muted-foreground"
+          aria-label="保存历史名称"
+          title="保存"
+        >
+          <Check className="size-3.5" aria-hidden="true" />
+        </button>
+      </form>
+    );
   }
 
   return (
     <div className={cn(
-      "group mb-1 rounded-md transition",
+      "group mb-1 flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 transition",
       active ? "bg-cyan/[0.12] text-cyan" : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
     )}>
-      {editing ? (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            save();
-          }}
-          className="flex items-center gap-1 p-1"
+      <button
+        type="button"
+        onClick={onOpen}
+        className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-[13px]"
+        title={entry.statusMessage ? `${entry.title} - ${entry.statusMessage}` : entry.title}
+      >
+        {entry.isBusy ? (
+          <Loader2 className="mr-2 inline size-3.5 animate-spin text-cyan" aria-hidden="true" />
+        ) : null}
+        {entry.title}
+      </button>
+      <div className="flex w-0 shrink-0 items-center overflow-hidden opacity-0 transition-[width,opacity] duration-150 group-hover:w-[5.25rem] group-hover:opacity-100 group-focus-within:w-[5.25rem] group-focus-within:opacity-100">
+        <button
+          type="button"
+          onClick={onTogglePin}
+          className={cn(
+            "inline-flex size-7 shrink-0 items-center justify-center rounded transition hover:bg-amber/[0.12] hover:text-amber",
+            entry.isPinned ? "text-amber" : "text-muted-foreground",
+          )}
+          aria-label={entry.isPinned ? "取消置顶" : "置顶会话"}
+          title={entry.isPinned ? "取消置顶" : "置顶"}
         >
-          <input
-            autoFocus
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                cancelEditing();
-              }
-            }}
-            className="h-7 min-w-0 flex-1 rounded bg-black/30 px-2 text-[13px] outline-none ring-1 ring-cyan/40"
-          />
-          <button
-            type="button"
-            onClick={cancelEditing}
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-            aria-label="取消修改历史名称"
-            title="取消"
-          >
-            <X className="size-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="submit"
-            disabled={!draft.trim()}
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-cyan transition hover:bg-cyan/[0.1] disabled:cursor-not-allowed disabled:text-muted-foreground"
-            aria-label="保存历史名称"
-            title="保存"
-          >
-            <Check className="size-3.5" aria-hidden="true" />
-          </button>
-        </form>
-      ) : (
-        <div className="flex min-w-0 items-center gap-1 px-1 py-0.5">
-          <button
-            type="button"
-            onClick={onOpen}
-            className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left text-[13px]"
-            title={record.displayTitle}
-          >
-            {record.displayTitle}
-          </button>
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-cyan/[0.1] hover:text-cyan group-hover:opacity-100"
-            aria-label="修改历史名称"
-            title="修改名称"
-          >
-            <PencilLine className="size-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-            aria-label="删除历史记录"
-            title="删除"
-          >
-            <Trash2 className="size-3.5" aria-hidden="true" />
-          </button>
-        </div>
-      )}
+          <Pin className={cn("size-3.5", entry.isPinned && "fill-current")} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDraft(entry.title);
+            setEditing(true);
+          }}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-cyan/[0.1] hover:text-cyan"
+          aria-label="修改历史名称"
+          title="修改名称"
+        >
+          <PencilLine className="size-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
+          aria-label="删除历史记录"
+          title="删除"
+        >
+          <Trash2 className="size-3.5" aria-hidden="true" />
+        </button>
+      </div>
     </div>
   );
 }
 
-function EmptyResults({
+function TranscribeControls({
   actionBusy,
   actionDisabled,
   actionLabel,
@@ -2685,6 +3487,7 @@ function EmptyResults({
   modelSlot,
   notice,
   onAction,
+  quotaSlot,
 }: {
   actionBusy: boolean;
   actionDisabled: boolean;
@@ -2694,6 +3497,7 @@ function EmptyResults({
   modelSlot?: ReactNode;
   notice?: ReactNode;
   onAction?: () => void;
+  quotaSlot?: ReactNode;
 }) {
   const hasConfig = Boolean(configSlot);
 
@@ -2710,21 +3514,24 @@ function EmptyResults({
         <div className="grid min-w-0 gap-3 md:flex md:flex-nowrap md:items-center md:justify-between">
           <div className="min-w-0 md:flex-1">{actionSlot}</div>
           <div className="grid min-w-0 gap-2 sm:flex sm:items-center sm:justify-end sm:gap-3 md:shrink-0">
-            <div className="min-w-0">{modelSlot}</div>
-            <button
-              type="button"
-              onClick={() => onAction?.()}
-              disabled={actionDisabled || !onAction}
-              className={cn(
-                "inline-flex h-9 w-full shrink-0 items-center justify-center gap-2 rounded-md border px-4 text-sm font-semibold transition duration-150 active:scale-[0.98] disabled:cursor-not-allowed sm:w-auto",
-                actionDisabled || !onAction
-                  ? "border-transparent bg-white/[0.055] text-muted-foreground"
-                  : "border-cyan/65 bg-cyan text-black shadow-lg shadow-cyan/15 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0",
-              )}
-            >
-              {actionBusy ? <Square className="size-4 fill-current" aria-hidden="true" /> : null}
-              {actionLabel}
-            </button>
+            <div className="flex min-w-0 items-center justify-end gap-2 sm:gap-3">
+              {quotaSlot ? <div className="shrink-0">{quotaSlot}</div> : null}
+              <div className="min-w-0">{modelSlot}</div>
+              <button
+                type="button"
+                onClick={() => onAction?.()}
+                disabled={actionDisabled || !onAction}
+                className={cn(
+                  "inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 rounded-md border px-4 text-sm font-semibold transition duration-150 active:scale-[0.98] disabled:cursor-not-allowed sm:flex-none",
+                  actionDisabled || !onAction
+                    ? "border-transparent bg-white/[0.055] text-muted-foreground"
+                    : "border-cyan/65 bg-cyan text-black shadow-lg shadow-cyan/15 hover:-translate-y-0.5 hover:border-cyan hover:bg-[#67e8f9] hover:shadow-[0_0_0_1px_rgb(34_211_238_/_0.35),0_14px_34px_rgb(34_211_238_/_0.28)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/55 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-0",
+                )}
+              >
+                {actionBusy ? <Square className="size-4 fill-current" aria-hidden="true" /> : null}
+                {actionLabel}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -2883,45 +3690,6 @@ function ItnHelpTooltip() {
         </span>
       </span>
     </span>
-  );
-}
-
-function PostprocessToggle({
-  checked,
-  description,
-  disabled,
-  icon: Icon,
-  label,
-  onCheckedChange,
-}: {
-  checked: boolean;
-  description: string;
-  disabled?: boolean;
-  icon: LucideIcon;
-  label: string;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  const stateLabel = `${label}${checked ? "已开启" : "已关闭"}`;
-
-  return (
-    <button
-      type="button"
-      aria-label={stateLabel}
-      aria-pressed={checked}
-      disabled={disabled}
-      onClick={() => onCheckedChange(!checked)}
-      className={cn(
-        "inline-flex h-8 translate-y-0.5 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-sm px-1 text-[11px] transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
-        checked
-          ? "bg-cyan/[0.08] text-cyan"
-          : "text-muted-foreground hover:bg-white/[0.055] hover:text-foreground",
-      )}
-      title={stateLabel}
-    >
-      <Icon className="size-3.5 shrink-0" aria-hidden="true" />
-      <span className="font-semibold text-current">{label}</span>
-      <span className={checked ? "text-cyan/75" : "text-muted-foreground/70"}>{description}</span>
-    </button>
   );
 }
 
@@ -3261,77 +4029,18 @@ function WorkTitleRow({ title }: { title: string | undefined }) {
   );
 }
 
-function HistoryWorkInfoPanel({ record }: { record: TranscriptHistoryRecord }) {
-  const title = record.originalTitle || record.displayTitle || undefined;
-
-  return (
-    <section className="work-flow-panel shrink-0 overflow-hidden rounded-lg border border-white/25 p-4 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)] sm:p-5">
-      <div className="relative z-10">
-        <div className="grid gap-x-3 gap-y-4 text-left text-sm md:grid-cols-[8rem_minmax(13rem,24rem)_minmax(0,1fr)]">
-          <dl className="contents">
-            <InfoRow
-              label="作者"
-              singleLine
-              value={record.authorName ?? "未识别"}
-            />
-            <InfoRow
-              className="min-w-0 flex-1"
-              label="作品链接"
-              value={record.finalUrl || "未识别"}
-              href={record.finalUrl}
-              singleLine
-            />
-            <HistoryTitleInfoRow title={title} />
-          </dl>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function HistoryTitleInfoRow({ title }: { title: string | undefined }) {
-  const value = title ?? "未识别";
-  const [copied, setCopied] = useState(false);
-
-  async function copyTitle() {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  return (
-    <div className="min-w-0 text-left">
-      <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">标题</dt>
-      <dd className="min-h-8 min-w-0 text-left font-semibold text-foreground">
-        <div className="min-w-0 break-words text-sm leading-6">
-          <span>
-            <HighlightedTitle text={value} />
-          </span>
-          {title ? (
-            <button
-              type="button"
-              onClick={() => void copyTitle()}
-              className="ml-1 inline-flex size-5 align-[-3px] items-center justify-center rounded-md text-muted-foreground transition hover:bg-amber/[0.12] hover:text-amber active:scale-[0.94]"
-              aria-label={copied ? "已复制标题" : "复制标题"}
-              title={copied ? "已复制" : "复制"}
-            >
-              {copied ? <Check className="size-3.5 text-cyan" /> : <Copy className="size-3.5" />}
-            </button>
-          ) : null}
-        </div>
-      </dd>
-    </div>
-  );
-}
-
 function AudioCacheNotice({
   error,
+  errorCode,
   isLoading,
+  onRetry,
   progressKey,
   videoDurationSeconds,
 }: {
   error: string;
+  errorCode?: string;
   isLoading: boolean;
+  onRetry: () => void;
   progressKey: string;
   videoDurationSeconds?: number;
 }) {
@@ -3339,8 +4048,8 @@ function AudioCacheNotice({
   const hasEstimatedProgress = isLoading && estimatedSeconds !== null;
   const progress = useEstimatedProgress(hasEstimatedProgress, (estimatedSeconds ?? 0) * 1000, progressKey);
   const message = error || (hasEstimatedProgress && progress >= 99
-    ? "正在缓存作品资源，稍后即可转录文本"
-    : "正在缓存并抽取音频，加载完成后才能提取");
+    ? "原声即将就绪，其他资源将在后台缓存"
+    : "正在准备原声，完成后即可转录");
 
   return (
     <div className="flex w-full justify-center rounded-md px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -3354,6 +4063,11 @@ function AudioCacheNotice({
           <span className="min-w-0 truncate text-center" title={error || undefined}>
             {isLoading && !error ? <LoadingText>{message}</LoadingText> : message}
           </span>
+          <NetworkRetryButton
+            code={errorCode}
+            isRetrying={isLoading}
+            onRetry={onRetry}
+          />
         </div>
         {hasEstimatedProgress ? (
           <div className="flex w-full items-center gap-2">
@@ -3362,7 +4076,6 @@ function AudioCacheNotice({
                 className="audio-cache-progress-fill h-full rounded-full bg-cyan shadow-[0_0_12px_rgba(34,211,238,0.35)]"
                 style={{
                   "--audio-cache-progress": Math.max(0.01, progress / 100),
-                  animationDuration: `${estimatedSeconds}s`,
                 } as CSSProperties}
               />
             </div>
@@ -3375,21 +4088,22 @@ function AudioCacheNotice({
 }
 
 function useEstimatedProgress(isLoading: boolean, estimatedMs: number, progressKey: string): number {
-  const [progress, setProgress] = useState(isLoading ? 1 : 0);
+  const [progress, setProgress] = useState(
+    () => (isLoading ? elapsedProgress(readProgressStartedAt(progressKey), estimatedMs) : 0),
+  );
 
   useEffect(() => {
     if (!isLoading) {
+      clearProgressStartedAt(progressKey);
       return;
     }
 
-    const startedAt = performance.now();
-    const safeEstimatedMs = Math.max(1_000, estimatedMs);
+    const startedAt = readProgressStartedAt(progressKey);
     let frameId = 0;
     let displayedProgress = -1;
 
     const updateProgress = () => {
-      const ratio = Math.min(1, (performance.now() - startedAt) / safeEstimatedMs);
-      const nextProgress = Math.min(99, Math.max(1, Math.floor(ratio * 99)));
+      const nextProgress = elapsedProgress(startedAt, estimatedMs);
 
       if (nextProgress !== displayedProgress) {
         displayedProgress = nextProgress;
@@ -3409,18 +4123,25 @@ function useEstimatedProgress(isLoading: boolean, estimatedMs: number, progressK
   return isLoading ? progress : 0;
 }
 
+function elapsedProgress(startedAt: number, estimatedMs: number): number {
+  const ratio = Math.min(1, (Date.now() - startedAt) / Math.max(1_000, estimatedMs));
+  return Math.min(99, Math.max(1, Math.floor(ratio * 99)));
+}
+
 function HighlightedTitle({ text }: { text: string }) {
   return renderSocialTokens(text, "title");
 }
 
 function InfoRow({
   className,
+  leading,
   label,
   value,
   singleLine,
   href,
 }: {
   className?: string;
+  leading?: ReactNode;
   label: string;
   value: string;
   singleLine?: boolean;
@@ -3440,6 +4161,7 @@ function InfoRow({
       <dt className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd className="min-h-8 min-w-0 text-left font-semibold text-foreground">
         <div className="inline-flex max-w-full items-center gap-1.5 align-top">
+          {leading}
           {isLinked ? (
             <a
               href={href}
@@ -3473,254 +4195,302 @@ function InfoRow({
   );
 }
 
-function useWorkAssetCache(
-  work: ResolvedDouyinWork | null,
+type PreparationAssetPayload = AssetPayload & {
+  asset: ClientCacheAsset;
+  durationSeconds?: number;
+  verified?: boolean;
+};
+
+type PreparationEvent =
+  | { metadata: WorkMetadataPatch; type: "metadata" }
+  | { asset: PreparationAssetPayload; type: "asset" }
+  | { asset: ClientCacheAsset; error: string; code?: string; type: "asset-error" }
+  | { type: "done" }
+  | { error: string; code?: string; type: "error" };
+
+function useWorkPreparation(
+  works: ResolvedDouyinWork[],
+  activeWorkKey: string,
+  activeHistoryRecordId: string,
+  onMetadata: (workKey: string, metadata: WorkMetadataPatch) => void,
   onAuthRequired: () => void,
-): Partial<Record<MediaAssetKind, CachedMediaAsset>> {
-  const [cachedAssets, setCachedAssets] = useState<Partial<Record<MediaAssetKind, CachedMediaAsset>>>({});
-  const objectUrlsRef = useRef<string[]>([]);
-  const workId = work?.id ?? "";
-  const workKind = work?.kind;
-  const workKey = workKind && workId ? `${workKind}:${workId}` : "";
-  const cacheWork = useMemo(() => workKind && workId ? { id: workId, kind: workKind } : null, [workId, workKind]);
-  const actions = useMemo(() => cacheWork ? DOWNLOAD_ACTIONS : [], [cacheWork]);
+): {
+  avatar?: CachedMediaAsset;
+  avatarUrl?: string;
+  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>;
+  loadingWorkKeys: ReadonlySet<string>;
+  retryAsset: (workKey: string, asset: ClientCacheAsset) => void;
+  retryWork: (workKey: string) => void;
+} {
+  const [cachedAssetsByWorkKey, setCachedAssetsByWorkKey] = useState<
+    Record<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>
+  >(() => Object.fromEntries(assetCacheMemory));
+  const startedWorkKeysRef = useRef(new Set<string>());
+  const controllersRef = useRef(new Map<string, AbortController>());
+  const activeWork = useMemo(
+    () => works.find((candidate) => getWorkKey(candidate) === activeWorkKey),
+    [activeWorkKey, works],
+  );
+  const preparationKey = `${activeHistoryRecordId}:${activeWorkKey}`;
+  const retryAsset = useCallback((workKey: string, assetKind: ClientCacheAsset) => {
+    const existing = cachedAssetsByWorkKey[workKey]?.[assetKind];
+    const work = works.find((candidate) => getWorkKey(candidate) === workKey);
+    if (!activeHistoryRecordId || !work || !existing?.error || existing.url || existing.isLoading) return;
 
-  useEffect(() => {
-    if (!cacheWork) {
-      return;
-    }
+    setCachedAssetsByWorkKey((current) => ({
+      ...current,
+      [workKey]: {
+        ...current[workKey],
+        [assetKind]: {
+          downloadName: assetKind === "avatar" ? "" : buildCachedAssetFilename(work, assetKind),
+          error: existing.error,
+          errorCode: existing.errorCode,
+          isLoading: true,
+          workKey,
+        },
+      },
+    }));
 
-    const controller = new AbortController();
-    const cacheRunId = createCacheRunId();
-    const objectUrls: string[] = [];
-    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    objectUrlsRef.current = objectUrls;
-
-    queueMicrotask(() => {
-      if (controller.signal.aborted) {
-        return;
+    void fetch(
+      `/api/transcript-history/${encodeURIComponent(activeHistoryRecordId)}/assets/${encodeURIComponent(assetKind)}`,
+      { cache: "no-store" },
+    ).then(async (response) => {
+      const payload = await readApiPayload(response, "网络连接失败，请检查网络后重试。") as
+        | ApiError
+        | { asset: { contentType: string; objectKey: string; url: string; verified?: boolean } };
+      if (isUnauthenticatedApiResponse(response, payload)) throw new AuthRequiredError();
+      if (!response.ok || !("asset" in payload)) {
+        throwApiError(getApiError(payload), "网络连接失败，请检查网络后重试。");
       }
-
-      setCachedAssets((current) => {
-        const next = { ...current };
-        for (const action of actions) {
-          next[action.asset] = {
-            downloadName: buildCachedAssetFilename(cacheWork, action.asset),
-            isLoading: true,
+      setCachedAssetsByWorkKey((current) => ({
+        ...current,
+        [workKey]: {
+          ...current[workKey],
+          [assetKind]: {
+            downloadName: assetKind === "avatar"
+              ? ""
+              : buildCachedAssetFilename(work, assetKind, payload.asset.contentType),
+            isLoading: false,
+            objectKey: payload.asset.objectKey,
+            url: payload.asset.url,
+            verified: assetKind === "originalAudio" ? payload.asset.verified === true : undefined,
             workKey,
-          };
-        }
-        return next;
-      });
-    });
-
-    void cacheAssetsForWork(
-      actions,
-      cacheWork,
-      workKey,
-      cacheRunId,
-      controller.signal,
-      objectUrls,
-      setCachedAssets,
-      onAuthRequired,
-    );
-
-    return () => {
-      controller.abort();
-      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      objectUrlsRef.current = [];
-    };
-  }, [actions, cacheWork, onAuthRequired, workKey]);
-
-  return cachedAssets;
-}
-
-function createCacheRunId(): string {
-  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
-async function cacheAssetsForWork(
-  actions: typeof DOWNLOAD_ACTIONS,
-  cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
-  workKey: string,
-  cacheRunId: string,
-  signal: AbortSignal,
-  objectUrls: string[],
-  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
-  onAuthRequired: () => void,
-): Promise<void> {
-  let originalAudioHandled = false;
-
-  for (const action of actions) {
-    if (action.asset === "originalAudio" && originalAudioHandled) {
-      continue;
-    }
-
-    try {
-      if (action.asset === "video") {
-        const response = await fetchCacheAssetResponse(
-          buildMediaDownloadPath(cacheWork, action.asset, { cacheRunId }),
-          signal,
-        );
-        await assertCacheAssetResponse(response);
-        originalAudioHandled = true;
-        void cacheOriginalAudioAsset(
-          cacheWork,
-          workKey,
-          cacheRunId,
-          signal,
-          objectUrls,
-          setCachedAssets,
-          onAuthRequired,
-        );
-        const cached = await readCachedAssetResponse(cacheWork, workKey, action.asset, response);
-        cacheCompletedAsset("video", cached, signal, objectUrls, setCachedAssets);
-      } else if (action.asset === "originalAudio") {
-        await cacheOriginalAudioAsset(
-          cacheWork,
-          workKey,
-          cacheRunId,
-          signal,
-          objectUrls,
-          setCachedAssets,
-          onAuthRequired,
-        );
-      } else {
-        const cached = await cacheAsset(cacheWork, workKey, cacheRunId, action.asset, signal);
-        cacheCompletedAsset(action.asset, cached, signal, objectUrls, setCachedAssets);
-      }
-    } catch (error: unknown) {
-      if (signal.aborted) {
-        return;
-      }
+          },
+        },
+      }));
+    }).catch((error: unknown) => {
       if (isAuthRequiredError(error)) {
         onAuthRequired();
         return;
       }
-      const errorMessage = readUserFacingError(error, "资源缓存失败。");
-      setAssetCacheError(setCachedAssets, cacheWork, action.asset, workKey, errorMessage);
-      if (action.asset === "video" && !originalAudioHandled) {
-        originalAudioHandled = true;
-        setAssetCacheError(
-          setCachedAssets,
-          cacheWork,
-          "originalAudio",
-          workKey,
-          "视频资源缓存失败，已停止原声音频缓存。",
-        );
-      }
-    }
-  }
-}
-
-async function cacheOriginalAudioAsset(
-  cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
-  workKey: string,
-  cacheRunId: string,
-  signal: AbortSignal,
-  objectUrls: string[],
-  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
-  onAuthRequired: () => void,
-): Promise<void> {
-  try {
-    const response = await fetchCacheAssetResponse(
-      buildMediaDownloadPath(cacheWork, "originalAudio", { cacheRunId }),
-      signal,
-    );
-    await assertCacheAssetResponse(response);
-
-    const asrAudio = readAsrAudioHeaders(response, "originalAudio");
-    if (asrAudio.asrAudioObjectKey && asrAudio.asrAudioUrl && !signal.aborted) {
-      setCachedAssets((current) => ({
+      setCachedAssetsByWorkKey((current) => ({
         ...current,
-        originalAudio: {
-          ...current.originalAudio,
-          ...asrAudio,
-          downloadName: buildCachedAssetFilename(cacheWork, "originalAudio"),
-          isLoading: true,
-          workKey,
+        [workKey]: {
+          ...current[workKey],
+          [assetKind]: {
+            downloadName: assetKind === "avatar" ? "" : buildCachedAssetFilename(work, assetKind),
+            error: readUserFacingError(error, "网络连接失败，请检查网络后重试。"),
+            errorCode: readUserFacingErrorCode(error),
+            isLoading: false,
+            workKey,
+          },
         },
       }));
+    });
+  }, [activeHistoryRecordId, cachedAssetsByWorkKey, onAuthRequired, works]);
+  const retryWork = useCallback((workKey: string) => {
+    for (const [assetKind, asset] of Object.entries(cachedAssetsByWorkKey[workKey] ?? {})) {
+      if (asset?.error && !asset.url) retryAsset(workKey, assetKind as ClientCacheAsset);
     }
+  }, [cachedAssetsByWorkKey, retryAsset]);
 
-    const cached = await readCachedAssetResponse(cacheWork, workKey, "originalAudio", response);
-    cacheCompletedAsset("originalAudio", cached, signal, objectUrls, setCachedAssets);
-  } catch (error: unknown) {
-    if (signal.aborted) {
-      return;
-    }
-    if (isAuthRequiredError(error)) {
-      onAuthRequired();
-      return;
-    }
-    const errorMessage = readUserFacingError(error, "资源缓存失败。");
-    setAssetCacheError(setCachedAssets, cacheWork, "originalAudio", workKey, errorMessage);
-  }
-}
+  useEffect(() => {
+    for (const [key, assets] of Object.entries(cachedAssetsByWorkKey)) assetCacheMemory.set(key, assets);
+  }, [cachedAssetsByWorkKey]);
 
-function cacheCompletedAsset(
-  asset: MediaAssetKind,
-  cached: CachedMediaAsset & { url: string },
-  signal: AbortSignal,
-  objectUrls: string[],
-  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
-): void {
-  if (signal.aborted) {
-    URL.revokeObjectURL(cached.url);
-    return;
-  }
-  objectUrls.push(cached.url);
-  setCachedAssets((current) => ({
-    ...current,
-    [asset]: cached,
-  }));
-}
-
-function setAssetCacheError(
-  setCachedAssets: Dispatch<SetStateAction<Partial<Record<MediaAssetKind, CachedMediaAsset>>>>,
-  cacheWork: Pick<ResolvedDouyinWork, "id" | "kind">,
-  asset: MediaAssetKind,
-  workKey: string,
-  error: string,
-): void {
-  setCachedAssets((current) => {
-    const currentAsset = current[asset];
-    const reusableAsset = asset === "originalAudio" &&
-      currentAsset?.workKey === workKey &&
-      currentAsset.asrAudioObjectKey &&
-      currentAsset.asrAudioUrl
-      ? currentAsset
-      : undefined;
-
-    return {
-      ...current,
-      [asset]: {
-        ...(reusableAsset ?? {}),
-        downloadName: buildCachedAssetFilename(cacheWork, asset),
-        error,
-        isLoading: false,
-        workKey,
-      },
+  useEffect(() => {
+    const controllers = controllersRef.current;
+    const startedWorkKeys = startedWorkKeysRef.current;
+    return () => {
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+      startedWorkKeys.clear();
     };
-  });
+  }, []);
+
+  useEffect(() => {
+    if (!activeWork || startedWorkKeysRef.current.has(preparationKey)) return;
+    startedWorkKeysRef.current.add(preparationKey);
+    const controller = new AbortController();
+    controllersRef.current.set(preparationKey, controller);
+    const assetKinds: ClientCacheAsset[] = ["avatar", "cover", "video", "originalAudio"];
+
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return;
+      setCachedAssetsByWorkKey((current) => ({
+        ...current,
+        [activeWorkKey]: Object.fromEntries(assetKinds.map((asset) => {
+          const existing = current[activeWorkKey]?.[asset];
+          return [asset, existing?.url && !existing.error
+            ? existing
+            : {
+                downloadName: asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, asset),
+                isLoading: true,
+                workKey: activeWorkKey,
+              }];
+        })),
+      }));
+    });
+
+    void fetch("/api/douyin/prepare", {
+      body: JSON.stringify({
+        finalUrl: activeWork.finalUrl,
+        historyRecordId: activeHistoryRecordId,
+        id: activeWork.id,
+        kind: activeWork.kind,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok || !response.body) {
+        const payload = await readApiPayload(response, "作品资源准备失败。");
+        if (isUnauthenticatedApiResponse(response, payload)) throw new AuthRequiredError();
+        throwApiError(getApiError(payload), "作品资源准备失败。");
+      }
+
+      for await (const event of readJsonEventStream<PreparationEvent>(response.body)) {
+        if (event.type === "metadata") {
+          onMetadata(activeWorkKey, event.metadata);
+          continue;
+        }
+        if (event.type === "asset") {
+          const asset = event.asset;
+          setCachedAssetsByWorkKey((current) => ({
+            ...current,
+            [activeWorkKey]: {
+              ...current[activeWorkKey],
+              [asset.asset]: {
+                downloadName: asset.asset === "avatar"
+                  ? ""
+                  : buildCachedAssetFilename(activeWork, asset.asset, asset.contentType),
+                isLoading: false,
+                objectKey: asset.objectKey,
+                url: asset.url,
+                verified: asset.asset === "originalAudio" ? asset.verified === true : undefined,
+                workKey: activeWorkKey,
+              },
+            },
+          }));
+          continue;
+        }
+        if (event.type === "asset-error") {
+          setCachedAssetsByWorkKey((current) => ({
+            ...current,
+            [activeWorkKey]: {
+              ...current[activeWorkKey],
+              [event.asset]: {
+                downloadName: event.asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, event.asset),
+                error: event.error,
+                errorCode: event.code,
+                isLoading: false,
+                workKey: activeWorkKey,
+              },
+            },
+          }));
+          continue;
+        }
+        if (event.type === "error") throw codedError(event.error, event.code);
+      }
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      if (isAuthRequiredError(error)) {
+        onAuthRequired();
+        return;
+      }
+      const message = readUserFacingError(error, "作品资源准备失败。");
+      setCachedAssetsByWorkKey((current) => ({
+        ...current,
+        [activeWorkKey]: Object.fromEntries(assetKinds.map((asset) => {
+          const existing = current[activeWorkKey]?.[asset];
+          return [asset, existing?.url
+            ? existing
+            : {
+                downloadName: asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, asset),
+                error: message,
+                errorCode: readUserFacingErrorCode(error),
+                isLoading: false,
+                workKey: activeWorkKey,
+              }];
+        })),
+      }));
+    }).finally(() => {
+      if (controllersRef.current.get(preparationKey) === controller) {
+        controllersRef.current.delete(preparationKey);
+      }
+    });
+  }, [activeHistoryRecordId, activeWork, activeWorkKey, onAuthRequired, onMetadata, preparationKey]);
+
+  const loadingWorkKeys = useMemo(() => new Set(
+    Object.entries(cachedAssetsByWorkKey)
+      .filter(([, assets]) => Object.values(assets).some((asset) => asset?.isLoading))
+      .map(([key]) => key),
+  ), [cachedAssetsByWorkKey]);
+
+  return {
+    avatar: cachedAssetsByWorkKey[activeWorkKey]?.avatar,
+    avatarUrl: cachedAssetsByWorkKey[activeWorkKey]?.avatar?.url,
+    cachedAssets: {
+      cover: cachedAssetsByWorkKey[activeWorkKey]?.cover,
+      originalAudio: cachedAssetsByWorkKey[activeWorkKey]?.originalAudio,
+      video: cachedAssetsByWorkKey[activeWorkKey]?.video,
+    },
+    loadingWorkKeys,
+    retryAsset,
+    retryWork,
+  };
 }
+
+type AssetPayload = {
+  contentType: string;
+  objectKey: string;
+  sizeBytes: number;
+  url: string;
+};
 
 function WorkDownloadActions({
   cachedAssets,
+  historyRecordId,
+  onRetryAsset,
   work,
 }: {
   cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>;
+  historyRecordId: string;
+  onRetryAsset: (asset: MediaAssetKind) => void;
   work: ResolvedDouyinWork;
 }) {
   const workKey = `${work.kind}:${work.id}`;
   const actions = DOWNLOAD_ACTIONS;
   const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
   const [downloadError, setDownloadError] = useState("");
+  const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
+
+  async function ensureAssetUrl(asset: MediaAssetKind): Promise<string> {
+    const response = await fetch(
+      `/api/transcript-history/${encodeURIComponent(historyRecordId)}/assets/${encodeURIComponent(asset)}`,
+      { cache: "no-store" },
+    );
+    const payload = await readApiPayload(response, "资源准备失败。") as ApiError | { asset: { url: string } };
+    if (!response.ok || !("asset" in payload)) {
+      throw new Error(getApiError(payload)?.error || "资源准备失败。");
+    }
+    setFreshAssetUrls((current) => ({ ...current, [asset]: payload.asset.url }));
+    return payload.asset.url;
+  }
 
   const previewCache = preview ? cachedAssets[preview.asset] : undefined;
   const previewCached = previewCache?.workKey === workKey ? previewCache : undefined;
+  const previewUrl = preview ? freshAssetUrls[preview.asset] ?? previewCached?.url : undefined;
 
   return (
     <>
@@ -3731,6 +4501,7 @@ function WorkDownloadActions({
         const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
         const isCaching = !cached || cached.isLoading;
         const hasCacheError = Boolean(cached?.error && !cached.url);
+        const canRetryCache = hasCacheError && cached?.errorCode === NETWORK_RETRY_ERROR_CODE;
         const cacheTitle = cached?.error ?? (isCaching ? "正在准备资源" : action.previewLabel);
 
         return (
@@ -3742,7 +4513,12 @@ function WorkDownloadActions({
             <div className="flex min-h-8 min-w-0 items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setPreview(action)}
+                onClick={() => {
+                  setDownloadError("");
+                  void ensureAssetUrl(action.asset)
+                    .then(() => setPreview(action))
+                    .catch((error) => setDownloadError(readUserFacingError(error, "资源准备失败。")));
+                }}
                 disabled={isCaching || hasCacheError}
                 className={cn(
                   "group/preview inline-flex h-8 w-14 shrink-0 items-center justify-center gap-1 rounded-md pl-0 pr-2 text-xs font-semibold text-cyan transition active:scale-[0.99]",
@@ -3762,12 +4538,19 @@ function WorkDownloadActions({
                 )}
                 <span className="whitespace-nowrap">{previewActionLabel}</span>
               </button>
-              {isCaching || hasCacheError || !cached?.url ? (
+              {canRetryCache ? (
+                <NetworkRetryButton
+                  className="text-amber hover:text-cyan"
+                  code={cached?.errorCode}
+                  isRetrying={isCaching}
+                  onRetry={() => onRetryAsset(action.asset)}
+                />
+              ) : isCaching || !cached?.url ? (
                 <button
                   type="button"
                   disabled
                   className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-muted-foreground opacity-60"
-                  title={cached?.error ?? "正在准备资源"}
+                  title="正在准备资源"
                 >
                   <Download className="size-3.5" aria-hidden="true" />
                   下载
@@ -3777,7 +4560,8 @@ function WorkDownloadActions({
                   type="button"
                   onClick={() => {
                     setDownloadError("");
-                    void downloadCachedAsset(cached.url!, cached.downloadName, work)
+                    void ensureAssetUrl(action.asset)
+                      .then((url) => downloadCachedAsset(url, cached.downloadName, work))
                       .catch((error) => setDownloadError(readUserFacingError(error, "文件保存失败。")));
                   }}
                   className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96]"
@@ -3791,18 +4575,19 @@ function WorkDownloadActions({
           </div>
         );
       })}
+      <CommentActions key={historyRecordId} historyRecordId={historyRecordId} work={work} />
       {downloadError ? (
         <p className="w-full text-xs font-medium leading-5 text-rose-400" role="alert">
           {downloadError}
         </p>
       ) : null}
-      {preview && previewCached?.url && typeof document !== "undefined"
+      {preview && previewUrl && typeof document !== "undefined"
         ? createPortal(
             <AssetPreviewDialog
               action={preview}
-              previewUrl={previewCached.url}
+              previewUrl={previewUrl}
               downloadName={previewCached?.downloadName}
-              downloadUrl={previewCached.url}
+              downloadUrl={previewUrl}
               work={work}
               onClose={() => setPreview(null)}
             />,
@@ -3813,109 +4598,324 @@ function WorkDownloadActions({
   );
 }
 
-async function cacheAsset(
-  work: Pick<ResolvedDouyinWork, "id" | "kind">,
-  workKey: string,
-  cacheRunId: string,
-  asset: MediaAssetKind,
-  signal: AbortSignal,
-): Promise<CachedMediaAsset & { url: string }> {
-  const response = await fetchCacheAssetResponse(buildMediaDownloadPath(work, asset, { cacheRunId }), signal);
-  await assertCacheAssetResponse(response);
-  return readCachedAssetResponse(work, workKey, asset, response);
-}
+type CommentCollectionEvent =
+  | { commentCount: number; page: number; type: "progress" }
+  | { type: "done" }
+  | { code: string; error: string; type: "error" };
 
-async function assertCacheAssetResponse(response: Response): Promise<void> {
-  if (!response.ok) {
-    if (response.status === 401) {
-      const payload = await readJsonError(response);
-      if (isUnauthenticatedApiResponse(response, payload)) {
-        throw new AuthRequiredError();
-      }
-      throw new Error(payload?.error ?? "请先登录后再使用。");
+const DOUYIN_CREDENTIAL_ERROR_CODES = new Set([
+  "CREDENTIAL_INVALID",
+  "CREDENTIAL_MISSING",
+  "CREDENTIAL_UNVERIFIED",
+]);
+
+type CommentMetadata = {
+  collectedAt: number;
+  commentCount: number;
+};
+
+function CommentActions({
+  historyRecordId,
+  work,
+}: {
+  historyRecordId: string;
+  work: ResolvedDouyinWork;
+}) {
+  const [metadata, setMetadata] = useState<CommentMetadata | null>(null);
+  const [payload, setPayload] = useState<DouyinCommentsPayload | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [isCollecting, setIsCollecting] = useState(false);
+  const [progress, setProgress] = useState({ commentCount: 0, page: 0 });
+  const [error, setError] = useState("");
+  const endpoint = `/api/transcript-history/${encodeURIComponent(historyRecordId)}/comments`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`${endpoint}?metadata=1`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const result = await response.json() as { metadata: CommentMetadata | null };
+        setMetadata(result.metadata);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [endpoint]);
+
+  async function loadPayload(): Promise<void> {
+    const response = await fetch(endpoint, { cache: "no-store" });
+    if (response.status === 404) {
+      setPayload(null);
+      return;
     }
-    throw new Error(await readCacheAssetError(response));
+    const result = await readApiPayload(response, "评论加载失败。") as
+      | ApiError
+      | { payload: DouyinCommentsPayload };
+    if (!response.ok || !("payload" in result)) {
+      throw new Error(getApiError(result)?.error || "评论加载失败。");
+    }
+    setPayload(result.payload);
+    setMetadata({
+      collectedAt: result.payload.collectedAt,
+      commentCount: result.payload.commentCount,
+    });
   }
-}
 
-async function readCachedAssetResponse(
-  work: Pick<ResolvedDouyinWork, "id" | "kind">,
-  workKey: string,
-  asset: MediaAssetKind,
-  response: Response,
-): Promise<CachedMediaAsset & { url: string }> {
-  const blob = await response.blob();
-  return {
-    ...readAsrAudioHeaders(response, asset),
-    downloadName: buildCachedAssetFilename(work, asset, blob.type),
-    isLoading: false,
-    url: URL.createObjectURL(blob),
-    workKey,
-  };
-}
+  async function openPreview() {
+    setPreviewOpen(true);
+    setError("");
+    if (!payload) {
+      try {
+        await loadPayload();
+      } catch (loadError) {
+        setError(readUserFacingError(loadError, "评论加载失败。"));
+      }
+    }
+  }
 
-async function fetchCacheAssetResponse(url: string, signal: AbortSignal): Promise<Response> {
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= ASSET_CACHE_RETRY_ATTEMPTS; attempt += 1) {
+  async function collectComments() {
+    if (isCollecting) return;
+    setIsCollecting(true);
+    setProgress({ commentCount: 0, page: 0 });
+    setError("");
     try {
-      const response = await fetch(url, {
-        cache: "no-store",
-        signal,
-      });
-      if (!isRetryableCacheStatus(response.status) || attempt === ASSET_CACHE_RETRY_ATTEMPTS) {
-        return response;
+      const response = await fetch(endpoint, { method: "POST" });
+      if (!response.ok || !response.body) {
+        const result = await readApiPayload(response, "评论采集失败。") as ApiError;
+        const apiError = getApiError(result);
+        throw codedError(apiError?.error || "评论采集失败。", apiError?.code);
       }
-
-      await response.body?.cancel();
-    } catch (error) {
-      lastError = error;
-      if (signal.aborted || !isRetryableCacheFetchError(error) || attempt === ASSET_CACHE_RETRY_ATTEMPTS) {
-        throw error;
+      for await (const event of readJsonEventStream<CommentCollectionEvent>(response.body)) {
+        if (event.type === "progress") {
+          setProgress({ commentCount: event.commentCount, page: event.page });
+        } else if (event.type === "done") {
+          await loadPayload();
+        } else if (event.type === "error") {
+          throw codedError(event.error, event.code);
+        }
       }
+    } catch (collectionError) {
+      if (DOUYIN_CREDENTIAL_ERROR_CODES.has(readUserFacingErrorCode(collectionError) ?? "")) {
+        window.location.assign("/settings?section=douyin");
+        return;
+      }
+      setError(readUserFacingError(collectionError, "评论采集失败。"));
+    } finally {
+      setIsCollecting(false);
     }
-
-    await sleep(ASSET_CACHE_RETRY_BASE_DELAY_MS * attempt);
   }
 
-  throw lastError instanceof Error ? lastError : new Error("资源缓存失败。");
+  async function downloadComments() {
+    try {
+      setError("");
+      await downloadCachedAsset(
+        `${endpoint}?download=1`,
+        `echolens-${work.id}-comments.json`,
+        work,
+      );
+    } catch (downloadError) {
+      setError(readUserFacingError(downloadError, "评论文件保存失败。"));
+    }
+  }
+
+  return (
+    <>
+      <div className="w-[calc(50%_-_0.625rem)] min-w-32 shrink-0 text-left sm:w-32">
+        <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">评论</div>
+        <div className="flex min-h-8 min-w-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void openPreview()}
+            className="inline-flex h-8 w-14 shrink-0 items-center justify-center gap-1 rounded-md pr-2 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] hover:text-amber active:scale-[0.99]"
+            aria-label="预览评论"
+            title={metadata ? `已采集 ${metadata.commentCount} 条评论` : "预览评论"}
+          >
+            {isCollecting
+              ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              : <MessageCircle className="size-4" aria-hidden="true" />}
+            <span>预览</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadComments()}
+            disabled={!metadata || isCollecting}
+            className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:text-muted-foreground disabled:opacity-60"
+            title={metadata ? "下载评论 JSON" : "请先采集评论"}
+          >
+            <Download className="size-3.5" aria-hidden="true" />
+            下载
+          </button>
+        </div>
+      </div>
+      {previewOpen && typeof document !== "undefined"
+        ? createPortal(
+            <CommentPreviewDialog
+              error={error}
+              isCollecting={isCollecting}
+              metadata={metadata}
+              onClose={() => setPreviewOpen(false)}
+              onCollect={() => void collectComments()}
+              onDownload={() => void downloadComments()}
+              payload={payload}
+              progress={progress}
+            />,
+            document.body,
+          )
+        : null}
+    </>
+  );
 }
 
-function isRetryableCacheStatus(status: number): boolean {
-  return status === 429 || status === 502 || status === 503 || status === 504;
+function CommentLikeCount({ count }: { count: number }) {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1 tabular-nums text-muted-foreground"
+      title={`${count} 次点赞`}
+    >
+      <Heart className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
+      <span>{count}</span>
+    </span>
+  );
 }
 
-function isRetryableCacheFetchError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return true;
-  }
+function CommentPreviewDialog({
+  error,
+  isCollecting,
+  metadata,
+  onClose,
+  onCollect,
+  onDownload,
+  payload,
+  progress,
+}: {
+  error: string;
+  isCollecting: boolean;
+  metadata: CommentMetadata | null;
+  onClose: () => void;
+  onCollect: () => void;
+  onDownload: () => void;
+  payload: DouyinCommentsPayload | null;
+  progress: { commentCount: number; page: number };
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
 
-  return error.name !== "AbortError" &&
-    /fetch failed|network|socket|timeout|timed out|premature close|terminated|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT/i.test(error.message);
-}
-
-async function readCacheAssetError(response: Response): Promise<string> {
-  const fallback = formatHttpError(response.status, "资源缓存失败。");
-  const payload = await readJsonError(response);
-  if (payload) {
-    return payload.error ? `资源缓存失败：${payload.error}` : fallback;
-  }
-
-  return fallback;
-}
-
-async function readJsonError(response: Response): Promise<Partial<ApiError> | null> {
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("json")) {
-    return null;
-  }
-
-  try {
-    const payload = await response.json() as Partial<ApiError>;
-    return payload;
-  } catch {
-    return null;
-  }
+  return (
+    <div
+      className="fixed inset-0 z-[140] flex items-end justify-center overflow-hidden bg-[#020409] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:items-center sm:px-4 sm:py-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label="评论预览"
+    >
+      <div className="flex max-h-[calc(100dvh_-_1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
+        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2 font-semibold">
+            <MessageCircle className="size-4 shrink-0 text-cyan" aria-hidden="true" />
+            <span>评论预览</span>
+          </div>
+          <div className="flex items-center gap-1">
+            {metadata ? (
+              <button
+                type="button"
+                onClick={onDownload}
+                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
+                aria-label="下载评论 JSON"
+                title="下载评论 JSON"
+              >
+                <Download className="size-4" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+              aria-label="关闭评论预览"
+              title="关闭"
+            >
+              <X className="size-4" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        {error ? <p className="border-b border-white/10 px-4 py-2 text-xs text-rose-400" role="alert">{error}</p> : null}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {isCollecting ? (
+            <div className="flex min-h-52 flex-col items-center justify-center gap-3 text-center">
+              <Loader2 className="size-7 animate-spin text-cyan" aria-hidden="true" />
+              <div className="font-semibold">正在采集评论</div>
+              <p className="text-sm text-muted-foreground">
+                已处理 {progress.page} 页，采集 {progress.commentCount} 条一级评论
+              </p>
+            </div>
+          ) : payload ? (
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>共 {payload.commentCount} 条一级评论</span>
+                <span>采集于 {formatFriendlyDateTime(payload.collectedAt)}</span>
+              </div>
+              {payload.comments.length > 0 ? (
+                <div className="divide-y divide-white/10">
+                  {payload.comments.map((comment) => (
+                    <article key={comment.id} className="py-3 first:pt-1 last:pb-1">
+                      <div className="flex items-center justify-between gap-3 text-xs">
+                        <span className="truncate font-semibold text-cyan">{comment.author.name}</span>
+                        <CommentLikeCount count={comment.likeCount} />
+                      </div>
+                      <p className="mt-1.5 whitespace-pre-line break-words text-[13px] leading-5 text-foreground/90">
+                        {comment.text || "[无文字内容]"}
+                      </p>
+                      {comment.replies.length > 0 ? (
+                        <div className="mt-2.5 grid gap-1.5 border-l border-cyan/20 pl-3">
+                          {comment.replies.map((reply) => (
+                            <div key={reply.id} className="bg-white/[0.018] px-2.5 py-1.5">
+                              <div className="flex items-center justify-between gap-3 text-xs">
+                                <span className="truncate font-medium text-cyan">{reply.author.name}</span>
+                                <CommentLikeCount count={reply.likeCount} />
+                              </div>
+                              <p className="mt-1 whitespace-pre-line break-words text-[13px] leading-5 text-foreground/85">
+                                {reply.text || "[无文字内容]"}
+                              </p>
+                            </div>
+                          ))}
+                          {comment.replyPageHasMore ? (
+                            <p className="pt-0.5 text-[11px] text-muted-foreground">
+                              仅展示第一页回复，共 {comment.replyCount} 条
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex min-h-44 items-center justify-center text-sm text-muted-foreground">该作品暂无可见评论</div>
+              )}
+              <button
+                type="button"
+                onClick={onCollect}
+                className="mx-auto mt-2 inline-flex h-9 items-center justify-center rounded-md border border-cyan/40 px-4 text-sm font-semibold text-cyan transition hover:bg-cyan/[0.08]"
+              >
+                重新采集
+              </button>
+            </div>
+          ) : (
+            <div className="flex min-h-52 flex-col items-center justify-center gap-4 text-center">
+              <MessageCircle className="size-8 text-muted-foreground" aria-hidden="true" />
+              <div className="font-semibold">尚未采集评论</div>
+              <button
+                type="button"
+                onClick={onCollect}
+                className="inline-flex h-9 items-center justify-center rounded-md border border-cyan/65 bg-cyan px-4 text-sm font-semibold text-black transition hover:bg-[#67e8f9]"
+              >
+                采集评论
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function buildCachedAssetFilename(
@@ -4127,24 +5127,12 @@ function VideoPreview({ url }: { url: string }) {
 
 function AudioPreview({ url }: { url: string }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const gainNodeRef = useRef<GainNode | null>(null);
-  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [gain, setGain] = useState(1);
-
-  useEffect(() => {
-    return () => {
-      void audioContextRef.current?.close();
-      audioContextRef.current = null;
-      gainNodeRef.current = null;
-      sourceNodeRef.current = null;
-    };
-  }, []);
 
   function syncMetadata() {
     const audio = audioRef.current;
@@ -4162,9 +5150,7 @@ function AudioPreview({ url }: { url: string }) {
 
   function syncGain() {
     const audio = audioRef.current;
-    if (audio?.muted) {
-      setGain(0);
-    }
+    if (audio?.muted) setGain(0);
   }
 
   async function togglePlayback() {
@@ -4174,11 +5160,11 @@ function AudioPreview({ url }: { url: string }) {
     }
 
     if (audio.paused) {
-      const audioContext = ensureAudioGraph();
-      if (audioContext?.state === "suspended") {
-        await audioContext.resume();
+      try {
+        await audio.play();
+      } catch {
+        setError("音频播放失败，请重新打开预览后再试。");
       }
-      await audio.play();
     } else {
       audio.pause();
     }
@@ -4196,45 +5182,13 @@ function AudioPreview({ url }: { url: string }) {
 
   function changeGain(value: string) {
     const audio = audioRef.current;
-    const nextGain = Math.min(2, Math.max(0, Number(value)));
+    const nextGain = Math.min(1, Math.max(0, Number(value)));
     setGain(nextGain);
     if (!audio) {
       return;
     }
-    audio.volume = 1;
+    audio.volume = nextGain;
     audio.muted = nextGain === 0;
-
-    const audioContext = ensureAudioGraph();
-    if (audioContext?.state === "suspended") {
-      void audioContext.resume();
-    }
-    gainNodeRef.current?.gain.setValueAtTime(nextGain, audioContext?.currentTime ?? 0);
-  }
-
-  function ensureAudioGraph(): AudioContext | null {
-    const audio = audioRef.current;
-    if (!audio) {
-      return null;
-    }
-
-    const audioContext = audioContextRef.current ?? new AudioContext();
-    audioContextRef.current = audioContext;
-
-    if (!sourceNodeRef.current) {
-      try {
-        const sourceNode = audioContext.createMediaElementSource(audio);
-        const gainNode = audioContext.createGain();
-        gainNode.gain.value = gain;
-        sourceNode.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        sourceNodeRef.current = sourceNode;
-        gainNodeRef.current = gainNode;
-      } catch {
-        return null;
-      }
-    }
-
-    return audioContext;
   }
 
   return (
@@ -4249,6 +5203,7 @@ function AudioPreview({ url }: { url: string }) {
       ) : null}
       <audio
         ref={audioRef}
+        crossOrigin="anonymous"
         src={url}
         preload="metadata"
         onLoadedMetadata={syncMetadata}
@@ -4295,13 +5250,13 @@ function AudioPreview({ url }: { url: string }) {
           <input
             type="range"
             min="0"
-            max="2"
+            max="1"
             step="0.01"
             value={gain}
             onChange={(event) => changeGain(event.currentTarget.value)}
             disabled={!loaded || Boolean(error)}
             className="audio-progress h-2 min-w-0 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-            aria-label="音频增益"
+            aria-label="音频音量"
           />
           <span className="shrink-0 text-right text-xs tabular-nums text-muted-foreground">
             {Math.round(gain * 100)}%
@@ -4344,25 +5299,35 @@ function mergeResolvedWork(
   return {
     ...next,
     authorName: next.authorName ?? current.authorName,
+    authorAvatarUrl: next.authorAvatarUrl ?? current.authorAvatarUrl,
     authorUrl: next.authorUrl ?? current.authorUrl,
     durationSeconds: next.durationSeconds ?? current.durationSeconds,
-    title: next.title ?? current.title,
   };
 }
 
 function ResultBlock({
   history,
   onAuthRequired,
+  onSessionActivityChange,
   result,
+  sessionId,
 }: {
   history?: TranscriptPanelHistory;
   onAuthRequired: () => void;
+  onSessionActivityChange?: (sessionId: string, active: boolean) => void;
   result: ExtractionResult;
+  sessionId?: string;
 }) {
   return (
     <article>
       {result.content ? (
-        <TranscriptResultPanel history={history} key={result.feature} onAuthRequired={onAuthRequired} result={result} />
+        <TranscriptResultPanel
+          history={history}
+          onAuthRequired={onAuthRequired}
+          onSessionActivityChange={onSessionActivityChange}
+          result={result}
+          sessionId={sessionId}
+        />
       ) : (
         <p className="flex min-h-24 items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
           {result.detail ?? "没有返回内容。"}
@@ -4387,11 +5352,15 @@ type TranscriptPanelHistory = {
 function TranscriptResultPanel({
   history,
   onAuthRequired,
+  onSessionActivityChange,
   result,
+  sessionId,
 }: {
   history?: TranscriptPanelHistory;
   onAuthRequired: () => void;
+  onSessionActivityChange?: (sessionId: string, active: boolean) => void;
   result: ExtractionResult;
+  sessionId?: string;
 }) {
   const initialContent = result.content ?? "";
   const [copiedAll, setCopiedAll] = useState(false);
@@ -4408,6 +5377,7 @@ function TranscriptResultPanel({
   const [showTranslationSource, setShowTranslationSource] = useState(true);
   const [translationConfig, setTranslationConfig] = useState<TranslationConfig>(DEFAULT_TRANSLATION_CONFIG);
   const [translationError, setTranslationError] = useState<string | null>(null);
+  const [translationErrorCode, setTranslationErrorCode] = useState<string>();
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsCanPersist, setSettingsCanPersist] = useState(false);
@@ -4425,13 +5395,17 @@ function TranscriptResultPanel({
   const [isEditingContent, setIsEditingContent] = useState(false);
   const [isSavingContent, setIsSavingContent] = useState(false);
   const [contentSaveError, setContentSaveError] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
+  const [editHistory, setEditHistory] = useState<EditHistory>({ future: [], past: [] });
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replacementText, setReplacementText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
   const [summaryMenuOpen, setSummaryMenuOpen] = useState(false);
   const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
+  const [summaryErrorCode, setSummaryErrorCode] = useState<string>();
+  const [lastSummaryPrompt, setLastSummaryPrompt] = useState<SummaryPrompt>();
   const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [customPrompts, setCustomPrompts] = useState<CustomSummaryPrompt[]>([]);
@@ -4446,13 +5420,100 @@ function TranscriptResultPanel({
   const [customSpeakerIds, setCustomSpeakerIds] = useState<string[]>([]);
   const [segmentSpeakerOverrides, setSegmentSpeakerOverrides] = useState<Record<string, string | undefined>>({});
   const [speakerEditorTarget, setSpeakerEditorTarget] = useState<SpeakerEditorTarget | null>(null);
+  const [resultSplitRatio, setResultSplitRatio] = useState(RESULT_SPLIT_DEFAULT_RATIO);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const resultSplitContainerRef = useRef<HTMLDivElement | null>(null);
+  const resultSplitRatioRef = useRef(RESULT_SPLIT_DEFAULT_RATIO);
+  const resultSplitterRef = useRef<HTMLDivElement | null>(null);
+  const splitterDraggingRef = useRef(false);
   const summaryAbortControllerRef = useRef<AbortController | null>(null);
   const summaryHistoryRef = useRef<HTMLDivElement | null>(null);
   const summaryMenuRef = useRef<HTMLDivElement | null>(null);
   const summaryRequestIdRef = useRef(0);
   const summaryScrollRef = useRef<HTMLDivElement | null>(null);
   const latestHistorySummary = history?.summaries[0];
+
+  const applyResultSplitRatio = useCallback((ratio: number) => {
+    const clampedRatio = Math.min(RESULT_SPLIT_MAX_RATIO, Math.max(RESULT_SPLIT_MIN_RATIO, ratio));
+    resultSplitRatioRef.current = clampedRatio;
+    resultSplitContainerRef.current?.style.setProperty("--transcript-pane-ratio", `${clampedRatio}fr`);
+    resultSplitContainerRef.current?.style.setProperty("--summary-pane-ratio", `${100 - clampedRatio}fr`);
+    resultSplitterRef.current?.setAttribute("aria-valuenow", String(Math.round(clampedRatio)));
+  }, []);
+
+  const commitResultSplitRatio = useCallback((ratio: number) => {
+    const clampedRatio = Math.min(RESULT_SPLIT_MAX_RATIO, Math.max(RESULT_SPLIT_MIN_RATIO, ratio));
+    applyResultSplitRatio(clampedRatio);
+    setResultSplitRatio(clampedRatio);
+    window.localStorage.setItem(RESULT_SPLIT_STORAGE_KEY, String(clampedRatio));
+  }, [applyResultSplitRatio]);
+
+  useLayoutEffect(() => {
+    const storedRatio = Number(window.localStorage.getItem(RESULT_SPLIT_STORAGE_KEY));
+    if (Number.isFinite(storedRatio) && storedRatio >= RESULT_SPLIT_MIN_RATIO && storedRatio <= RESULT_SPLIT_MAX_RATIO) {
+      commitResultSplitRatio(storedRatio);
+    }
+  }, [commitResultSplitRatio]);
+
+  useEffect(() => () => {
+    document.body.style.removeProperty("cursor");
+    document.body.style.removeProperty("user-select");
+  }, []);
+
+  function updateResultSplitFromPointer(clientX: number) {
+    const container = resultSplitContainerRef.current;
+    if (!container) return;
+
+    const bounds = container.getBoundingClientRect();
+    const usableWidth = bounds.width - RESULT_SPLITTER_WIDTH;
+    if (usableWidth <= 0) return;
+
+    applyResultSplitRatio(((clientX - bounds.left - RESULT_SPLITTER_WIDTH / 2) / usableWidth) * 100);
+  }
+
+  function startResultSplitDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+
+    splitterDraggingRef.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.dataset.dragging = "true";
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    updateResultSplitFromPointer(event.clientX);
+  }
+
+  function moveResultSplitDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!splitterDraggingRef.current || !event.isPrimary) return;
+    updateResultSplitFromPointer(event.clientX);
+  }
+
+  function finishResultSplitDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!splitterDraggingRef.current) return;
+
+    splitterDraggingRef.current = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    delete event.currentTarget.dataset.dragging;
+    document.body.style.removeProperty("cursor");
+    document.body.style.removeProperty("user-select");
+    commitResultSplitRatio(resultSplitRatioRef.current);
+  }
+
+  function adjustResultSplitWithKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const direction = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+    const nextRatio = event.key === "Home"
+      ? RESULT_SPLIT_MIN_RATIO
+      : event.key === "End"
+        ? RESULT_SPLIT_MAX_RATIO
+        : direction
+          ? resultSplitRatioRef.current + direction * RESULT_SPLIT_KEYBOARD_STEP * (event.shiftKey ? 2.5 : 1)
+          : null;
+    if (nextRatio === null) return;
+
+    event.preventDefault();
+    commitResultSplitRatio(nextRatio);
+  }
 
   useEffect(() => {
     if (isEditingContent || result.content === undefined) {
@@ -4467,6 +5528,7 @@ function TranscriptResultPanel({
     setSummary(latestHistorySummary?.content ?? "");
     setSelectedSummaryId(latestHistorySummary?.id ?? null);
     setSummaryError("");
+    setSummaryErrorCode(undefined);
     setSummaryHistoryOpen(false);
   }, [latestHistorySummary?.content, latestHistorySummary?.id]);
 
@@ -4518,19 +5580,22 @@ function TranscriptResultPanel({
     [customSpeakerIds, defaultSpeakerIds, segmentSpeakerOverrides, speakerNames],
   );
   const trimmedSearchQuery = searchQuery.trim();
-  const activeSearchQuery = searchOpen ? trimmedSearchQuery : "";
+  const activeSearchQuery = trimmedSearchQuery;
   const activeSourceItems = isSubtitleMode ? subtitleCues : segments;
+  const searchableSourceItems = isEditingContent
+    ? (isSubtitleMode ? draftSubtitleCues : draftSegments)
+    : activeSourceItems;
   const activeTranslations = isSubtitleMode ? subtitleTranslations : segmentTranslations;
   const searchMatches = useMemo(
-    () => countSearchMatches(activeSourceItems.map((item) => item.text).join("\n"), activeSearchQuery),
-    [activeSearchQuery, activeSourceItems],
+    () => countSearchMatches(searchableSourceItems.map((item) => item.text).join("\n"), activeSearchQuery),
+    [activeSearchQuery, searchableSourceItems],
   );
   const selectedSearchMatchIndex = searchMatches > 0
     ? Math.min(activeSearchMatchIndex, searchMatches - 1)
     : 0;
   const searchMatchRanges = useMemo(
-    () => buildSearchMatchRanges(activeSourceItems, activeSearchQuery),
-    [activeSearchQuery, activeSourceItems],
+    () => buildSearchMatchRanges(searchableSourceItems, activeSearchQuery),
+    [activeSearchQuery, searchableSourceItems],
   );
   const activeSearchSegmentIndex = useMemo(
     () => findSearchMatchSegmentIndex(searchMatchRanges, selectedSearchMatchIndex),
@@ -4539,6 +5604,22 @@ function TranscriptResultPanel({
   const activeSearchContainerRef = useRef<HTMLDivElement | null>(null);
   const activeSearchMatchRef = useRef<HTMLDivElement | null>(null);
   const hasSummaryOutput = isSummarizing || Boolean(summary || summaryError);
+  const isTranslationActive = Object.values(segmentTranslations).some((item) => item.isLoading) ||
+    Object.values(subtitleTranslations).some((item) => item.isLoading);
+  const isSessionActivityActive = isSummarizing || isTranslationActive;
+
+  useEffect(() => {
+    if (sessionId) {
+      onSessionActivityChange?.(sessionId, isSessionActivityActive);
+    }
+  }, [isSessionActivityActive, onSessionActivityChange, sessionId]);
+
+  useEffect(() => () => {
+    if (sessionId) {
+      onSessionActivityChange?.(sessionId, false);
+    }
+  }, [onSessionActivityChange, sessionId]);
+
   const isTranslatingAll = activeSourceItems.length > 0
     && activeSourceItems.every((item, index) => activeTranslations[buildTimedTextKey(item, index)]?.isLoading);
   const isSubtitleDownloadFormat = downloadFormat === "srt" || downloadFormat === "vtt";
@@ -4716,6 +5797,8 @@ function TranscriptResultPanel({
     setIsEditingContent(false);
     setDraftSegments([]);
     setDraftSubtitleCues([]);
+    setEditHistory({ future: [], past: [] });
+    setReplaceOpen(false);
     setCopyMenuOpen(false);
     setDownloadMenuOpen(false);
     setTranslationOptionsOpen(false);
@@ -4757,36 +5840,42 @@ function TranscriptResultPanel({
     }
   }
 
-  async function translateAll(targetLang: string) {
-    const items = activeSourceItems;
+  async function translateAll(targetLang: string, retryOnlyMissing = false) {
+    const streamItems = activeSourceItems.flatMap((item, index) => {
+      const key = buildTimedTextKey(item, index);
+      return retryOnlyMissing && activeTranslations[key]?.text
+        ? []
+        : [{ key, text: item.text }];
+    });
+    if (streamItems.length === 0) {
+      setTranslationError(null);
+      setTranslationErrorCode(undefined);
+      return;
+    }
     const options = buildTranslationOptions(translationConfig, targetLang);
     if (!options.ok) {
       setTranslationError(options.error);
+      setTranslationErrorCode(undefined);
       return;
     }
 
     setTranslationConfig((current) => ({ ...current, targetLang }));
     setTranslationError(null);
+    setTranslationErrorCode(undefined);
     setTranslationOptionsOpen(false);
     setTranslationTargetRequest(null);
     setCopyMenuOpen(false);
     setDownloadMenuOpen(false);
-    const streamItems = items.map((item, index) => ({
-      key: buildTimedTextKey(item, index),
-      text: item.text,
-    }));
     const loadingTranslations = Object.fromEntries(streamItems.map((item) => [
       item.key,
       { isLoading: true },
     ]));
-    if (isSubtitleMode) {
-      setSubtitleTranslations(loadingTranslations);
-    } else {
-      setSegmentTranslations(loadingTranslations);
-    }
+    const setTranslations = isSubtitleMode ? setSubtitleTranslations : setSegmentTranslations;
+    setTranslations((current) => retryOnlyMissing
+      ? { ...current, ...loadingTranslations }
+      : loadingTranslations);
 
     try {
-      const setTranslations = isSubtitleMode ? setSubtitleTranslations : setSegmentTranslations;
       await streamTranslationContent({
         items: streamItems,
         options: options.value,
@@ -4795,7 +5884,16 @@ function TranscriptResultPanel({
             ...current,
             [key]: {
               isLoading: true,
-              text: `${current[key]?.text ?? ""}${delta}`,
+              text: applyStreamTextEvent(current[key]?.text ?? "", { type: "delta", value: delta }),
+            },
+          }));
+        },
+        onReplace: (key) => {
+          setTranslations((current) => ({
+            ...current,
+            [key]: {
+              isLoading: true,
+              text: applyStreamTextEvent(current[key]?.text ?? "", { type: "replace", value: "" }),
             },
           }));
         },
@@ -4805,10 +5903,10 @@ function TranscriptResultPanel({
             [key]: { isLoading: false, text },
           }));
         },
-        onError: (key, error) => {
+        onError: (key, error, code) => {
           setTranslations((current) => ({
             ...current,
-            [key]: { error, isLoading: false },
+            [key]: { error, errorCode: code, isLoading: false },
           }));
         },
       });
@@ -4817,12 +5915,14 @@ function TranscriptResultPanel({
         onAuthRequired();
         return;
       }
-      if (isSubtitleMode) {
-        setSubtitleTranslations({});
-      } else {
-        setSegmentTranslations({});
-      }
+      setTranslations((current) => Object.fromEntries(
+        Object.entries(current).map(([key, value]) => [
+          key,
+          value.isLoading ? { ...value, isLoading: false } : value,
+        ]),
+      ));
       setTranslationError(readUserFacingError(error, "翻译失败。"));
+      setTranslationErrorCode(readUserFacingErrorCode(error));
     }
   }
 
@@ -4835,11 +5935,13 @@ function TranscriptResultPanel({
     const options = buildTranslationOptions(translationConfig, targetLang);
     if (!options.ok) {
       setTranslationError(options.error);
+      setTranslationErrorCode(undefined);
       return;
     }
 
     setTranslationConfig((current) => ({ ...current, targetLang }));
     setTranslationError(null);
+    setTranslationErrorCode(undefined);
     setTranslationOptionsOpen(false);
     setTranslationTargetRequest(null);
     const setTranslations = isSubtitleMode ? setSubtitleTranslations : setSegmentTranslations;
@@ -4857,7 +5959,16 @@ function TranscriptResultPanel({
             ...current,
             [key]: {
               isLoading: true,
-              text: `${current[key]?.text ?? ""}${delta}`,
+              text: applyStreamTextEvent(current[key]?.text ?? "", { type: "delta", value: delta }),
+            },
+          }));
+        },
+        onReplace: (key) => {
+          setTranslations((current) => ({
+            ...current,
+            [key]: {
+              isLoading: true,
+              text: applyStreamTextEvent(current[key]?.text ?? "", { type: "replace", value: "" }),
             },
           }));
         },
@@ -4867,10 +5978,10 @@ function TranscriptResultPanel({
             [key]: { isLoading: false, text },
           }));
         },
-        onError: (key, error) => {
+        onError: (key, error, code) => {
           setTranslations((current) => ({
             ...current,
-            [key]: { error, isLoading: false },
+            [key]: { error, errorCode: code, isLoading: false },
           }));
         },
       });
@@ -4883,6 +5994,7 @@ function TranscriptResultPanel({
         ...current,
         [itemKey]: {
           error: readUserFacingError(error, "翻译失败。"),
+          errorCode: readUserFacingErrorCode(error),
           isLoading: false,
         },
       }));
@@ -4909,6 +6021,7 @@ function TranscriptResultPanel({
     abortSummaryRequest();
     setIsSummarizing(false);
     setSummaryError("");
+    setSummaryErrorCode(undefined);
     setSummaryMenuOpen(false);
   }
 
@@ -4928,8 +6041,10 @@ function TranscriptResultPanel({
     summaryRequestIdRef.current = requestId;
     summaryAbortControllerRef.current = controller;
     setSummaryMenuOpen(false);
+    setLastSummaryPrompt(prompt);
     setSummary("");
     setSummaryError("");
+    setSummaryErrorCode(undefined);
     setSelectedSummaryId(null);
     setIsSummarizing(true);
 
@@ -4943,7 +6058,12 @@ function TranscriptResultPanel({
         signal: controller.signal,
         onDelta: (delta) => {
           if (isCurrentSummaryRequest()) {
-            setSummary((current) => current + delta);
+            setSummary((current) => applyStreamTextEvent(current, { type: "delta", value: delta }));
+          }
+        },
+        onReplace: () => {
+          if (isCurrentSummaryRequest()) {
+            setSummary((current) => applyStreamTextEvent(current, { type: "replace", value: "" }));
           }
         },
         onDone: (text, savedSummary) => {
@@ -4967,6 +6087,7 @@ function TranscriptResultPanel({
       }
       if (isCurrentSummaryRequest()) {
         setSummaryError(readUserFacingError(error, "AI处理失败。"));
+        setSummaryErrorCode(readUserFacingErrorCode(error));
       }
     } finally {
       if (summaryAbortControllerRef.current === controller) {
@@ -5030,6 +6151,7 @@ function TranscriptResultPanel({
 
     setDeletingSummaryId(summaryToDelete.id);
     setSummaryError("");
+    setSummaryErrorCode(undefined);
     try {
       await deleteTranscriptHistorySummary(history.recordId, summaryToDelete.id);
       const nextSummary = history.summaries.find((item) => item.id !== summaryToDelete.id);
@@ -5060,6 +6182,7 @@ function TranscriptResultPanel({
 
   function startEditingContent() {
     setContentSaveError("");
+    setEditHistory({ future: [], past: [] });
     if (isSubtitleMode) {
       setDraftSubtitleCues(subtitleCues.map((cue) => ({ ...cue })));
     } else {
@@ -5076,10 +6199,13 @@ function TranscriptResultPanel({
       }));
       setEditedSubtitleCues(nextCues);
       setDraftSubtitleCues([]);
+      setEditHistory({ future: [], past: [] });
+      setReplaceOpen(false);
       setIsEditingContent(false);
       setSubtitleTranslations({});
       setContentSaveError("");
       setTranslationError(null);
+    setTranslationErrorCode(undefined);
       return;
     }
 
@@ -5114,11 +6240,14 @@ function TranscriptResultPanel({
       setContent(nextContent);
     }
     setDraftSegments([]);
+    setEditHistory({ future: [], past: [] });
+    setReplaceOpen(false);
     setIsEditingContent(false);
     setSegmentTranslations({});
     setEditedSubtitleCues(null);
     setSubtitleTranslations({});
     setTranslationError(null);
+    setTranslationErrorCode(undefined);
     if (!history) {
       resetSummary();
     }
@@ -5127,24 +6256,110 @@ function TranscriptResultPanel({
   function cancelEditingContent() {
     setDraftSegments([]);
     setDraftSubtitleCues([]);
+    setEditHistory({ future: [], past: [] });
+    setReplaceOpen(false);
     setIsEditingContent(false);
     setContentSaveError("");
   }
 
+  function readDraftTexts(): string[] {
+    return (isSubtitleMode ? draftSubtitleCues : draftSegments).map((item) => item.text);
+  }
+
+  function applyDraftTexts(texts: string[]) {
+    if (isSubtitleMode) {
+      setDraftSubtitleCues((current) => current.map((cue, index) => ({ ...cue, text: texts[index] ?? cue.text })));
+      return;
+    }
+    setDraftSegments((current) => current.map((segment, index) => ({ ...segment, text: texts[index] ?? segment.text })));
+  }
+
+  function commitDraftTexts(nextTexts: string[]) {
+    const currentTexts = readDraftTexts();
+    if (currentTexts.every((text, index) => text === nextTexts[index])) {
+      return;
+    }
+    setEditHistory((current) => ({
+      future: [],
+      past: [...current.past.slice(-99), currentTexts],
+    }));
+    applyDraftTexts(nextTexts);
+  }
+
+  function undoContentEdit() {
+    const previous = editHistory.past.at(-1);
+    if (!previous) {
+      return;
+    }
+    const currentTexts = readDraftTexts();
+    setEditHistory({
+      future: [currentTexts, ...editHistory.future],
+      past: editHistory.past.slice(0, -1),
+    });
+    applyDraftTexts(previous);
+  }
+
+  function redoContentEdit() {
+    const next = editHistory.future[0];
+    if (!next) {
+      return;
+    }
+    const currentTexts = readDraftTexts();
+    setEditHistory({
+      future: editHistory.future.slice(1),
+      past: [...editHistory.past, currentTexts],
+    });
+    applyDraftTexts(next);
+  }
+
   function updateDraftSegment(index: number, text: string) {
-    setDraftSegments((current) =>
-      current.map((segment, segmentIndex) => segmentIndex === index ? { ...segment, text } : segment),
-    );
+    const nextTexts = draftSegments.map((segment) => segment.text);
+    nextTexts[index] = text;
+    commitDraftTexts(nextTexts);
   }
 
   function updateDraftSubtitleCue(index: number, text: string) {
-    setDraftSubtitleCues((current) =>
-      current.map((cue, cueIndex) => cueIndex === index ? { ...cue, text } : cue),
-    );
+    const nextTexts = draftSubtitleCues.map((cue) => cue.text);
+    nextTexts[index] = text;
+    commitDraftTexts(nextTexts);
   }
 
-  function toggleSearch() {
-    setSearchOpen((value) => !value);
+  function toggleReplace() {
+    if (!replaceOpen && !isEditingContent) {
+      startEditingContent();
+    }
+    setReplaceOpen((value) => !value);
+  }
+
+  function replaceCurrentSearchMatch() {
+    if (!activeSearchQuery || searchMatches < 1) {
+      return;
+    }
+    const itemIndex = findSearchMatchSegmentIndex(searchMatchRanges, selectedSearchMatchIndex);
+    if (itemIndex < 0) {
+      return;
+    }
+    const localMatchIndex = selectedSearchMatchIndex - searchMatchRanges[itemIndex].startIndex;
+    const nextTexts = readDraftTexts();
+    nextTexts[itemIndex] = replaceSearchMatch(
+      nextTexts[itemIndex],
+      activeSearchQuery,
+      replacementText,
+      localMatchIndex,
+    );
+    commitDraftTexts(nextTexts);
+  }
+
+  function replaceAllSearchMatches() {
+    if (!activeSearchQuery || searchMatches < 1) {
+      return;
+    }
+    commitDraftTexts(readDraftTexts().map((text) => replaceAllSearchMatchesInText(
+      text,
+      activeSearchQuery,
+      replacementText,
+    )));
+    setActiveSearchMatchIndex(0);
   }
 
   function updateSearchQuery(value: string) {
@@ -5214,29 +6429,59 @@ function TranscriptResultPanel({
   }
 
   return (
-    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,0.82fr)]">
+    <div
+      ref={resultSplitContainerRef}
+      className="grid gap-3 lg:grid-cols-[minmax(0,var(--transcript-pane-ratio))_0.75rem_minmax(0,var(--summary-pane-ratio))] lg:gap-0"
+      style={{
+        "--summary-pane-ratio": `${100 - resultSplitRatio}fr`,
+        "--transcript-pane-ratio": `${resultSplitRatio}fr`,
+      } as CSSProperties}
+    >
       <section className="flex min-w-0 flex-col">
         <div className="grid min-h-[4.25rem] grid-cols-1 items-center gap-2 border-b border-white/10 px-3 py-2 md:grid-cols-[auto_minmax(8rem,1fr)_max-content]">
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-center gap-1 md:col-start-1 md:row-start-1">
             <TranscriptViewToggle mode={viewMode} onChange={changeViewMode} />
           </div>
-          <div className="flex min-w-0 justify-start md:justify-center">
+          <div className="flex min-w-0 justify-start md:col-span-3 md:row-start-2">
             <TranscriptSearchControl
               activeSearchQuery={activeSearchQuery}
               clearSearchQuery={clearSearchQuery}
               moveSearchMatch={moveSearchMatch}
+              replaceAllSearchMatches={replaceAllSearchMatches}
+              replaceCurrentSearchMatch={replaceCurrentSearchMatch}
+              replaceOpen={replaceOpen}
+              replacementText={replacementText}
               searchMatches={searchMatches}
-              searchOpen={searchOpen}
               searchQuery={searchQuery}
-              selectedSearchMatchIndex={selectedSearchMatchIndex}
-              toggleSearch={toggleSearch}
+              setReplacementText={setReplacementText}
+              toggleReplace={toggleReplace}
               updateSearchQuery={updateSearchQuery}
             />
           </div>
-          <div ref={actionMenuRef} className="flex min-w-max shrink-0 flex-nowrap items-center justify-start gap-1 md:justify-end">
+          <div ref={actionMenuRef} className="flex min-w-max shrink-0 flex-nowrap items-center justify-start gap-1 md:col-start-3 md:row-start-1 md:justify-end">
             <div className="flex h-8 items-center gap-0.5">
               {isEditingContent ? (
                 <>
+                  <button
+                    type="button"
+                    onClick={undoContentEdit}
+                    disabled={isSavingContent || editHistory.past.length === 0}
+                    className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-35"
+                    aria-label="撤销编辑"
+                    title="撤销编辑"
+                  >
+                    <Undo2 className="size-3.5" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={redoContentEdit}
+                    disabled={isSavingContent || editHistory.future.length === 0}
+                    className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-35"
+                    aria-label="重做编辑"
+                    title="重做编辑"
+                  >
+                    <Redo2 className="size-3.5" aria-hidden="true" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => void saveContent()}
@@ -5404,6 +6649,7 @@ function TranscriptResultPanel({
                 key={cueKey}
                 onTextChange={(text) => updateDraftSubtitleCue(index, text)}
                 onTranslate={() => openTranslationTargetMenu({ key: cueKey, kind: "subtitle" })}
+                onRetryTranslation={() => void translateTimedText(cue, index, translationConfig.targetLang)}
                 searchMatchStartIndex={isEditingContent ? -1 : searchMatchRanges[index]?.startIndex ?? -1}
                 searchQuery={isEditingContent ? undefined : activeSearchQuery}
                 showTranslationSource={showTranslationSource}
@@ -5431,6 +6677,7 @@ function TranscriptResultPanel({
                   }}
                   onTextChange={(text) => updateDraftSegment(index, text)}
                   onTranslate={() => openTranslationTargetMenu({ key: segmentKey, kind: "segment" })}
+                  onRetryTranslation={() => void translateTimedText(segment, index, translationConfig.targetLang)}
                   searchMatchStartIndex={isEditingContent ? -1 : searchMatchRanges[index]?.startIndex ?? -1}
                   searchQuery={isEditingContent ? undefined : activeSearchQuery}
                   segment={segment}
@@ -5446,12 +6693,44 @@ function TranscriptResultPanel({
             <div className="px-2.5 py-1 text-xs font-medium text-amber">{contentSaveError}</div>
           ) : null}
           {!isEditingContent && translationError ? (
-            <div className="px-2.5 py-1 text-xs font-medium text-amber">{translationError}</div>
+            <div className="flex items-center gap-2 px-2.5 py-1 text-xs font-medium text-amber">
+              <span>{translationError}</span>
+              <NetworkRetryButton
+                code={translationErrorCode}
+                isRetrying={isTranslationActive}
+                onRetry={() => void translateAll(translationConfig.targetLang, true)}
+              />
+            </div>
           ) : null}
         </div>
       </section>
 
-      <section className="flex min-w-0 flex-col rounded-md border border-cyan/20">
+      <div
+        ref={resultSplitterRef}
+        role="separator"
+        tabIndex={0}
+        aria-label="调整转录文本与 AI 总结区域宽度"
+        aria-orientation="vertical"
+        aria-valuemin={RESULT_SPLIT_MIN_RATIO}
+        aria-valuemax={RESULT_SPLIT_MAX_RATIO}
+        aria-valuenow={Math.round(resultSplitRatio)}
+        aria-valuetext={`左侧转录文本占 ${Math.round(resultSplitRatio)}%`}
+        className="group relative hidden cursor-col-resize touch-none select-none outline-none lg:block"
+        onDoubleClick={() => commitResultSplitRatio(RESULT_SPLIT_DEFAULT_RATIO)}
+        onKeyDown={adjustResultSplitWithKeyboard}
+        onPointerCancel={finishResultSplitDrag}
+        onPointerDown={startResultSplitDrag}
+        onPointerMove={moveResultSplitDrag}
+        onPointerUp={finishResultSplitDrag}
+        title="拖动调整宽度，双击恢复默认比例"
+      >
+        <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/10 transition-colors group-hover:bg-cyan/60 group-focus-visible:bg-cyan group-data-[dragging=true]:bg-cyan" />
+        <span className="absolute left-1/2 top-1/2 flex h-10 w-3 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-sm border border-transparent bg-background/70 text-muted-foreground opacity-0 shadow-sm transition group-hover:border-cyan/30 group-hover:text-cyan group-hover:opacity-100 group-focus-visible:border-cyan/40 group-focus-visible:text-cyan group-focus-visible:opacity-100 group-data-[dragging=true]:border-cyan/40 group-data-[dragging=true]:text-cyan group-data-[dragging=true]:opacity-100">
+          <GripVertical className="size-3.5" aria-hidden="true" />
+        </span>
+      </div>
+
+      <section className="flex min-w-0 flex-col rounded-r-md border-y border-r border-cyan/20">
           <div className={cn(
             "flex min-h-[4.25rem] items-center justify-end gap-2 px-3 py-2",
             hasSummaryOutput ? "border-b border-white/10" : "",
@@ -5479,12 +6758,17 @@ function TranscriptResultPanel({
                       : "",
                   )}
                   aria-expanded={summaryMenuOpen}
-                  title={isSummarizing ? "暂停AI总结" : "选择总结提示词"}
+                  aria-label={isSummarizing ? "停止AI总结" : "选择总结提示词"}
+                  title={isSummarizing ? "停止AI总结" : "选择总结提示词"}
                 >
-                  <Sparkles className="size-3.5 transition group-hover:rotate-12 group-hover:scale-110" aria-hidden="true" />
-                  总结
                   {isSummarizing ? (
-                    <Pause className="size-3.5 text-amber" aria-hidden="true" />
+                    <Square className="size-3.5 fill-current" aria-hidden="true" />
+                  ) : (
+                    <Sparkles className="size-3.5 transition group-hover:rotate-12 group-hover:scale-110" aria-hidden="true" />
+                  )}
+                  {isSummarizing ? "停止" : "总结"}
+                  {isSummarizing ? (
+                    <span className="sr-only">生成中</span>
                   ) : (
                     <ChevronDown className={cn("size-3 transition", summaryMenuOpen ? "rotate-180" : "")} aria-hidden="true" />
                   )}
@@ -5537,6 +6821,7 @@ function TranscriptResultPanel({
                         setSummary(item.content);
                         setSelectedSummaryId(item.id);
                         setSummaryError("");
+    setSummaryErrorCode(undefined);
                         setSummaryHistoryOpen(false);
                       }}
                     />
@@ -5560,7 +6845,14 @@ function TranscriptResultPanel({
                   {summaryError ? (
                     <div className="flex h-40 items-center justify-center gap-2 text-amber">
                       <AlertCircle className="size-4" />
-                      {summaryError}
+                      <span>{summaryError}</span>
+                      {lastSummaryPrompt ? (
+                        <NetworkRetryButton
+                          code={summaryErrorCode}
+                          isRetrying={isSummarizing}
+                          onRetry={() => void summarize(lastSummaryPrompt)}
+                        />
+                      ) : null}
                     </div>
                   ) : (
                     <>
@@ -5694,12 +6986,12 @@ function TranscriptViewToggle({
   onChange: (mode: TranscriptViewMode) => void;
 }) {
   const items: Array<{ label: string; mode: TranscriptViewMode }> = [
-    { label: "转录文本", mode: "transcript" },
+    { label: "转录", mode: "transcript" },
     { label: "字幕", mode: "subtitles" },
   ];
 
   return (
-    <div className="inline-flex items-center gap-1 text-xs font-semibold">
+    <div className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs font-semibold">
       {items.map((item, index) => {
         const active = mode === item.mode;
         return (
@@ -5709,7 +7001,7 @@ function TranscriptViewToggle({
               type="button"
               onClick={() => onChange(item.mode)}
               className={cn(
-                "inline-flex h-8 items-center justify-center rounded-sm px-1.5 transition active:scale-[0.98]",
+                "inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-sm px-1.5 transition active:scale-[0.98]",
                 active
                   ? "text-cyan"
                   : "text-muted-foreground hover:bg-white/[0.05] hover:text-foreground",
@@ -5728,93 +7020,127 @@ function TranscriptSearchControl({
   activeSearchQuery,
   clearSearchQuery,
   moveSearchMatch,
+  replaceAllSearchMatches,
+  replaceCurrentSearchMatch,
+  replaceOpen,
+  replacementText,
   searchMatches,
-  searchOpen,
   searchQuery,
-  selectedSearchMatchIndex,
-  toggleSearch,
+  setReplacementText,
+  toggleReplace,
   updateSearchQuery,
 }: {
   activeSearchQuery: string;
   clearSearchQuery: () => void;
   moveSearchMatch: (direction: -1 | 1) => void;
+  replaceAllSearchMatches: () => void;
+  replaceCurrentSearchMatch: () => void;
+  replaceOpen: boolean;
+  replacementText: string;
   searchMatches: number;
-  searchOpen: boolean;
   searchQuery: string;
-  selectedSearchMatchIndex: number;
-  toggleSearch: () => void;
+  setReplacementText: (value: string) => void;
+  toggleReplace: () => void;
   updateSearchQuery: (value: string) => void;
 }) {
+  const canReplace = Boolean(activeSearchQuery) && searchMatches > 0;
+
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center overflow-hidden rounded-md transition",
-        searchOpen
-          ? "w-full max-w-[20rem] border border-cyan/25 bg-black/20 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)]"
-          : "w-auto border border-transparent bg-transparent",
+        "flex h-10 w-full min-w-0 items-center transition-[max-width]",
+        replaceOpen ? "max-w-[42rem]" : "max-w-[24rem]",
       )}
     >
+      <span className="inline-flex h-9 w-10 shrink-0 items-center justify-start pl-1.5 text-cyan" aria-hidden="true">
+        <Search className="size-4" />
+      </span>
+      <span className="h-4 w-px shrink-0 bg-white/10" aria-hidden="true" />
+      <label className="min-w-[6rem] flex-1">
+        <span className="sr-only">搜索原文</span>
+        <input
+          value={searchQuery}
+          onChange={(event) => updateSearchQuery(event.target.value)}
+          className="h-10 w-full bg-transparent px-3 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+          placeholder="输入关键词"
+          autoFocus
+        />
+      </label>
+      <div className="ml-1 flex shrink-0 items-center gap-px">
+        <button
+          type="button"
+          onClick={clearSearchQuery}
+          disabled={!searchQuery}
+          className="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-35"
+          aria-label="清除搜索"
+          title="清除搜索"
+        >
+          <X className="size-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => moveSearchMatch(-1)}
+          disabled={searchMatches < 1}
+          className="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-35"
+          aria-label="上一个匹配"
+          title="上一个匹配"
+        >
+          <ChevronUp className="size-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => moveSearchMatch(1)}
+          disabled={searchMatches < 1}
+          className="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-35"
+          aria-label="下一个匹配"
+          title="下一个匹配"
+        >
+          <ChevronDown className="size-3.5" aria-hidden="true" />
+        </button>
+      </div>
       <button
         type="button"
-        onClick={toggleSearch}
-        className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 px-2.5 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.08] active:scale-[0.96]"
-        title="搜索"
+        onClick={toggleReplace}
+        className={cn(
+          "inline-flex size-7 shrink-0 items-center justify-center rounded-sm transition active:scale-[0.94]",
+          replaceOpen
+            ? "text-amber"
+            : "text-muted-foreground hover:text-amber",
+        )}
+        aria-label="替换"
+        aria-pressed={replaceOpen}
+        title="替换"
       >
-        <Search className="size-3.5" aria-hidden="true" />
-        搜索
+        <ArrowLeftRight className="size-3.5" aria-hidden="true" />
       </button>
-      {searchOpen ? (
+      {replaceOpen ? (
         <>
-          <span className="h-4 w-px shrink-0 bg-white/10" aria-hidden="true" />
-          <label className="relative min-w-0 flex-1">
-            <span className="sr-only">搜索原文</span>
+          <span className="mx-1 h-4 w-px shrink-0 bg-white/10" aria-hidden="true" />
+          <label className="min-w-[6rem] flex-1">
+            <span className="sr-only">替换为</span>
             <input
-              value={searchQuery}
-              onChange={(event) => updateSearchQuery(event.target.value)}
-              className="h-9 w-full bg-transparent px-2 pr-[4.75rem] text-xs text-foreground outline-none placeholder:text-muted-foreground"
-              placeholder="输入关键词"
+              value={replacementText}
+              onChange={(event) => setReplacementText(event.target.value)}
+              className="h-10 w-full bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+              placeholder="替换为"
             />
-            {activeSearchQuery ? (
-              <span className="absolute right-8 top-1/2 inline-flex h-5 min-w-7 -translate-y-1/2 items-center justify-center rounded-sm bg-amber/[0.1] px-1.5 text-[0.68rem] font-semibold tabular-nums text-amber">
-                {searchMatches > 0 ? `${selectedSearchMatchIndex + 1}/${searchMatches}` : "0"}
-              </span>
-            ) : null}
-            {searchQuery ? (
-              <button
-                type="button"
-                onClick={clearSearchQuery}
-                className="absolute right-1.5 top-1/2 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.94]"
-                aria-label="清除搜索"
-                title="清除搜索"
-              >
-                <X className="size-3.5" aria-hidden="true" />
-              </button>
-            ) : null}
           </label>
-          {activeSearchQuery ? (
-            <div className="mr-1 flex shrink-0 items-center gap-0.5">
-              <button
-                type="button"
-                onClick={() => moveSearchMatch(-1)}
-                disabled={searchMatches < 1}
-                className="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="上一个匹配"
-                title="上一个匹配"
-              >
-                <ChevronUp className="size-3.5" aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                onClick={() => moveSearchMatch(1)}
-                disabled={searchMatches < 1}
-                className="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="下一个匹配"
-                title="下一个匹配"
-              >
-                <ChevronDown className="size-3.5" aria-hidden="true" />
-              </button>
-            </div>
-          ) : null}
+          <button
+            type="button"
+            onClick={replaceCurrentSearchMatch}
+            disabled={!canReplace}
+            className="inline-flex h-7 shrink-0 items-center justify-center rounded-sm px-2 text-xs font-medium text-muted-foreground transition hover:bg-white/[0.07] hover:text-foreground active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            当前
+          </button>
+          <button
+            type="button"
+            onClick={replaceAllSearchMatches}
+            disabled={!canReplace}
+            className="inline-flex h-7 shrink-0 items-center justify-center rounded-sm bg-cyan/[0.1] px-2 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.16] active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            全部
+          </button>
         </>
       ) : null}
     </div>
@@ -5870,6 +7196,7 @@ function SubtitleCueCard({
   isEditing,
   onTextChange,
   onTranslate,
+  onRetryTranslation,
   searchMatchStartIndex,
   searchQuery,
   showTranslationSource,
@@ -5881,6 +7208,7 @@ function SubtitleCueCard({
   isEditing: boolean;
   onTextChange: (text: string) => void;
   onTranslate: () => void;
+  onRetryTranslation: () => void;
   searchMatchStartIndex: number;
   searchQuery?: string;
   showTranslationSource: boolean;
@@ -5939,7 +7267,14 @@ function SubtitleCueCard({
           <LoadingText>正在翻译</LoadingText>
         </div>
       ) : !isEditing && translation?.error ? (
-        <div className="mt-1 text-xs text-amber">{translation.error}</div>
+        <div className="mt-1 flex items-center gap-2 text-xs text-amber">
+          <span>{translation.error}</span>
+          <NetworkRetryButton
+            code={translation.errorCode}
+            isRetrying={translation.isLoading}
+            onRetry={onRetryTranslation}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -5977,6 +7312,7 @@ function TranscriptSegmentCard({
   onEditSpeaker,
   onTextChange,
   onTranslate,
+  onRetryTranslation,
   segment,
   searchMatchStartIndex,
   searchQuery,
@@ -5991,6 +7327,7 @@ function TranscriptSegmentCard({
   onEditSpeaker: () => void;
   onTextChange: (text: string) => void;
   onTranslate: () => void;
+  onRetryTranslation: () => void;
   segment: TranscriptSegment;
   searchMatchStartIndex: number;
   searchQuery?: string;
@@ -6107,7 +7444,14 @@ function TranscriptSegmentCard({
           <LoadingText>正在翻译</LoadingText>
         </div>
       ) : !isEditing && translation?.error ? (
-        <div className="mt-1 text-xs text-amber">{translation.error}</div>
+        <div className="mt-1 flex items-center gap-2 text-xs text-amber">
+          <span>{translation.error}</span>
+          <NetworkRetryButton
+            code={translation.errorCode}
+            isRetrying={translation.isLoading}
+            onRetry={onRetryTranslation}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -6344,14 +7688,15 @@ function SummaryPromptMenu({
   return (
     <div className="mobile-popover w-auto overflow-hidden rounded-md border border-white/12 bg-[#171a27] shadow-2xl shadow-black/40 sm:w-[min(20rem,calc(100vw-2rem))]">
       <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
-        <div className="text-base font-semibold text-foreground">提示词库</div>
+        <div className="text-sm font-semibold text-foreground">提示词库</div>
         <button
           type="button"
           onClick={onCustomPrompt}
-          className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.94]"
-          aria-label="新建提示词"
-          title="新建提示词"
+          className="inline-flex h-8 items-center justify-center gap-1 rounded-md px-2 text-xs font-semibold text-cyan transition hover:bg-cyan/[0.1] active:scale-[0.98]"
+          aria-label="新建自定义提示词"
+          title="新建自定义提示词"
         >
+          <span>自定义提示词</span>
           <Plus className="size-4" aria-hidden="true" />
         </button>
       </div>
@@ -6419,7 +7764,7 @@ function PromptMenuSectionHeader({
     <button
       type="button"
       onClick={onToggle}
-      className="flex h-9 w-full items-center justify-between gap-3 border-t border-white/10 px-3 text-left text-sm font-semibold text-cyan transition first:border-t-0 hover:bg-cyan/[0.06] hover:text-cyan"
+      className="flex h-9 w-full items-center justify-between gap-3 border-t border-white/10 px-3 text-left text-xs font-semibold text-cyan transition first:border-t-0 hover:bg-cyan/[0.06] hover:text-cyan"
       aria-expanded={open}
     >
       <span>{title}</span>
@@ -6562,8 +7907,8 @@ async function downloadCachedAsset(
 ): Promise<void> {
   const saved = await saveToDownloadDirectory(sourceUrl, filename, {
     authorName: work.authorName,
+    caption: work.caption,
     workId: work.id,
-    workTitle: work.title,
   });
   if (saved) {
     return;
@@ -7101,24 +8446,6 @@ function buildTranscriptDownloadContent(
   };
 }
 
-function readAsrAudioHeaders(
-  response: Response,
-  asset: MediaAssetKind,
-): Pick<CachedMediaAsset, "asrAudioObjectKey" | "asrAudioUrl"> {
-  if (asset !== "originalAudio") {
-    return {};
-  }
-
-  const asrAudioObjectKey = decodeResponseHeader(response, "x-echolens-asr-audio-object-key");
-  const asrAudioUrl = decodeResponseHeader(response, "x-echolens-asr-audio-url");
-  return asrAudioObjectKey && asrAudioUrl ? { asrAudioObjectKey, asrAudioUrl } : {};
-}
-
-function decodeResponseHeader(response: Response, name: string): string {
-  const value = response.headers.get(name);
-  return value ? decodeURIComponent(value) : "";
-}
-
 function buildSubtitleDownloadContent(
   cues: SubtitleCue[],
   format: Extract<TranscriptDownloadFormat, "srt" | "vtt">,
@@ -7329,6 +8656,53 @@ function countSearchMatches(text: string, query: string): number {
   }
 
   return count;
+}
+
+function replaceSearchMatch(
+  text: string,
+  query: string,
+  replacement: string,
+  matchIndex: number,
+): string {
+  if (!query || matchIndex < 0) {
+    return text;
+  }
+
+  const source = text.toLocaleLowerCase();
+  const target = query.toLocaleLowerCase();
+  let index = source.indexOf(target);
+  let currentMatchIndex = 0;
+  while (index !== -1 && currentMatchIndex < matchIndex) {
+    index = source.indexOf(target, index + target.length);
+    currentMatchIndex += 1;
+  }
+
+  return index === -1
+    ? text
+    : `${text.slice(0, index)}${replacement}${text.slice(index + query.length)}`;
+}
+
+function replaceAllSearchMatchesInText(
+  text: string,
+  query: string,
+  replacement: string,
+): string {
+  if (!query) {
+    return text;
+  }
+
+  const source = text.toLocaleLowerCase();
+  const target = query.toLocaleLowerCase();
+  const parts: string[] = [];
+  let cursor = 0;
+  let index = source.indexOf(target);
+  while (index !== -1) {
+    parts.push(text.slice(cursor, index), replacement);
+    cursor = index + query.length;
+    index = source.indexOf(target, cursor);
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
 }
 
 type SearchMatchRange = {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { AuthError, readCurrentUserFromRequest, type AuthUser } from "@/lib/auth/service";
+import { AuthRateLimitError } from "@/lib/auth/rate-limit";
 
 export const EmailSchema = z.string().trim().email().max(254);
 export const PasswordSchema = z.string().min(1).max(128);
@@ -11,14 +12,14 @@ export function authJson(data: unknown, init?: ResponseInit): NextResponse {
 }
 
 export function errorJson(error: unknown): NextResponse {
-  if (error instanceof AuthError) {
+  if (error instanceof AuthError || error instanceof AuthRateLimitError) {
     return authJson({ code: error.code, error: error.message }, { status: error.status });
   }
 
   return authJson(
     {
       code: "INTERNAL_ERROR",
-      error: error instanceof Error ? error.message : "请求处理失败。",
+      error: "请求处理失败。",
     },
     { status: 500 },
   );
@@ -31,4 +32,8 @@ export async function requireUser(request: Request): Promise<AuthUser | NextResp
 
 export function unauthenticatedJson(): NextResponse {
   return authJson({ code: "UNAUTHENTICATED", error: "请先登录后再使用。" }, { status: 401 });
+}
+
+export function logServerError(scope: string, error: unknown): void {
+  console.error(`[${scope}]`, error);
 }

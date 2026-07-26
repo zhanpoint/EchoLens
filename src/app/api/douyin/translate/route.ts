@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireUser } from "@/app/api/auth/_shared";
+import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import {
   streamQwenMtText,
   translateQwenMtTextItems,
   type QwenMtTranslationOptions,
 } from "@/lib/dashscope/translation";
+import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
+import {
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+  NetworkRetryExhaustedError,
+} from "@/lib/http/retry";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -36,8 +42,9 @@ const TranslateSchema = z.object({
 type TranslateEvent =
   | { type: "segment_start"; key: string }
   | { type: "delta"; key: string; value: string }
+  | { type: "replace"; key: string; value: "" }
   | { type: "segment_done"; key: string; value: string }
-  | { type: "segment_error"; key: string; error: string }
+  | { type: "segment_error"; key: string; error: string; code?: string }
   | { type: "done" }
   | { type: "error"; error: string; code?: string };
 
@@ -52,12 +59,22 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "翻译参数无效。" }, { status: 400 });
   }
 
-  return streamTranslations(parsed.data.texts, parsed.data.translation_options);
+  const dashScope = await readDashScopeUserConfig(user.id);
+  return streamTranslations(
+    parsed.data.texts,
+    parsed.data.translation_options,
+    dashScope.models.translation,
+    dashScope.apiKey,
+    request.signal,
+  );
 }
 
 function streamTranslations(
   items: Array<{ key: string; text: string }>,
   options: QwenMtTranslationOptions,
+  model: string,
+  apiKey?: string,
+  signal?: AbortSignal,
 ): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -72,30 +89,40 @@ function streamTranslations(
         if (items.length === 1) {
           const item = items[0];
           const result = await streamQwenMtText({
+            apiKey,
+            model,
             text: item.text,
             options,
             onDelta: (delta) => send({ type: "delta", key: item.key, value: delta }),
+            onReset: () => send({ type: "replace", key: item.key, value: "" }),
+            signal,
           });
 
           if (result.ok) {
             send({ type: "segment_done", key: item.key, value: result.content });
           } else {
-            send({ type: "segment_error", key: item.key, error: result.detail });
+            send({ type: "segment_error", key: item.key, error: result.detail, code: result.code });
           }
         } else {
-          const results = await translateQwenMtTextItems({ items, options });
+          const results = await translateQwenMtTextItems({ apiKey, items, model, options, signal });
           for (const result of results) {
             if (result.ok) {
               send({ type: "segment_done", key: result.key, value: result.content });
             } else {
-              send({ type: "segment_error", key: result.key, error: result.detail });
+              send({ type: "segment_error", key: result.key, error: result.detail, code: result.code });
             }
           }
         }
 
         send({ type: "done" });
       } catch (error) {
-        send({ type: "error", error: error instanceof Error ? error.message : "翻译失败。" });
+        logServerError("douyin.translate", error);
+        const networkFailure = error instanceof NetworkRetryExhaustedError;
+        send({
+          type: "error",
+          error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "翻译失败，请稍后重试。",
+          ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
+        });
       } finally {
         controller.close();
       }

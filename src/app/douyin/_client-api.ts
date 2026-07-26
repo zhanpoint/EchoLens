@@ -1,3 +1,5 @@
+import { NETWORK_RETRY_ERROR_MESSAGE } from "@/lib/http/retry";
+
 export type CurrentUser = {
   email: string;
   id: string;
@@ -86,7 +88,7 @@ export function readUserFacingError(error: unknown, fallback: string): string {
   }
   const message = error.message.trim();
   if (/^(Failed to fetch|NetworkError|Load failed|fetch failed)$/i.test(message)) {
-    return "网络连接异常，请检查网络后重试。";
+    return NETWORK_RETRY_ERROR_MESSAGE;
   }
   return message.replaceAll("Cookie", "访问凭证") || fallback;
 }

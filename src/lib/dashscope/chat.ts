@@ -1,6 +1,17 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
-import { fetchWithRetry } from "@/lib/http/retry";
+import {
+  fetchWithRetry,
+  isRetryableHttpStatus,
+  isRetryableNetworkError,
+  NetworkRetryExhaustedError,
+  NETWORK_RETRY_ERROR_CODE,
+  NETWORK_RETRY_ERROR_MESSAGE,
+  retryOperation,
+} from "@/lib/http/retry";
 import { readSseJsonStream } from "@/lib/http/sse";
+import {
+  DASHSCOPE_FIXED_COMPATIBLE_BASE_URL,
+} from "@/lib/dashscope/fixed-config";
 
 export type DashScopeChatConfig = {
   apiKey: string;
@@ -26,26 +37,29 @@ type DashScopeChatErrorFormatter = (
   error: DashScopeChatCompletionError | undefined,
 ) => string;
 
-const QWEN_CHAT_REQUEST_TIMEOUT_MS = 120_000;
-export async function streamQwenChat(input: {
+const CHAT_REQUEST_TIMEOUT_MS = 120_000;
+export async function streamDashScopeChat(input: {
+  apiKey?: string;
+  model: string;
   onDelta?: (delta: string) => void;
+  onReset?: () => void;
   prompt: string;
   signal?: AbortSignal;
-  thinkingEnabled?: boolean;
 }): Promise<ProviderResult> {
   try {
-    const config = readDashScopeQwenChatConfig();
+    const config = readDashScopeChatConfig(input.apiKey, input.model);
     return await streamDashScopeChatCompletion({
       config,
       prompt: input.prompt,
       onDelta: input.onDelta,
+      onReset: input.onReset,
       signal: input.signal,
-      timeoutMs: QWEN_CHAT_REQUEST_TIMEOUT_MS,
+      timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
       extraBody: {
         temperature: 0,
-        ...(input.thinkingEnabled !== undefined ? { enable_thinking: input.thinkingEnabled } : {}),
+        enable_thinking: false,
       },
-      emptyBodyDetail: "Qwen 没有返回流式内容。",
+      emptyBodyDetail: "模型没有返回流式内容。",
       emptyContentDetail: "模型没有返回可用文本。",
       formatError: formatDashScopeChatError,
     });
@@ -56,6 +70,45 @@ export async function streamQwenChat(input: {
 
 export async function streamDashScopeChatCompletion(input: {
   config: DashScopeChatConfig;
+  contentMode?: "cumulative" | "incremental";
+  emptyBodyDetail: string;
+  emptyContentDetail: string;
+  extraBody?: Record<string, unknown>;
+  formatError: DashScopeChatErrorFormatter;
+  onDelta?: (delta: string) => void;
+  onReset?: () => void;
+  prompt: string;
+  signal?: AbortSignal;
+  timeoutMs: number;
+}): Promise<ProviderResult> {
+  try {
+    return await retryOperation(
+      async (attempt) => {
+        if (attempt > 1) input.onReset?.();
+        return await streamDashScopeChatAttempt(input);
+      },
+      {
+        signal: input.signal,
+        shouldRetry: (error) => error instanceof RetryableChatResponseError || isRetryableNetworkError(error),
+      },
+    );
+  } catch (error) {
+    if (error instanceof NetworkRetryExhaustedError && error.cause instanceof RetryableChatResponseError) {
+      return error.cause.result;
+    }
+    throw error;
+  }
+}
+
+class RetryableChatResponseError extends Error {
+  constructor(readonly result: Extract<ProviderResult, { ok: false }>) {
+    super(result.detail);
+  }
+}
+
+async function streamDashScopeChatAttempt(input: {
+  config: DashScopeChatConfig;
+  contentMode?: "cumulative" | "incremental";
   emptyBodyDetail: string;
   emptyContentDetail: string;
   extraBody?: Record<string, unknown>;
@@ -84,21 +137,30 @@ export async function streamDashScopeChatCompletion(input: {
       ...input.extraBody,
     }),
     retry: {
-      attempts: 2,
+      attempts: 1,
       timeoutMs: input.timeoutMs,
     },
     signal: input.signal,
   });
   if (!response.ok) {
     const payload = await readDashScopeChatJsonResponse(response);
-    return readDashScopeChatFailure(response, payload, input.formatError);
+    const failure = readDashScopeChatFailure(response, payload, input.formatError);
+    if (!failure.ok && isRetryableHttpStatus(response.status)) {
+      throw new RetryableChatResponseError(failure);
+    }
+    return failure;
   }
   if (!response.body) {
     return { ok: false, code: "unavailable", detail: input.emptyBodyDetail };
   }
 
+  let completed = false;
   let output = "";
-  for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body)) {
+  for await (const payload of readSseJsonStream<DashScopeChatCompletionPayload>(response.body, {
+    onDone: () => {
+      completed = true;
+    },
+  })) {
     throwIfAborted(input.signal);
     if (payload.error) {
       return {
@@ -110,11 +172,22 @@ export async function streamDashScopeChatCompletion(input: {
 
     const delta = payload.choices?.[0]?.delta?.content;
     if (typeof delta === "string" && delta) {
-      output += delta;
-      input.onDelta?.(delta);
+      if (input.contentMode === "cumulative") {
+        const appended = delta.startsWith(output) ? delta.slice(output.length) : "";
+        output = delta;
+        if (appended) {
+          input.onDelta?.(appended);
+        }
+      } else {
+        output += delta;
+        input.onDelta?.(delta);
+      }
     }
   }
 
+  if (!completed) {
+    throw new Error("SSE stream terminated before [DONE]");
+  }
   if (!output.trim()) {
     return { ok: false, code: "unavailable", detail: input.emptyContentDetail };
   }
@@ -122,20 +195,12 @@ export async function streamDashScopeChatCompletion(input: {
   return { ok: true, content: output.trim() };
 }
 
-function readDashScopeQwenChatConfig(): DashScopeChatConfig {
+function readDashScopeChatConfig(apiKey: string | undefined, model: string): DashScopeChatConfig {
   return {
-    apiKey: readRequiredEnv("DASHSCOPE_API_KEY"),
-    baseUrl: readDashScopeCompatibleBaseUrl(),
-    model: readRequiredEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL"),
+    apiKey: apiKey?.trim() || readRequiredEnv("DASHSCOPE_API_KEY"),
+    baseUrl: DASHSCOPE_FIXED_COMPATIBLE_BASE_URL,
+    model,
   };
-}
-
-function readDashScopeCompatibleBaseUrl(): string {
-  const baseUrl = process.env.DASHSCOPE_TRANSLATION_BASE_URL?.trim().replace(/\/+$/u, "");
-  if (!baseUrl) {
-    throw new Error("DASHSCOPE_TRANSLATION_BASE_URL 未配置。");
-  }
-  return baseUrl;
 }
 
 function readRequiredEnv(name: string): string {
@@ -174,17 +239,20 @@ function formatDashScopeChatThrownError(error: unknown): ProviderResult {
   if (isAbortError(error)) {
     return { ok: false, code: "error", detail: "转录任务已放弃。" };
   }
+  if (error instanceof NetworkRetryExhaustedError) {
+    return { ok: false, code: NETWORK_RETRY_ERROR_CODE, detail: NETWORK_RETRY_ERROR_MESSAGE };
+  }
   if (error instanceof Error) {
-    if (/DASHSCOPE_(?:API_KEY|TRANSLATION_BASE_URL|TRANSCRIPT_POSTPROCESS_MODEL)/.test(error.message)) {
+    if (/DASHSCOPE_API_KEY/.test(error.message)) {
       return { ok: false, code: "not_configured", detail: error.message };
     }
     if (error.name === "AbortError" || /timeout|timed out/i.test(error.message)) {
-      return { ok: false, code: "unavailable", detail: "Qwen 响应超时，请稍后再试。" };
+      return { ok: false, code: "unavailable", detail: "模型响应超时，请稍后再试。" };
     }
     return { ok: false, code: "error", detail: error.message };
   }
 
-  return { ok: false, code: "error", detail: "Qwen 请求失败。" };
+  return { ok: false, code: "error", detail: "模型请求失败。" };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -208,11 +276,11 @@ function formatDashScopeChatError(
     return "DashScope 认证失败：请检查 DASHSCOPE_API_KEY 是否有效。";
   }
   if (status === 403) {
-    return "DashScope 拒绝访问：当前 API Key 没有 Qwen 模型调用权限。";
+    return "DashScope 拒绝访问：当前 API Key 没有所选模型的调用权限。";
   }
   if (status === 429) {
     return "DashScope 请求过于频繁，请稍后重试。";
   }
 
-  return message ?? `Qwen 请求失败：HTTP ${httpStatus}`;
+  return message ?? `模型请求失败：HTTP ${httpStatus}`;
 }

@@ -1,0 +1,236 @@
+import type { DouyinWebClient } from "./web-client";
+
+const PAGE_SIZE = 20;
+const REPLY_CONCURRENCY = 4;
+
+export type DouyinCommentAuthor = {
+  id: string;
+  name: string;
+};
+
+export type DouyinComment = {
+  author: DouyinCommentAuthor;
+  id: string;
+  likeCount: number;
+  publishedAt: number;
+  replies: DouyinCommentReply[];
+  replyCount: number;
+  replyPageHasMore: boolean;
+  text: string;
+};
+
+export type DouyinCommentReply = {
+  author: DouyinCommentAuthor;
+  id: string;
+  likeCount: number;
+  publishedAt: number;
+  text: string;
+};
+
+export type DouyinCommentsPayload = {
+  awemeId: string;
+  collectedAt: number;
+  commentCount: number;
+  comments: DouyinComment[];
+};
+
+export type CommentCollectionProgress = {
+  commentCount: number;
+  page: number;
+};
+
+type PagedComments = {
+  hasMore: boolean;
+  items: Record<string, unknown>[];
+  nextCursor: number;
+};
+
+export async function collectDouyinComments({
+  awemeId,
+  client,
+  onProgress,
+}: {
+  awemeId: string;
+  client: DouyinWebClient;
+  onProgress?: (progress: CommentCollectionProgress) => void;
+}): Promise<DouyinCommentsPayload> {
+  const comments: DouyinComment[] = [];
+  const seenIds = new Set<string>();
+  let cursor = 0;
+  let pageNumber = 0;
+  let page = await requestCommentPage(client, awemeId, cursor);
+
+  while (page.items.length > 0) {
+    const uniqueItems = page.items.filter((item) => {
+      const id = readIdentifier(item.cid, item.comment_id);
+      if (!id || seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    });
+    const canAdvance = page.hasMore && page.nextCursor !== cursor;
+    const nextPage = canAdvance
+      ? requestCommentPage(client, awemeId, page.nextCursor)
+      : null;
+    const normalized = await mapConcurrent(
+      uniqueItems,
+      REPLY_CONCURRENCY,
+      (item) => normalizeCommentWithReplies(client, awemeId, item),
+    );
+    comments.push(...normalized);
+    pageNumber += 1;
+    onProgress?.({ commentCount: comments.length, page: pageNumber });
+
+    if (!nextPage) break;
+    cursor = page.nextCursor;
+    page = await nextPage;
+  }
+
+  return {
+    awemeId,
+    collectedAt: Date.now(),
+    commentCount: comments.length,
+    comments,
+  };
+}
+
+async function requestCommentPage(
+  client: DouyinWebClient,
+  awemeId: string,
+  cursor: number,
+): Promise<PagedComments> {
+  const payload = await client.request("/aweme/v1/web/comment/list/", {
+    ...client.query(),
+    aweme_id: awemeId,
+    count: PAGE_SIZE,
+    cursor,
+    cut_version: "1",
+    insert_ids: "",
+    item_type: "0",
+    rcFT: "",
+    whale_cut_token: "",
+  });
+  return normalizePage(payload);
+}
+
+async function normalizeCommentWithReplies(
+  client: DouyinWebClient,
+  awemeId: string,
+  item: Record<string, unknown>,
+): Promise<DouyinComment> {
+  const comment = normalizeComment(item);
+  if (comment.replyCount <= 0) return comment;
+
+  const payload = await client.request("/aweme/v1/web/comment/list/reply/", {
+    ...client.query(),
+    comment_id: comment.id,
+    count: PAGE_SIZE,
+    cursor: 0,
+    item_id: awemeId,
+  });
+  const page = normalizePage(payload);
+  return {
+    ...comment,
+    replies: page.items.map(normalizeReply).filter((reply) => reply.id),
+    replyPageHasMore: page.hasMore,
+  };
+}
+
+function normalizeComment(item: Record<string, unknown>): DouyinComment {
+  return {
+    author: normalizeAuthor(readRecord(item.user)),
+    id: readIdentifier(item.cid, item.comment_id),
+    likeCount: readInteger(item.digg_count, item.like_count),
+    publishedAt: readTimestamp(item.create_time, item.ctime),
+    replies: [],
+    replyCount: readInteger(item.reply_comment_total, item.reply_count),
+    replyPageHasMore: false,
+    text: readString(item.text, item.content),
+  };
+}
+
+function normalizeReply(item: Record<string, unknown>): DouyinCommentReply {
+  return {
+    author: normalizeAuthor(readRecord(item.user)),
+    id: readIdentifier(item.cid, item.comment_id),
+    likeCount: readInteger(item.digg_count, item.like_count),
+    publishedAt: readTimestamp(item.create_time, item.ctime),
+    text: readString(item.text, item.content),
+  };
+}
+
+function normalizeAuthor(user: Record<string, unknown>): DouyinCommentAuthor {
+  return {
+    id: readIdentifier(user.sec_uid, user.secUid, user.uid, user.id),
+    name: readString(user.nickname, user.name) || "抖音用户",
+  };
+}
+
+function normalizePage(payload: Record<string, unknown>): PagedComments {
+  const root = readRecord(payload.data, payload);
+  const items = Array.isArray(root.comments)
+    ? root.comments.map(readRecord).filter((item) => Object.keys(item).length > 0)
+    : [];
+  return {
+    hasMore: readBoolean(root.has_more),
+    items,
+    nextCursor: readInteger(root.cursor, root.max_cursor),
+  };
+}
+
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index]);
+      }
+    },
+  ));
+  return results;
+}
+
+function readRecord(value: unknown, fallback: unknown = {}): Record<string, unknown> {
+  const selected = value ?? fallback;
+  return selected && typeof selected === "object" && !Array.isArray(selected)
+    ? selected as Record<string, unknown>
+    : {};
+}
+
+function readString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function readIdentifier(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  }
+  return "";
+}
+
+function readInteger(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.max(0, Math.trunc(parsed));
+  }
+  return 0;
+}
+
+function readTimestamp(...values: unknown[]): number {
+  const value = readInteger(...values);
+  return value > 0 && value < 10_000_000_000 ? value * 1_000 : value;
+}
+
+function readBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === "1";
+}

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { authJson, EmailSchema, errorJson } from "@/app/api/auth/_shared";
 import { EmailRateLimitError, sendEmailCode } from "@/lib/auth/email";
 import { AuthError, emailExists } from "@/lib/auth/service";
+import { enforceAuthRateLimits, readClientAddress } from "@/lib/auth/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,13 @@ export async function POST(request: Request) {
     if (!parsed.success) {
       throw new AuthError("请输入有效邮箱。");
     }
+
+    await enforceAuthRateLimits([{
+      limit: 20,
+      scope: "auth-email-send-ip",
+      subject: readClientAddress(request),
+      windowSeconds: 60 * 60,
+    }]);
 
     const email = parsed.data.email.toLowerCase();
     const purpose = parsed.data.purpose;

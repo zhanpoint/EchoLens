@@ -9,6 +9,7 @@ export type ExtractionStatus =
   | "success"
   | "unavailable"
   | "not_configured"
+  | "no_speech"
   | "error";
 export type ExtractionSource = "dashscope" | "detail";
 export type MediaAssetKind = (typeof MEDIA_ASSET_KINDS)[number];
@@ -21,15 +22,19 @@ export type TranscriptSegment = {
   text: string;
 };
 
-export type ResolvedDouyinWork = {
+export type DouyinWorkIdentity = {
   inputUrl: string;
   finalUrl: string;
   kind: DouyinKind;
   id: string;
+};
+
+export type ResolvedDouyinWork = DouyinWorkIdentity & {
   authorName?: string;
+  authorAvatarUrl?: string;
   authorUrl?: string;
+  caption: string;
   durationSeconds?: number;
-  title?: string;
 };
 
 export type ExtractionResult = {

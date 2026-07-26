@@ -1,19 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { Readable } from "node:stream";
 import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/douyin/detail";
 import { estimateMediaProcessingDurationSeconds } from "../lib/douyin/cache-estimate";
-import { buildMediaDownloadPath, isSupportedMediaUrl } from "../lib/douyin/download";
 import {
-  downloadRemoteMediaToCachedFile,
-  downloadRemoteMediaToFile,
-  prepareMediaCacheForWork,
-  prepareTranscribableAudioFromCachedMedia,
+  createTranscribableAudioFileFromNode,
+  probeTranscribableAudioFromUrl,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
 } from "../lib/media/audio";
@@ -26,6 +21,10 @@ afterEach(() => {
   delete process.env.DOUYIN_USER_AGENT;
   delete process.env.FFMPEG_PATH;
 });
+
+function redirectTo(location: string): Response {
+  return new Response(null, { status: 302, headers: { location } });
+}
 
 function sharePageHtml(videoInfoRes: unknown): string {
   return `<html><body><script>window._ROUTER_DATA = ${JSON.stringify({
@@ -107,6 +106,65 @@ describe("douyin url utilities", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("follows at most three redirects", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-2/"))
+      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-3/"))
+      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-4/"));
+
+    await expect(resolveDouyinInput("https://v.douyin.com/step-1/"))
+      .rejects.toMatchObject({ code: "too_many_redirects" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("accepts a video reached by the third redirect", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-2/"))
+      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-3/"))
+      .mockResolvedValueOnce(redirectTo("https://www.douyin.com/video/7637528968758324707"));
+
+    await expect(resolveDouyinInput("https://v.douyin.com/step-1/"))
+      .resolves.toMatchObject({
+        finalUrl: "https://www.douyin.com/video/7637528968758324707",
+        id: "7637528968758324707",
+        kind: "video",
+      });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries network failures five times with exponential backoff", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed"));
+
+    const task = resolveDouyinInput("https://v.douyin.com/network-failure/");
+    const result = expect(task).rejects.toMatchObject({
+      code: "network_error",
+      message: "网络连接失败，请检查网络后重试。",
+    });
+    await vi.advanceTimersByTimeAsync(7_500);
+
+    await result;
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("reports exhausted server retries as a network problem", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("temporary failure", { status: 503 }));
+
+    const task = resolveDouyinInput("https://v.douyin.com/server-failure/");
+    const result = expect(task).rejects.toMatchObject({
+      code: "network_error",
+      message: "网络连接失败，请检查网络后重试。",
+    });
+    await vi.advanceTimersByTimeAsync(7_500);
+
+    await result;
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
   it("labels transcript results", () => {
     expect(getFeatureLabel("audioTranscript")).toBe("转录文本");
   });
@@ -124,11 +182,13 @@ describe("douyin url utilities", () => {
           {
             aweme_id: "7641820631017536443",
             author: {
+              avatar_thumb: { url_list: ["https://example.com/share-avatar.jpg"] },
               nickname: "分享作者",
               sec_uid: "MS4wLjABAAAA-share",
             },
             desc: "分享页文案",
             video: {
+              duration: 90_000,
               cover: {
                 url_list: ["https://example.com/share-cover.jpg"],
               },
@@ -160,6 +220,36 @@ describe("douyin url utilities", () => {
     );
   });
 
+  it("stops after one detail interface when the share payload is complete", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(sharePageHtml({
+      item_list: [{
+        author: {
+          avatar_thumb: { url_list: ["https://example.com/avatar.jpg"] },
+          nickname: "完整作者",
+        },
+        desc: "完整标题",
+        video: {
+          duration: 90_000,
+          cover: { url_list: ["https://example.com/cover.jpg"] },
+          play_addr: { url_list: ["https://example.com/video.mp4"] },
+        },
+      }],
+    })));
+
+    await expect(collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7641820631017536444",
+      id: "7641820631017536444",
+      kind: "video",
+    })).resolves.toMatchObject({
+      authorName: "完整作者",
+      authorAvatarUrls: ["https://example.com/avatar.jpg"],
+      caption: "完整标题",
+      coverUrls: ["https://example.com/cover.jpg"],
+      videoUrls: ["https://example.com/video.mp4"],
+    });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("parses author metadata from douyin detail payloads", () => {
     expect(
       parseWorkMetadata(
@@ -180,97 +270,24 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("falls back to the alternate detail request when the primary response has no aweme detail", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("<!doctype html><html></html>"))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ status_code: 0 })))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            aweme_detail: {
-              author: {
-                nickname: "生产作者",
-                sec_uid: "MS4wLjABAAAA-prod",
-              },
-              caption: "生产文案",
-            },
-          }),
-        ),
-      );
-
-    await expect(
-      collectWorkMetadata({
-        finalUrl: "https://www.douyin.com/video/7652577724216692002",
-        id: "7652577724216692002",
-        kind: "video",
-      }),
-    ).resolves.toMatchObject({
-      authorName: "生产作者",
-      caption: "生产文案",
-    });
-
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toBe(
-      "https://www.douyin.com/share/video/7652577724216692002",
-    );
-    expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=6383");
-    expect(String(vi.mocked(globalThis.fetch).mock.calls[2][0])).toContain("aid=1128");
-  });
-
-  it("merges partial detail payloads instead of returning metadata without media", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("<!doctype html><html></html>"))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            aweme_detail: {
-              author: { nickname: "间歇作者" },
-              desc: "只有文案的响应",
-            },
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            aweme_detail: {
-              video: {
-                play_addr: {
-                  url_list: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
-                },
-              },
-            },
-          }),
-        ),
-      );
-
-    await expect(
-      collectWorkMetadata({
-        finalUrl: "https://www.douyin.com/video/7634410673426280674",
-        id: "7634410673426280674",
-        kind: "video",
-      }),
-    ).resolves.toMatchObject({
-      authorName: "间歇作者",
-      caption: "只有文案的响应",
-      videoUrls: ["https://example.com/video-primary.mp4", "https://example.com/video-backup.mp4"],
-    });
-  });
-
-  it("keeps metadata requests anonymous even when browser cookie env is present", async () => {
+  it("keeps the single SSR metadata request anonymous", async () => {
     process.env.DOUYIN_COOKIE = "sessionid=prod-session";
     process.env.DOUYIN_USER_AGENT = "Browser UA from a local session";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          aweme_detail: {
-            author: {
-              nickname: "Cookie 作者",
-            },
-          },
-        }),
-      ),
-    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(sharePageHtml({
+      item_list: [{
+        aweme_id: "7652577724216692002",
+        author: {
+          avatar_thumb: { url_list: ["https://example.com/avatar.jpg"] },
+          nickname: "匿名作者",
+        },
+        desc: "匿名采集",
+        video: {
+          duration: 90_000,
+          cover: { url_list: ["https://example.com/cover.jpg"] },
+          play_addr: { url_list: ["https://example.com/video.mp4"] },
+        },
+      }],
+    })));
 
     await collectWorkMetadata({
       finalUrl: "https://www.douyin.com/video/7652577724216692002",
@@ -278,13 +295,13 @@ describe("douyin url utilities", () => {
       kind: "video",
     });
 
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      expect.any(String),
+      "https://www.douyin.com/share/video/7652577724216692002",
       expect.objectContaining({
         cache: "no-store",
         headers: expect.objectContaining({
-          referer: "https://www.douyin.com/video/7652577724216692002",
-          "user-agent": expect.stringContaining("Chrome/122"),
+          "user-agent": expect.stringContaining("Mobile"),
         }),
       }),
     );
@@ -432,31 +449,6 @@ describe("douyin url utilities", () => {
     expect(estimateMediaProcessingDurationSeconds(undefined)).toBeNull();
   });
 
-  it("builds canonical media download paths", () => {
-    const work = {
-      id: "7649250336875613449",
-      kind: "video" as const,
-    };
-
-    expect(buildMediaDownloadPath(work, "originalAudio")).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio",
-    );
-    expect(buildMediaDownloadPath(work, "cover", { preview: true })).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=cover&preview=1",
-    );
-    expect(buildMediaDownloadPath(work, "video", { preview: true })).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=video&preview=1",
-    );
-    expect(buildMediaDownloadPath(work, "originalAudio", { preview: true })).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio&preview=1",
-    );
-    expect(buildMediaDownloadPath(work, "originalAudio", { cacheRunId: "run-1" })).toBe(
-      "/api/douyin/download?id=7649250336875613449&kind=video&asset=originalAudio&cacheRunId=run-1",
-    );
-    expect(isSupportedMediaUrl("https://lf3-cdn-tos.douyinstatic.com/obj/example.mp4")).toBe(true);
-    expect(isSupportedMediaUrl("https://example-unknown-cdn.com/media.m4a")).toBe(true);
-    expect(isSupportedMediaUrl("http://example.com/unsafe.mp4")).toBe(false);
-  });
 });
 
 describe("audio transcription preparation", () => {
@@ -470,347 +462,26 @@ describe("audio transcription preparation", () => {
     expect(resolveFfmpegPath()).toBe("/usr/local/bin/ffmpeg");
   });
 
-  it("extracts audio from a completed cached media file", async () => {
+  it("creates a finalized m4a file that can be decoded", { timeout: 15_000 }, async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const sourceAudioPath = path.join(tempDir, "tone.m4a");
+    const sourcePath = path.join(tempDir, "tone.m4a");
 
     try {
       await runFfmpeg(resolveBundledFfmpegPath(), [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=0.1",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "96k",
-        sourceAudioPath,
+        "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1", "-c:a", "aac", sourcePath,
       ]);
-      const source = await fs.readFile(sourceAudioPath);
-      let referer = "";
-      let requestCount = 0;
-      let userAgent = "";
-      const server = createServer((request, response) => {
-        requestCount += 1;
-        referer = request.headers.referer ?? "";
-        userAgent = request.headers["user-agent"] ?? "";
-        response.writeHead(200, {
-          "content-length": String(source.byteLength),
-          "content-type": "audio/mp4",
-        });
-        response.end(source);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
-      });
-
+      const source = await fs.readFile(sourcePath);
+      const audio = await createTranscribableAudioFileFromNode(Readable.from(source));
       try {
-        const { port } = server.address() as AddressInfo;
-        const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
-        const userA = "user-a";
-        const userB = "user-b";
-        const mediaCacheKey = "video:7644929016692636809:video";
-        await prepareMediaCacheForWork(userA, "video:7644929016692636809");
-        const cachedMedia = await downloadRemoteMediaToCachedFile(userA, mediaUrl, { cacheKey: mediaCacheKey });
-        const audio = await prepareTranscribableAudioFromCachedMedia(userA, mediaCacheKey);
-        const audioCachePath = path.join(
-          os.tmpdir(),
-          "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userA, "stable", mediaCacheKey])).digest("hex")}.m4a`,
-        );
-        const otherUserAudioCachePath = path.join(
-          os.tmpdir(),
-          "echolens-audio-cache",
-          `${createHash("sha256").update(JSON.stringify([userB, "stable", mediaCacheKey])).digest("hex")}.m4a`,
-        );
-        const audioMtime = (await fs.stat(audioCachePath)).mtimeMs;
-        await prepareMediaCacheForWork(userA, "video:7644929016692636809");
-        await prepareTranscribableAudioFromCachedMedia(userA, mediaCacheKey);
-
-        expect(referer).toBe("https://www.douyin.com/");
-        expect(userAgent).toContain("Mozilla/5.0");
+        await expect(probeTranscribableAudioFromUrl(audio.filePath)).resolves.toBeUndefined();
         expect(audio.contentType).toBe("audio/mp4");
-        expect(path.extname(audio.filePath)).toBe(".m4a");
         expect(audio.durationSeconds).toBeGreaterThan(0);
-        expect(audio.sizeBytes).toBeGreaterThan(0);
-        await expect(fs.readFile(cachedMedia.filePath)).resolves.toEqual(source);
-        expect((await fs.stat(audioCachePath)).mtimeMs).toBe(audioMtime);
-        expect(requestCount).toBe(1);
-
-        await prepareMediaCacheForWork(userB, "video:7644929016692636809");
-        await downloadRemoteMediaToCachedFile(userB, mediaUrl, { cacheKey: mediaCacheKey });
-        await prepareTranscribableAudioFromCachedMedia(userB, mediaCacheKey);
-        expect(requestCount).toBe(2);
-
-        await prepareMediaCacheForWork(userA, "video:7644929016692636810");
-        await expect(fs.stat(audioCachePath)).rejects.toThrow();
-        await expect(fs.stat(otherUserAudioCachePath)).resolves.toBeTruthy();
+        expect(audio.sizeBytes).toBe((await fs.stat(audio.filePath)).size);
       } finally {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => error ? reject(error) : resolve());
-        });
+        await audio.cleanup();
       }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("resumes partially downloaded remote media files", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const partialPath = path.join(tempDir, "partial.bin");
-
-    try {
-      const source = Buffer.from("0123456789".repeat(1024));
-      const firstChunkSize = Math.floor(source.byteLength / 2);
-      let resumedRange = "";
-      await fs.writeFile(partialPath, source.subarray(0, firstChunkSize));
-      const server = createServer((request, response) => {
-        resumedRange = request.headers.range ?? "";
-        if (!resumedRange) {
-          response.writeHead(416);
-          response.end();
-          return;
-        }
-
-        const start = Number(resumedRange.match(/^bytes=(\d+)-$/)?.[1] ?? 0);
-        response.writeHead(206, {
-          "content-length": String(source.byteLength - start),
-          "content-range": `bytes ${start}-${source.byteLength - 1}/${source.byteLength}`,
-          "content-type": "application/octet-stream",
-        });
-        response.end(source.subarray(start));
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
-      });
-
-      try {
-        const { port } = server.address() as AddressInfo;
-        await downloadRemoteMediaToFile(`http://127.0.0.1:${port}/video.mp4`, partialPath);
-        const output = await fs.readFile(partialPath);
-
-        expect(resumedRange).toBe(`bytes=${firstChunkSize}-`);
-        expect(output.equals(source)).toBe(true);
-      } finally {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => error ? reject(error) : resolve());
-        });
-      }
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("restarts a partial media download when the upstream CDN ignores range requests", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const outputPath = path.join(tempDir, "partial.bin");
-    const source = Buffer.from("complete-media-after-range-reset");
-    const firstChunkSize = 8;
-    const ranges: string[] = [];
-
-    try {
-      await fs.writeFile(outputPath, source.subarray(0, firstChunkSize));
-      const server = createServer((request, response) => {
-        ranges.push(request.headers.range ?? "");
-        response.writeHead(200, {
-          "content-length": String(source.byteLength),
-          "content-type": "video/mp4",
-        });
-        response.end(source);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
-      });
-
-      try {
-        const { port } = server.address() as AddressInfo;
-        await downloadRemoteMediaToFile(`http://127.0.0.1:${port}/video.mp4`, outputPath);
-
-        await expect(fs.readFile(outputPath)).resolves.toEqual(source);
-        expect(ranges).toEqual([`bytes=${firstChunkSize}-`, ""]);
-      } finally {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => error ? reject(error) : resolve());
-        });
-      }
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("falls back to the next media url when the primary CDN url fails", async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-audio-test-"));
-    const outputPath = path.join(tempDir, "media.bin");
-    const source = Buffer.from("stable-backup-media");
-
-    try {
-      const server = createServer((request, response) => {
-        if (request.url === "/primary.mp4") {
-          response.writeHead(503);
-          response.end();
-          return;
-        }
-
-        response.writeHead(200, {
-          "content-length": String(source.byteLength),
-          "content-type": "video/mp4",
-        });
-        response.end(source);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
-      });
-
-      try {
-        const { port } = server.address() as AddressInfo;
-        await downloadRemoteMediaToFile(
-          [
-            `http://127.0.0.1:${port}/primary.mp4`,
-            `http://127.0.0.1:${port}/backup.mp4`,
-          ],
-          outputPath,
-        );
-
-        await expect(fs.readFile(outputPath)).resolves.toEqual(source);
-      } finally {
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => error ? reject(error) : resolve());
-        });
-      }
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("reuses an in-flight media cache task when the same work starts a new cache run", async () => {
-    const firstChunk = Buffer.from("partial-");
-    const secondChunk = Buffer.from("complete");
-    const source = Buffer.concat([firstChunk, secondChunk]);
-    let closeFirstResponse: (() => void) | undefined;
-    let resolveFirstRequestSeen!: () => void;
-    let resolveFirstConnectionClosed!: () => void;
-    let requestCount = 0;
-
-    const firstRequestSeen = new Promise<void>((resolve) => {
-      resolveFirstRequestSeen = resolve;
-    });
-    const firstConnectionClosed = new Promise<void>((resolve) => {
-      resolveFirstConnectionClosed = resolve;
-    });
-    const server = createServer((request, response) => {
-      requestCount += 1;
-      resolveFirstRequestSeen();
-      response.writeHead(200, {
-        "content-length": String(source.byteLength),
-        "content-type": "video/mp4",
-      });
-      response.write(firstChunk);
-      request.on("close", resolveFirstConnectionClosed);
-      closeFirstResponse = () => response.end(secondChunk);
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
-
-    try {
-      const { port } = server.address() as AddressInfo;
-      const userId = "same-work-run-user";
-      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
-      await prepareMediaCacheForWork(userId, "video:same-work-run", "run-1");
-      const first = downloadRemoteMediaToCachedFile(userId, mediaUrl);
-      await firstRequestSeen;
-      await prepareMediaCacheForWork(userId, "video:same-work-run", "run-2");
-      const second = downloadRemoteMediaToCachedFile(userId, mediaUrl);
-      closeFirstResponse?.();
-
-      const [firstCached, secondCached] = await Promise.all([first, second]);
-      expect(secondCached.filePath).toBe(firstCached.filePath);
-      expect(requestCount).toBe(1);
-      await expect(fs.readFile(firstCached.filePath)).resolves.toEqual(source);
-      await firstConnectionClosed;
-    } finally {
-      closeFirstResponse?.();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  });
-
-  it("reuses completed cached media across cache runs", async () => {
-    const source = Buffer.from("already-cached-media");
-    let requestCount = 0;
-    const server = createServer((request, response) => {
-      requestCount += 1;
-      response.writeHead(200, {
-        "content-length": String(source.byteLength),
-        "content-type": "video/mp4",
-      });
-      response.end(source);
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
-
-    try {
-      const { port } = server.address() as AddressInfo;
-      const userId = "cache-hit-user";
-      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
-      await prepareMediaCacheForWork(userId, "video:cache-hit", "run-1");
-      const first = await downloadRemoteMediaToCachedFile(userId, mediaUrl);
-      await prepareMediaCacheForWork(userId, "video:cache-hit", "run-2");
-      const second = await downloadRemoteMediaToCachedFile(userId, mediaUrl);
-
-      expect(second.filePath).toBe(first.filePath);
-      expect(requestCount).toBe(1);
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  });
-
-  it("clears completed cached media only when the user switches to a different work", async () => {
-    const source = Buffer.from("single-work-cache");
-    const server = createServer((request, response) => {
-      response.writeHead(200, {
-        "content-length": String(source.byteLength),
-        "content-type": "video/mp4",
-      });
-      response.end(source);
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
-
-    try {
-      const { port } = server.address() as AddressInfo;
-      const userId = "switch-work-user";
-      const mediaUrl = `http://127.0.0.1:${port}/video.mp4`;
-      await prepareMediaCacheForWork(userId, "video:first", "run-1");
-      const first = await downloadRemoteMediaToCachedFile(userId, mediaUrl);
-
-      await expect(fs.stat(first.filePath)).resolves.toBeTruthy();
-      await prepareMediaCacheForWork(userId, "video:second", "run-2");
-      await expect(fs.stat(first.filePath)).rejects.toThrow();
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
     }
   });
 

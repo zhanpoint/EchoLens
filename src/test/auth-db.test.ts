@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { insertUser } from "@/lib/auth/db";
+import {
+  clearAuthRateLimit,
+  consumeAuthRateLimit,
+  consumeEmailCode,
+  createSessionRow,
+  insertUser,
+  replaceEmailCode,
+  updateUserPasswordAndDeleteSessions,
+} from "@/lib/auth/db";
 import { AuthError, loginUser } from "@/lib/auth/service";
 import { hashPassword } from "@/lib/auth/password";
 import { getEmailError, getPasswordError, getUsernameError } from "@/lib/auth/policy";
@@ -89,6 +97,54 @@ describe("auth postgres timestamps", () => {
   });
 });
 
+describe("auth abuse controls", () => {
+  it("blocks an email code after the atomic attempt limit", async () => {
+    await replaceEmailCode({
+      codeHash: "correct-hash",
+      email: "reader@example.com",
+      expiresAt: Date.now() + 60_000,
+      id: "code-limit",
+      purpose: "login",
+    });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(consumeEmailCode({
+        codeHash: "wrong-hash",
+        email: "reader@example.com",
+        maxAttempts: 5,
+        purpose: "login",
+      })).resolves.toBe(false);
+    }
+    await expect(consumeEmailCode({
+      codeHash: "correct-hash",
+      email: "reader@example.com",
+      maxAttempts: 5,
+      purpose: "login",
+    })).resolves.toBe(false);
+  });
+
+  it("counts rate-limit attempts atomically and supports explicit reset", async () => {
+    const input = { limit: 2, scope: "test-login", subjectHash: "subject", windowSeconds: 60 };
+    await expect(consumeAuthRateLimit(input)).resolves.toMatchObject({ allowed: true });
+    await expect(consumeAuthRateLimit(input)).resolves.toMatchObject({ allowed: true });
+    await expect(consumeAuthRateLimit(input)).resolves.toMatchObject({ allowed: false });
+    await clearAuthRateLimit(input.scope, input.subjectHash);
+    await expect(consumeAuthRateLimit(input)).resolves.toMatchObject({ allowed: true });
+  });
+
+  it("revokes every session when a password is reset", async () => {
+    await insertUser({
+      email: "reset@example.com",
+      id: "reset-user",
+      passwordHash: "old-hash",
+      termsAcceptedAt: Date.now(),
+      username: "reset-user",
+    });
+    await createSessionRow({ expiresAt: Date.now() + 60_000, tokenHash: "session-token", userId: "reset-user" });
+    await updateUserPasswordAndDeleteSessions("reset-user", "new-hash");
+    await expect(queryRow("SELECT token_hash FROM sessions WHERE user_id = $1", ["reset-user"])).resolves.toBeUndefined();
+  });
+});
+
 describe("auth password login errors", () => {
   it("distinguishes missing accounts from wrong passwords", async () => {
     await insertUser({
@@ -104,8 +160,8 @@ describe("auth password login errors", () => {
       identifier: "missing@example.com",
       password: "Aa123456!",
     })).rejects.toMatchObject({
-      code: "EMAIL_NOT_FOUND",
-      message: "该邮箱尚未注册，请先注册账号。",
+      code: "INVALID_CREDENTIALS",
+      message: "账号或密码错误。",
       status: 401,
     } satisfies Partial<AuthError>);
 
@@ -114,8 +170,8 @@ describe("auth password login errors", () => {
       identifier: "missing-user",
       password: "Aa123456!",
     })).rejects.toMatchObject({
-      code: "USERNAME_NOT_FOUND",
-      message: "该用户名不存在，请检查后重试。",
+      code: "INVALID_CREDENTIALS",
+      message: "账号或密码错误。",
       status: 401,
     } satisfies Partial<AuthError>);
 
@@ -124,8 +180,8 @@ describe("auth password login errors", () => {
       identifier: "reader@example.com",
       password: "Wrong123!",
     })).rejects.toMatchObject({
-      code: "INVALID_PASSWORD",
-      message: "密码错误，请重新输入，或使用“忘记密码”重置。",
+      code: "INVALID_CREDENTIALS",
+      message: "账号或密码错误。",
       status: 401,
     } satisfies Partial<AuthError>);
 

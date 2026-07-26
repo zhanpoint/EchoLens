@@ -197,6 +197,7 @@ export function DouyinFavoritesPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [selectedGroupId, setSelectedGroupId] = useState("");
   const [followFilter, setFollowFilter] = useState<"all" | "followed" | "not-followed">("all");
   const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
   const [displayMode, setDisplayMode] = useState<DisplayMode>("paginated");
@@ -302,9 +303,17 @@ export function DouyinFavoritesPage() {
     }
   }
 
+  const selectedGroup = activeCategory === "folders"
+    ? folders.find((folder) => folder.id === selectedGroupId)
+    : activeCategory === "mixes"
+      ? mixes.find((mix) => mix.id === selectedGroupId)
+      : undefined;
+  const showsVideoControls = activeCategory === "videos" || Boolean(selectedGroup);
+  const videoSource = selectedGroup?.works ?? videos;
+
   const filteredVideos = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase();
-    const filtered = videos.filter((video) => {
+    const filtered = videoSource.filter((video) => {
       if (followFilter === "followed" && !video.isFollowing) {
         return false;
       }
@@ -314,7 +323,7 @@ export function DouyinFavoritesPage() {
       return !keyword || `${video.author}\n${video.title}`.toLocaleLowerCase().includes(keyword);
     });
     return filtered.sort((a, b) => comparePublishedAt(a, b, sortOrder));
-  }, [followFilter, query, sortOrder, videos]);
+  }, [followFilter, query, sortOrder, videoSource]);
 
   const authorByKey = useMemo(
     () => new Map(
@@ -332,11 +341,11 @@ export function DouyinFavoritesPage() {
     (currentPage - 1) * PAGE_SIZE,
     currentPage * PAGE_SIZE,
   );
-  const searchPlaceholder = activeCategory === "folders"
-    ? "搜索收藏夹或作品"
-    : activeCategory === "mixes"
-      ? "搜索合集或作品"
-      : "搜索作者或标题";
+  const searchPlaceholder = showsVideoControls
+    ? "搜索作者或标题"
+    : activeCategory === "folders"
+      ? "搜索收藏夹名称"
+      : "搜索合集名称";
 
   return (
     <main className="min-h-dvh w-full bg-background text-foreground lg:h-dvh lg:overflow-hidden">
@@ -380,6 +389,7 @@ export function DouyinFavoritesPage() {
                 counts={{ folders: folders.length, mixes: mixes.length, videos: videos.length }}
                 onChange={(category) => {
                   setActiveCategory(category);
+                  setSelectedGroupId("");
                   setQuery("");
                   setPage(1);
                 }}
@@ -411,7 +421,7 @@ export function DouyinFavoritesPage() {
                     </button>
                   ) : null}
                 </label>
-                {activeCategory === "videos" ? (
+                {showsVideoControls ? (
                   <div className="grid grid-cols-2 gap-5 rounded-md bg-white/[0.035] px-2 py-1.5">
                     <FilterSelectRow
                       label="关注状态："
@@ -444,7 +454,7 @@ export function DouyinFavoritesPage() {
                 ) : null}
               </section>
 
-              {activeCategory === "videos" ? (
+              {showsVideoControls ? (
                 <section className="flex min-w-0 items-center justify-between gap-3 sm:col-span-2 lg:col-span-1">
                   <h2 className="shrink-0 text-xs font-normal text-cyan">显示方式</h2>
                   <div className="grid w-32 grid-cols-2 rounded-full bg-white/[0.045] p-0.5" role="group" aria-label="显示方式">
@@ -484,35 +494,66 @@ export function DouyinFavoritesPage() {
 
             <div className="min-h-[22rem] flex-1 overflow-hidden lg:min-h-0">
               {isLoading || isRefreshing ? (
-                activeCategory === "videos" ? <FavoritesSkeleton /> : <GroupsSkeleton />
+                showsVideoControls ? <FavoritesSkeleton /> : <GroupsSkeleton />
               ) : activeCategory === "folders" ? (
-                <FavoriteGroups key="folders" authors={authors} groups={folders} kind="folder" query={query} />
+                <FavoriteGroups
+                  groups={folders}
+                  kind="folder"
+                  query={query}
+                  selectedId={selectedGroupId}
+                  onSelectedIdChange={(id) => {
+                    setSelectedGroupId(id);
+                    setQuery("");
+                    setPage(1);
+                  }}
+                >
+                  {selectedGroup ? (
+                    <FavoritesVideoList
+                      authorByKey={authorByKey}
+                      displayMode={displayMode}
+                      hasFilters={Boolean(query || followFilter !== "all")}
+                      pageVideos={pageVideos}
+                      videos={filteredVideos}
+                      virtualKey={`${selectedGroup.id}\u0000${followFilter}\u0000${query}\u0000${sortOrder}\u0000${dataVersion}`}
+                    />
+                  ) : null}
+                </FavoriteGroups>
               ) : activeCategory === "mixes" ? (
-                <FavoriteGroups key="mixes" authors={authors} groups={mixes} kind="mix" query={query} />
-              ) : filteredVideos.length ? (
-                displayMode === "virtual" ? (
-                  <VirtualFavoritesList
-                    key={`${followFilter}\u0000${query}\u0000${sortOrder}\u0000${dataVersion}`}
-                    authorByKey={authorByKey}
-                    videos={filteredVideos}
-                  />
-                ) : (
-                  <div className="content-scroll h-full overflow-y-auto">
-                    {pageVideos.map((video) => (
-                      <FavoriteWorkRow
-                        key={video.url}
-                        author={authorByKey.get(video.authorId || video.author)}
-                        video={video}
-                      />
-                    ))}
-                  </div>
-                )
+                <FavoriteGroups
+                  groups={mixes}
+                  kind="mix"
+                  query={query}
+                  selectedId={selectedGroupId}
+                  onSelectedIdChange={(id) => {
+                    setSelectedGroupId(id);
+                    setQuery("");
+                    setPage(1);
+                  }}
+                >
+                  {selectedGroup ? (
+                    <FavoritesVideoList
+                      authorByKey={authorByKey}
+                      displayMode={displayMode}
+                      hasFilters={Boolean(query || followFilter !== "all")}
+                      pageVideos={pageVideos}
+                      videos={filteredVideos}
+                      virtualKey={`${selectedGroup.id}\u0000${followFilter}\u0000${query}\u0000${sortOrder}\u0000${dataVersion}`}
+                    />
+                  ) : null}
+                </FavoriteGroups>
               ) : (
-                <EmptyState hasFilters={Boolean(query || followFilter !== "all")} />
+                <FavoritesVideoList
+                  authorByKey={authorByKey}
+                  displayMode={displayMode}
+                  hasFilters={Boolean(query || followFilter !== "all")}
+                  pageVideos={pageVideos}
+                  videos={filteredVideos}
+                  virtualKey={`${followFilter}\u0000${query}\u0000${sortOrder}\u0000${dataVersion}`}
+                />
               )}
             </div>
 
-            {activeCategory === "videos" && displayMode === "paginated" && filteredVideos.length ? (
+            {showsVideoControls && displayMode === "paginated" && filteredVideos.length ? (
               <div className="mt-3 flex shrink-0 justify-end">
                 <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
               </div>
@@ -651,6 +692,46 @@ function Pagination({
   );
 }
 
+function FavoritesVideoList({
+  authorByKey,
+  displayMode,
+  hasFilters,
+  pageVideos,
+  videos,
+  virtualKey,
+}: {
+  authorByKey: ReadonlyMap<string, DouyinFavoriteAuthor>;
+  displayMode: DisplayMode;
+  hasFilters: boolean;
+  pageVideos: DouyinFavoriteVideo[];
+  videos: DouyinFavoriteVideo[];
+  virtualKey: string;
+}) {
+  if (!videos.length) {
+    return <EmptyState hasFilters={hasFilters} />;
+  }
+  if (displayMode === "virtual") {
+    return (
+      <VirtualFavoritesList
+        key={virtualKey}
+        authorByKey={authorByKey}
+        videos={videos}
+      />
+    );
+  }
+  return (
+    <div className="content-scroll h-full overflow-y-auto">
+      {pageVideos.map((video) => (
+        <FavoriteWorkRow
+          key={video.url}
+          author={authorByKey.get(video.authorId || video.author)}
+          video={video}
+        />
+      ))}
+    </div>
+  );
+}
+
 function VirtualFavoritesList({
   authorByKey,
   videos,
@@ -737,8 +818,8 @@ function GroupsSkeleton() {
             <div className="h-4 w-28 rounded-sm bg-white/10" />
             <div className="h-3 w-14 rounded-sm bg-white/[0.08]" />
           </div>
-          <div className="mt-4 grid grid-cols-6 gap-2">
-            {Array.from({ length: 6 }, (_, coverIndex) => (
+          <div className="mt-4 grid grid-cols-5 gap-2">
+            {Array.from({ length: 5 }, (_, coverIndex) => (
               <div key={coverIndex} className="aspect-square rounded-md bg-white/[0.08]" />
             ))}
           </div>

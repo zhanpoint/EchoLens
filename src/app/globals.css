@@ -524,18 +524,8 @@ body::-webkit-scrollbar-button {
 .audio-cache-progress-fill {
   transform: scaleX(var(--audio-cache-progress, 0.01));
   transform-origin: left center;
-  animation: echolens-audio-cache-progress linear forwards;
+  transition: transform 240ms linear;
   will-change: transform;
-}
-
-@keyframes echolens-audio-cache-progress {
-  from {
-    transform: scaleX(0.01);
-  }
-
-  to {
-    transform: scaleX(0.99);
-  }
 }
 
 .light-rays {

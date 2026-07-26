@@ -11,7 +11,7 @@ services:
       - echolens-postgres:/var/lib/postgresql/data
     ports:
       - target: 5432
-        published: "5432"
+        published: "${POSTGRES_PORT:-5432}"
         host_ip: 0.0.0.0
         protocol: tcp
     healthcheck:

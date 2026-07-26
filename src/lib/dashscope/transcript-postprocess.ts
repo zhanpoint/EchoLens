@@ -1,10 +1,10 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   buildTranscriptPostprocessPrompt,
   type TimestampedPromptSegment,
 } from "@/lib/ai/prompts";
-import { streamQwenChat } from "@/lib/dashscope/chat";
+import { streamDashScopeChat } from "@/lib/dashscope/chat";
+import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
 import type { TranscriptSegment } from "@/types/douyin";
 
 type PostprocessedSegmentText = {
@@ -12,38 +12,27 @@ type PostprocessedSegmentText = {
   text: string;
 };
 
-export type TranscriptPostprocessOptions = {
-  thinkingEnabled?: boolean;
-  title?: string;
-};
+export const TRANSCRIPT_POSTPROCESS_VERSION = "transcript-postprocess-v7";
 
-const transcriptPostprocessOptions = new AsyncLocalStorage<TranscriptPostprocessOptions>();
-
-export const TRANSCRIPT_POSTPROCESS_VERSION = "qwen-transcript-postprocess-v6";
-
-export function runWithTranscriptPostprocessOptions<T>(
-  options: TranscriptPostprocessOptions,
-  operation: () => Promise<T>,
-): Promise<T> {
-  return transcriptPostprocessOptions.run(options, operation);
-}
-
-export async function streamQwenTranscriptPostprocess(input: {
+export async function streamTranscriptPostprocess(input: {
+  apiKey?: string;
   content: string;
+  model?: string;
   segments?: TranscriptSegment[];
   signal?: AbortSignal;
+  title?: string;
 }): Promise<ProviderResult> {
   const promptSegments = buildPromptSegments(input);
   if (promptSegments.length === 0) {
     return { ok: false, code: "unavailable", detail: "没有可后处理的转录文本。" };
   }
 
-  const options = transcriptPostprocessOptions.getStore() ?? {};
-  const prompt = buildTranscriptPostprocessPrompt(promptSegments, options);
-  const result = await streamQwenChat({
+  const prompt = buildTranscriptPostprocessPrompt(promptSegments, { title: input.title });
+  const result = await streamDashScopeChat({
+    apiKey: input.apiKey,
+    model: input.model ?? DEFAULT_DASHSCOPE_MODELS.transcriptPostprocess,
     prompt,
     signal: input.signal,
-    thinkingEnabled: options.thinkingEnabled,
   });
   if (!result.ok) {
     return result;
@@ -75,7 +64,7 @@ function buildPostprocessedTranscript(
 ): ProviderResult {
   const texts = parsePostprocessedSegmentTexts(output, sourceSegments.length);
   if (!texts) {
-    return { ok: false, code: "error", detail: "Qwen 转录后处理返回格式无效，请重试。" };
+    return { ok: false, code: "invalid_response", detail: "转录后处理模型返回格式无效，请重试。" };
   }
 
   const transcriptSegments = sourceSegments
@@ -98,7 +87,7 @@ function buildPostprocessedTranscript(
   const content = joinPostprocessedTranscriptText(transcriptSegments);
 
   if (!content) {
-    return { ok: false, code: "unavailable", detail: "Qwen 转录后处理没有返回可用文本。" };
+    return { ok: false, code: "unavailable", detail: "转录后处理模型没有返回可用文本。" };
   }
 
   const emotions = [...new Set(transcriptSegments.map((segment) => segment.emotion).filter((emotion): emotion is string => Boolean(emotion)))];
@@ -112,35 +101,28 @@ function buildPostprocessedTranscript(
 }
 
 function parsePostprocessedSegmentTexts(output: string, expectedLength: number): PostprocessedSegmentText[] | null {
-  const jsonText = output.trim();
-  if (!jsonText) {
-    return null;
-  }
-
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(jsonText) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== expectedLength) {
-      return null;
-    }
-
-    const normalized = parsed.map((item): PostprocessedSegmentText | null => {
-      if (!item || typeof item !== "object") {
-        return null;
-      }
-      const record = item as Record<string, unknown>;
-      return typeof record.id === "number" && typeof record.text === "string"
-        ? { id: record.id, text: record.text }
-        : null;
-    });
-    if (normalized.some((item) => item === null)) {
-      return null;
-    }
-
-    const sorted = normalized as PostprocessedSegmentText[];
-    return sorted.every((item, index) => item.id === index) ? sorted : null;
+    parsed = JSON.parse(output);
   } catch {
     return null;
   }
+  if (!Array.isArray(parsed) || parsed.length !== expectedLength) {
+    return null;
+  }
+
+  const segments = parsed.map((item, index): PostprocessedSegmentText | null => {
+    if (!item || typeof item !== "object") {
+      return null;
+    }
+    const record = item as Record<string, unknown>;
+    return record.id === index && typeof record.text === "string"
+      ? { id: index, text: record.text }
+      : null;
+  });
+  return segments.some((item) => item === null)
+    ? null
+    : segments as PostprocessedSegmentText[];
 }
 
 function roundSeconds(value: number): number {
