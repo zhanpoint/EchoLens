@@ -160,9 +160,9 @@ describe("auth password login errors", () => {
       identifier: "missing@example.com",
       password: "Aa123456!",
     })).rejects.toMatchObject({
-      code: "INVALID_CREDENTIALS",
-      message: "账号或密码错误。",
-      status: 401,
+      code: "EMAIL_NOT_REGISTERED",
+      message: "邮箱未注册。",
+      status: 404,
     } satisfies Partial<AuthError>);
 
     await expect(loginUser({
@@ -170,9 +170,9 @@ describe("auth password login errors", () => {
       identifier: "missing-user",
       password: "Aa123456!",
     })).rejects.toMatchObject({
-      code: "INVALID_CREDENTIALS",
-      message: "账号或密码错误。",
-      status: 401,
+      code: "USERNAME_NOT_FOUND",
+      message: "用户名不存在。",
+      status: 404,
     } satisfies Partial<AuthError>);
 
     await expect(loginUser({
@@ -181,7 +181,7 @@ describe("auth password login errors", () => {
       password: "Wrong123!",
     })).rejects.toMatchObject({
       code: "INVALID_CREDENTIALS",
-      message: "账号或密码错误。",
+      message: "密码错误。",
       status: 401,
     } satisfies Partial<AuthError>);
 

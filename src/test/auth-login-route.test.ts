@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const authService = vi.hoisted(() => {
   class TestAuthError extends Error {
@@ -28,6 +28,10 @@ import { POST } from "@/app/api/auth/login/route";
 const user = { email: "reader@example.com", id: "user-1", username: "reader" };
 
 describe("auth login route", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("keeps username and password login as the default method", async () => {
     authService.loginUser.mockResolvedValueOnce(user);
     authService.setSessionCookie.mockResolvedValueOnce(undefined);
@@ -74,9 +78,34 @@ describe("auth login route", () => {
     expect(await response.json()).toEqual({ user });
   });
 
-  it("returns a generic credential failure from auth service", async () => {
+  it("reports an invalid email code without treating the email as missing", async () => {
+    authService.loginUserWithEmailCode.mockRejectedValueOnce(new authService.AuthError(
+      "验证码无效或已过期。",
+      401,
+      "INVALID_CODE",
+    ));
+
+    const response = await POST(new Request("https://echolens.test/api/auth/login", {
+      body: JSON.stringify({
+        acceptedLegal: true,
+        code: "654321",
+        email: "reader@example.com",
+        method: "code",
+      }),
+      method: "POST",
+    }));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      code: "INVALID_CODE",
+      error: "验证码无效或已过期。",
+    });
+    expect(authService.setSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("returns the credential error from auth service", async () => {
     authService.loginUser.mockRejectedValueOnce(new authService.AuthError(
-      "账号或密码错误。",
+      "密码错误。",
       401,
       "INVALID_CREDENTIALS",
     ));
@@ -94,7 +123,7 @@ describe("auth login route", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
       code: "INVALID_CREDENTIALS",
-      error: "账号或密码错误。",
+      error: "密码错误。",
     });
   });
 });

@@ -1,8 +1,6 @@
 const ENABLED_VALUE = "true";
-const ADMIN_USERNAME = "timesea";
-
 type AccountServicesUser = {
-  username: string;
+  douyinAccountServicesEnabled?: boolean;
 };
 
 export const DOUYIN_ACCOUNT_SERVICES_DISABLED_CODE = "DOUYIN_ACCOUNT_SERVICES_DISABLED";
@@ -13,5 +11,5 @@ export function isDouyinAccountServicesEnabled(): boolean {
 }
 
 export function canUseDouyinAccountServices(user: AccountServicesUser | null): boolean {
-  return isDouyinAccountServicesEnabled() || user?.username === ADMIN_USERNAME;
+  return isDouyinAccountServicesEnabled() || user?.douyinAccountServicesEnabled === true;
 }

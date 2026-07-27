@@ -19,11 +19,15 @@ describe("Douyin account services switch", () => {
     }
   });
 
-  it("allows only the administrator when globally disabled", () => {
+  it("allows globally enabled users or permanently entitled users", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
 
-    expect(canUseDouyinAccountServices({ username: "timesea" })).toBe(true);
-    expect(canUseDouyinAccountServices({ username: "test" })).toBe(false);
+    expect(canUseDouyinAccountServices({ douyinAccountServicesEnabled: true })).toBe(true);
+    expect(canUseDouyinAccountServices({ douyinAccountServicesEnabled: false })).toBe(false);
+    expect(canUseDouyinAccountServices({})).toBe(false);
     expect(canUseDouyinAccountServices(null)).toBe(false);
+
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
+    expect(canUseDouyinAccountServices(null)).toBe(true);
   });
 });

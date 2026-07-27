@@ -6,7 +6,7 @@ import {
 } from "@/lib/douyin/account-services";
 
 type AccountServicesUser = {
-  username: string;
+  douyinAccountServicesEnabled?: boolean;
 };
 
 export function rejectDisabledDouyinAccountServices(user: AccountServicesUser): NextResponse | null {

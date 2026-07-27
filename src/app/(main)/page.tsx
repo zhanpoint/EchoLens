@@ -21,6 +21,7 @@ import {
   Heart,
   Image as ImageIcon,
   Info,
+  KeyRound,
   Languages,
   Link2,
   LogIn,
@@ -36,6 +37,7 @@ import {
   Save,
   Search,
   Settings,
+  ShieldCheck,
   PanelLeft,
   Sparkles,
   Square,
@@ -96,6 +98,7 @@ import {
 import { isDownloadOrganization, type DownloadOrganization } from "@/lib/download-settings";
 import { cn } from "@/lib/utils";
 import { AsrQuotaIndicator, type AsrQuota } from "@/components/asr-quota-indicator";
+import { InvitationDialog } from "@/components/invitation-dialog";
 import { NetworkRetryButton } from "@/components/network-retry-button";
 import {
   NETWORK_RETRY_ERROR_CODE,
@@ -111,7 +114,8 @@ type ApiError = {
 
 type ApiPayload = ApiError | Record<string, unknown>;
 type PublicFeatures = {
-  douyinAccountServicesEnabled?: boolean;
+  douyinAccountServicesEnabled: boolean;
+  invitationRedeemed: boolean;
 };
 type SegmentTranslation = {
   error?: string;
@@ -249,6 +253,7 @@ type CurrentWorkflowSnapshot = {
 type CurrentUser = {
   email: string;
   id: string;
+  role?: "admin" | "user";
   username: string;
 };
 type ClientCacheAsset = "avatar" | MediaAssetKind;
@@ -1278,27 +1283,47 @@ function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
   return typeof action === "function" ? (action as (value: T) => T)(current) : action;
 }
 
-function useDouyinAccountServicesEnabled(): boolean {
-  const [enabled, setEnabled] = useState(false);
+const CLOSED_ACCOUNT_SERVICES: PublicFeatures = {
+  douyinAccountServicesEnabled: false,
+  invitationRedeemed: false,
+};
+
+async function readPublicFeatures(): Promise<PublicFeatures> {
+  try {
+    const response = await fetch("/api/features", { cache: "no-store" });
+    if (!response.ok) return CLOSED_ACCOUNT_SERVICES;
+    const payload = await response.json() as Partial<PublicFeatures>;
+    return {
+      douyinAccountServicesEnabled: payload.douyinAccountServicesEnabled === true,
+      invitationRedeemed: payload.invitationRedeemed === true,
+    };
+  } catch {
+    return CLOSED_ACCOUNT_SERVICES;
+  }
+}
+
+function useDouyinAccountServices(): [PublicFeatures, () => Promise<void>] {
+  const [features, setFeatures] = useState<PublicFeatures>(CLOSED_ACCOUNT_SERVICES);
+
+  const refresh = useCallback(async () => {
+    setFeatures(await readPublicFeatures());
+  }, []);
 
   useEffect(() => {
     let active = true;
-    void fetch("/api/features", { cache: "no-store" })
-      .then((response) => response.ok ? response.json() as Promise<PublicFeatures> : null)
-      .then((features) => {
-        if (active) setEnabled(features?.douyinAccountServicesEnabled === true);
-      })
-      .catch(() => undefined);
+    void readPublicFeatures().then((nextFeatures) => {
+      if (active) setFeatures(nextFeatures);
+    });
     return () => {
       active = false;
     };
   }, []);
 
-  return enabled;
+  return [features, refresh];
 }
 
 export default function HomePage() {
-  const douyinAccountServicesEnabled = useDouyinAccountServicesEnabled();
+  const [{ douyinAccountServicesEnabled, invitationRedeemed }, refreshAccountServices] = useDouyinAccountServices();
   const router = useRouter();
   const [initialSession] = useState(() => createWorkflowSession());
   const [activeSessionId, setActiveSessionId] = useState(initialSession.historyRecordId);
@@ -1323,6 +1348,7 @@ export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
   const [asrQuota, setAsrQuota] = useState<AsrQuota | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [invitationDialogOpen, setInvitationDialogOpen] = useState(false);
   const historyListRequestIdRef = useRef(0);
   const hasRestoredCurrentWorkflowRef = useRef(false);
   const isReadingClipboardRef = useRef(false);
@@ -2583,6 +2609,17 @@ export default function HomePage() {
   return (
     <main className="app-shell h-[100dvh] overflow-hidden bg-background text-foreground">
       {toast ? <TopToast message={toast.message} onDismiss={() => setToast(null)} tone={toast.tone} /> : null}
+      {invitationDialogOpen ? (
+        <InvitationDialog
+          invitationRedeemed={invitationRedeemed}
+          onClose={() => setInvitationDialogOpen(false)}
+          onRedeemed={() => {
+            setInvitationDialogOpen(false);
+            void refreshAccountServices();
+            showToast("账号功能已永久开通。", "info");
+          }}
+        />
+      ) : null}
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
           activeId={activeSidebarId}
@@ -2595,6 +2632,7 @@ export default function HomePage() {
           onDelete={deleteSidebarEntry}
           onNew={startNewLiveSession}
           onOpen={openSidebarEntry}
+          onOpenInvitation={() => setInvitationDialogOpen(true)}
           onRename={renameSidebarEntry}
           onReturnLive={showLiveSession}
           onSearch={setHistorySearchQuery}
@@ -2680,6 +2718,16 @@ export default function HomePage() {
                   </div>
 
                   <div className="grid gap-0.5 py-1">
+                    {currentUser.role === "admin" ? (
+                      <Link
+                        href="/admin/invitations"
+                        onClick={closeUserMenu}
+                        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] font-semibold text-foreground transition hover:bg-white/8 hover:text-cyan active:scale-[0.98]"
+                      >
+                        <ShieldCheck className="size-4 text-amber" aria-hidden="true" />
+                        控制台
+                      </Link>
+                    ) : null}
                     <Link
                       href="/settings"
                       onClick={closeUserMenu}
@@ -3060,21 +3108,23 @@ function TopToast({
     <div className="pointer-events-none fixed inset-x-0 top-[max(1rem,env(safe-area-inset-top))] z-[60] flex justify-center px-4">
       <div
         className={cn(
-          "pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-md bg-background/95 px-4 py-3 text-sm text-foreground shadow-2xl shadow-black/40 backdrop-blur-xl motion-safe:animate-[toast-enter_180ms_ease-out]",
-          tone === "error" && "border border-destructive/35",
+          "pointer-events-auto inline-flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border px-4 py-3 text-center text-sm shadow-2xl backdrop-blur-xl motion-safe:animate-[toast-enter_180ms_ease-out]",
+          tone === "info"
+            ? "border-cyan/30 bg-cyan/[0.1] text-cyan shadow-cyan/10"
+            : "border-destructive/35 bg-destructive/10 text-red-200 shadow-black/40",
         )}
         role={tone === "error" ? "alert" : "status"}
       >
         {tone === "info" ? (
-          <Info className="mt-0.5 size-4 shrink-0 text-cyan" aria-hidden="true" />
+          <Info className="size-4 shrink-0" aria-hidden="true" />
         ) : (
-          <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+          <AlertCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />
         )}
-        <span className="min-w-0 flex-1 leading-5">{message}</span>
+        <span className="min-w-0 leading-5">{message}</span>
         <button
           type="button"
           onClick={onDismiss}
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground active:scale-[0.96]"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded opacity-65 transition hover:bg-white/10 hover:opacity-100 active:scale-[0.96]"
           aria-label="关闭提示"
           title="关闭"
         >
@@ -3095,6 +3145,7 @@ function TranscriptHistorySidebar({
   onDelete,
   onNew,
   onOpen,
+  onOpenInvitation,
   onRename,
   onReturnLive,
   onSearch,
@@ -3114,6 +3165,7 @@ function TranscriptHistorySidebar({
   onDelete: (entry: SidebarEntry) => void;
   onNew: () => void;
   onOpen: (entry: SidebarEntry) => void;
+  onOpenInvitation: () => void;
   onRename: (entry: SidebarEntry, sessionName: string) => void;
   onReturnLive: () => void;
   onSearch: (query: string) => void;
@@ -3219,6 +3271,16 @@ function TranscriptHistorySidebar({
           <div className="px-2 py-10 text-center text-xs leading-5 text-muted-foreground">暂无转录历史</div>
         ) : null}
       </div>
+      <div className="border-t border-white/8 pt-2">
+        <button
+          type="button"
+          onClick={onOpenInvitation}
+          className="group flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-xs font-medium text-muted-foreground transition duration-150 hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-[0.98] active:bg-cyan/[0.12]"
+        >
+          <KeyRound className="size-3.5 shrink-0 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
+          输入邀请码
+        </button>
+      </div>
     </div>
   );
 
@@ -3281,6 +3343,15 @@ function TranscriptHistorySidebar({
                 <Star className="size-4" aria-hidden="true" />
               </Link>
             ) : null}
+            <button
+              type="button"
+              onClick={onOpenInvitation}
+              className="group mt-auto inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition duration-150 hover:bg-cyan/[0.1] hover:text-cyan focus-visible:bg-cyan/[0.1] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-90"
+              aria-label="输入邀请码"
+              title="输入邀请码"
+            >
+              <KeyRound className="size-4 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
+            </button>
           </div>
         )}
       </aside>

@@ -31,7 +31,11 @@ export async function POST(request: Request) {
       throw new AuthError("邮箱已被注册。");
     }
 
-    if ((purpose === "login" || purpose === "reset") && !(await emailExists(email))) {
+    if (purpose === "login" && !(await emailExists(email))) {
+      throw new AuthError("邮箱未注册。", 404, "EMAIL_NOT_REGISTERED");
+    }
+
+    if (purpose === "reset" && !(await emailExists(email))) {
       return authJson({ message: "如果邮箱已注册，验证码将发送到该邮箱。", expiresIn: 300 });
     }
 

@@ -21,12 +21,12 @@ import {
 } from "@/lib/auth/session-cookie";
 
 export type AuthUser = {
+  douyinAccountServicesEnabled?: boolean;
   email: string;
   id: string;
+  role?: "admin" | "user";
   username: string;
 };
-
-const DUMMY_PASSWORD_HASH = "scrypt$echolens-auth-dummy$B8cZGHteDG2v_Z9e0TDy4QkAsXQNpgLfZts8oKg1W_XQdSiHmJfRQH-D3FM3wvUdnTfpQmL1llq2yj-_U0MhyA";
 
 export class AuthError extends Error {
   constructor(message: string, readonly status = 400, readonly code = "AUTH_ERROR") {
@@ -79,12 +79,20 @@ export async function loginUser(input: {
   if (identifierError) {
     throw new AuthError(identifierError, 400, "INVALID_IDENTIFIER");
   }
-  assertPassword(input.password, "INVALID_PASSWORD_FORMAT");
 
   const user = await findUserByIdentifier(identifier);
-  const passwordMatches = await verifyPassword(input.password, user?.password_hash ?? DUMMY_PASSWORD_HASH);
-  if (!user || !passwordMatches) {
-    throw new AuthError("账号或密码错误。", 401, "INVALID_CREDENTIALS");
+  if (!user) {
+    const isEmail = identifier.includes("@");
+    throw new AuthError(
+      isEmail ? "邮箱未注册。" : "用户名不存在。",
+      404,
+      isEmail ? "EMAIL_NOT_REGISTERED" : "USERNAME_NOT_FOUND",
+    );
+  }
+
+  assertPassword(input.password, "INVALID_PASSWORD_FORMAT");
+  if (!(await verifyPassword(input.password, user.password_hash))) {
+    throw new AuthError("密码错误。", 401, "INVALID_CREDENTIALS");
   }
   return toAuthUser(user);
 }
@@ -122,6 +130,10 @@ export async function resetPassword(input: {
   }
 
   await updateUserPasswordAndDeleteSessions(user.id, await hashPassword(input.password));
+}
+
+export function isAdminUser(user: AuthUser | null): boolean {
+  return user?.role === "admin";
 }
 
 export async function emailExists(email: string): Promise<boolean> {
@@ -217,10 +229,18 @@ function hashSessionId(sessionId: string): string {
   return createHash("sha256").update(sessionId).digest("hex");
 }
 
-function toAuthUser(row: { email: string; id: string; username: string }): AuthUser {
+function toAuthUser(row: {
+  douyin_account_services_enabled: boolean;
+  email: string;
+  id: string;
+  role: "admin" | "user";
+  username: string;
+}): AuthUser {
   return {
+    douyinAccountServicesEnabled: row.douyin_account_services_enabled,
     email: row.email,
     id: row.id,
+    role: row.role,
     username: row.username,
   };
 }

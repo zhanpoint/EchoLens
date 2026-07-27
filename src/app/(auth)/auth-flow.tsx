@@ -15,13 +15,14 @@ import {
   ShieldCheck,
   UserRound,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { getEmailError, getPasswordError, getUsernameError } from "@/lib/auth/policy";
 import { cn } from "@/lib/utils";
 
 type AuthMode = "forgot" | "login" | "register";
 type LoginMethod = "code" | "password";
+type PendingAction = "send-code" | "submit";
 type FieldName = Exclude<keyof FormState, "acceptedLegal">;
 
 type ApiMessage = {
@@ -70,20 +71,22 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [sendingCode, setSendingCode] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const pendingActionRef = useRef<PendingAction | null>(null);
   const [cooldown, setCooldown] = useState(0);
   const copy = MODE_COPY[mode];
+  const loading = pendingAction === "submit";
+  const sendingCode = pendingAction === "send-code";
   const fieldErrors = useMemo(() => getFieldErrors(form, mode, loginMethod), [form, loginMethod, mode]);
   const hasBlockingErrors = Object.values(fieldErrors).some(Boolean);
-  const canSubmit = (mode === "forgot" || form.acceptedLegal) && !hasBlockingErrors;
+  const canSubmit = pendingAction === null && (mode === "forgot" || form.acceptedLegal) && !hasBlockingErrors;
   const canSendCode = useMemo(
     () =>
       (mode === "register" || mode === "forgot" || loginMethod === "code") &&
       !getEmailError(form.email) &&
       cooldown <= 0 &&
-      !sendingCode,
-    [cooldown, form.email, loginMethod, mode, sendingCode],
+      pendingAction === null,
+    [cooldown, form.email, loginMethod, mode, pendingAction],
   );
 
   useEffect(() => {
@@ -114,12 +117,25 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
     setSubmitted(false);
   }
 
+  function beginAction(action: PendingAction): boolean {
+    if (pendingActionRef.current !== null) return false;
+    pendingActionRef.current = action;
+    setPendingAction(action);
+    return true;
+  }
+
+  function endAction() {
+    pendingActionRef.current = null;
+    setPendingAction(null);
+  }
+
   async function sendCode() {
-    if (!canSendCode) {
+    if (!canSendCode || !beginAction("send-code")) {
       return;
     }
 
-    setSendingCode(true);
+    setForm((current) => ({ ...current, code: "" }));
+    setSubmitted(false);
     setError("");
     setNotice("");
 
@@ -133,18 +149,17 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
     } catch (sendError) {
       setError(readError(sendError));
     } finally {
-      setSendingCode(false);
+      endAction();
     }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitted(true);
-    if (!canSubmit) {
+    if (!canSubmit || !beginAction("submit")) {
       return;
     }
 
-    setLoading(true);
     setError("");
     setNotice("");
 
@@ -196,7 +211,7 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
     } catch (submitError) {
       setError(readError(submitError));
     } finally {
-      setLoading(false);
+      endAction();
     }
   }
 

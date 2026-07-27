@@ -6,8 +6,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const user = await readCurrentUserFromRequest(request);
+  const douyinAccountServicesEnabled = canUseDouyinAccountServices(user);
   return NextResponse.json(
-    { douyinAccountServicesEnabled: canUseDouyinAccountServices(user) },
+    {
+      douyinAccountServicesEnabled,
+      invitationRedeemed: user?.douyinAccountServicesEnabled === true,
+    },
     { headers: { "cache-control": "no-store" } },
   );
 }

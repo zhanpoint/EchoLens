@@ -2,22 +2,26 @@ import { execute, queryRow, toPostgresTimestamp, withTransaction } from "@/lib/s
 
 type UserRow = {
   created_at: number;
+  douyin_account_services_enabled: boolean;
   email: string;
   id: string;
   password_hash: string;
+  role: "admin" | "user";
   username: string;
 };
 
 type SessionRow = {
+  douyin_account_services_enabled: boolean;
   email: string;
   expires_at: number;
   id: string;
+  role: "admin" | "user";
   username: string;
 };
 
 export async function findUserByIdentifier(identifier: string): Promise<UserRow | undefined> {
   return await queryRow<UserRow>(
-    `SELECT id, username, email, password_hash, created_at
+    `SELECT id, username, email, password_hash, created_at, role, douyin_account_services_enabled
      FROM users
      WHERE lower(username) = lower($1) OR lower(email) = lower($1)
      LIMIT 1`,
@@ -27,7 +31,7 @@ export async function findUserByIdentifier(identifier: string): Promise<UserRow 
 
 export async function findUserByEmail(email: string): Promise<UserRow | undefined> {
   return await queryRow<UserRow>(
-    `SELECT id, username, email, password_hash, created_at
+    `SELECT id, username, email, password_hash, created_at, role, douyin_account_services_enabled
      FROM users
      WHERE lower(email) = lower($1)
      LIMIT 1`,
@@ -43,9 +47,10 @@ export async function insertUser(input: {
   username: string;
 }): Promise<UserRow> {
   const row = await queryRow<UserRow>(
-    `INSERT INTO users (id, username, email, password_hash, terms_accepted_at, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-     RETURNING id, username, email, password_hash, created_at`,
+    `INSERT INTO users (id, username, email, password_hash, terms_accepted_at, created_at, updated_at, role)
+     VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+       CASE WHEN lower($2) = 'timesea' THEN 'admin' ELSE 'user' END)
+     RETURNING id, username, email, password_hash, created_at, role, douyin_account_services_enabled`,
     [input.id, input.username, input.email, input.passwordHash, toPostgresTimestamp(input.termsAcceptedAt)],
   );
   if (!row) {
@@ -82,7 +87,8 @@ export async function deleteSessionRow(tokenHash: string): Promise<void> {
 
 export async function readSessionUser(tokenHash: string): Promise<SessionRow | undefined> {
   const row = await queryRow<SessionRow>(
-    `SELECT users.id, users.username, users.email, sessions.expires_at
+    `SELECT users.id, users.username, users.email, users.role,
+            users.douyin_account_services_enabled, sessions.expires_at
      FROM sessions
      JOIN users ON users.id = sessions.user_id
      WHERE sessions.token_hash = $1`,

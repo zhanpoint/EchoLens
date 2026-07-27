@@ -245,6 +245,18 @@ const CORE_SCHEMA_STATEMENTS = [
     )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uidx ON users (lower(username))",
   "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uidx ON users (lower(email))",
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user'))",
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS douyin_account_services_enabled boolean NOT NULL DEFAULT false",
+  "UPDATE users SET role = 'admin' WHERE lower(username) = 'timesea' AND role <> 'admin'",
+  `CREATE TABLE IF NOT EXISTS account_service_invitations (
+      id text PRIMARY KEY,
+      code text NOT NULL UNIQUE,
+      created_at timestamptz(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      redeemed_by text UNIQUE REFERENCES users(id) ON DELETE SET NULL,
+      redeemed_at timestamptz(3),
+      CHECK (redeemed_by IS NULL OR redeemed_at IS NOT NULL)
+    )`,
+  "CREATE INDEX IF NOT EXISTS account_service_invitations_status_idx ON account_service_invitations(redeemed_at, created_at)",
   `CREATE TABLE IF NOT EXISTS sessions (
       token_hash text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
