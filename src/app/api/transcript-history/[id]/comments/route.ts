@@ -27,11 +27,11 @@ type CollectionEvent =
   | { code: string; error: string; type: "error" };
 
 export async function GET(request: Request, context: RouteContext) {
-  const disabled = rejectDisabledDouyinAccountServices();
-  if (disabled) return disabled;
-
   const user = await requireUser(request);
   if (user instanceof NextResponse) return user;
+
+  const disabled = rejectDisabledDouyinAccountServices(user);
+  if (disabled) return disabled;
 
   const { id } = await context.params;
   const history = await readTranscriptHistoryRecord({ id, userId: user.id });
@@ -65,11 +65,11 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const disabled = rejectDisabledDouyinAccountServices();
-  if (disabled) return disabled;
-
   const user = await requireUser(request);
   if (user instanceof NextResponse) return user;
+
+  const disabled = rejectDisabledDouyinAccountServices(user);
+  if (disabled) return disabled;
 
   const { id } = await context.params;
   const history = await readTranscriptHistoryRecord({ id, userId: user.id });

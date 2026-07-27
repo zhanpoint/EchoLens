@@ -52,12 +52,12 @@ describe("douyin following route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects before authentication, credential reading, and collection when disabled", async () => {
+  it("rejects non-admin users before credential reading and collection when disabled", async () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     const response = await POST(new Request("https://echolens.test/api/douyin/following", { method: "POST" }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
-    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(requireUserMock).toHaveBeenCalledOnce();
     expect(readCredentialStateMock).not.toHaveBeenCalled();
     expect(collectMock).not.toHaveBeenCalled();
   });

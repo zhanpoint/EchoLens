@@ -68,7 +68,7 @@ describe("user settings route", () => {
     }));
     expect(putResponse.status).toBe(503);
     expect(await putResponse.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
-    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(requireUserMock).toHaveBeenCalledOnce();
     expect(validateDouyinCredentialMock).not.toHaveBeenCalled();
   });
 

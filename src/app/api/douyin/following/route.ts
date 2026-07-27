@@ -9,13 +9,13 @@ import { readValidDouyinCredential } from "../_credential";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const disabled = rejectDisabledDouyinAccountServices();
-  if (disabled) return disabled;
-
   const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
+
+  const disabled = rejectDisabledDouyinAccountServices(user);
+  if (disabled) return disabled;
   const cookie = await readValidDouyinCredential(user.id);
   if (cookie instanceof NextResponse) {
     return cookie;

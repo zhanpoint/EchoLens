@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
-import { isDouyinAccountServicesEnabled } from "@/lib/douyin/account-services";
+import { readCurrentUserFromRequest } from "@/lib/auth/service";
+import { canUseDouyinAccountServices } from "@/lib/douyin/account-services";
 
 export const dynamic = "force-dynamic";
 
-export function GET() {
+export async function GET(request: Request) {
+  const user = await readCurrentUserFromRequest(request);
   return NextResponse.json(
-    { douyinAccountServicesEnabled: isDouyinAccountServicesEnabled() },
+    { douyinAccountServicesEnabled: canUseDouyinAccountServices(user) },
     { headers: { "cache-control": "no-store" } },
   );
 }

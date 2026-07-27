@@ -6,13 +6,13 @@ import { readDouyinCredentialState } from "@/lib/douyin/account";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const disabled = rejectDisabledDouyinAccountServices();
-  if (disabled) return disabled;
-
   const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
   }
+
+  const disabled = rejectDisabledDouyinAccountServices(user);
+  if (disabled) return disabled;
   const state = await readDouyinCredentialState(user.id);
   const message = {
     invalid: "抖音账号访问凭证无效或已过期，请前往设置更新后重试。",

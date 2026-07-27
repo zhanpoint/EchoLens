@@ -55,13 +55,23 @@ describe("douyin favorites route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects before authentication and collection when disabled", async () => {
+  it("rejects non-admin users before collection when disabled", async () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     const response = await POST(new Request("https://echolens.test/api/douyin/favorites", { method: "POST" }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
-    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(requireUserMock).toHaveBeenCalledOnce();
     expect(collectMock).not.toHaveBeenCalled();
+  });
+
+  it("allows timesea when globally disabled", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+    requireUserMock.mockResolvedValue({ email: "admin@example.com", id: "admin-1", username: "timesea" });
+
+    const response = await POST(new Request("https://echolens.test/api/douyin/favorites", { method: "POST" }));
+
+    expect(response.status).toBe(200);
+    expect(collectMock).toHaveBeenCalledOnce();
   });
 
   it("requires authentication", async () => {

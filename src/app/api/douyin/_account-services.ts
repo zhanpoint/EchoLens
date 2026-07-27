@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import {
+  canUseDouyinAccountServices,
   DOUYIN_ACCOUNT_SERVICES_DISABLED_CODE,
   DOUYIN_ACCOUNT_SERVICES_DISABLED_MESSAGE,
-  isDouyinAccountServicesEnabled,
 } from "@/lib/douyin/account-services";
 
-export function rejectDisabledDouyinAccountServices(): NextResponse | null {
-  return isDouyinAccountServicesEnabled()
+type AccountServicesUser = {
+  username: string;
+};
+
+export function rejectDisabledDouyinAccountServices(user: AccountServicesUser): NextResponse | null {
+  return canUseDouyinAccountServices(user)
     ? null
     : NextResponse.json(
         {

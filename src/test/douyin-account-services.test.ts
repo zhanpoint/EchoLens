@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  DouyinAccountServicesDisabledError,
+  canUseDouyinAccountServices,
   isDouyinAccountServicesEnabled,
 } from "@/lib/douyin/account-services";
-import { createDouyinWebClient } from "@/lib/douyin/web-client";
-import { signDouyinUrl } from "@/lib/douyin/xbogus";
 
 describe("Douyin account services switch", () => {
   afterEach(() => {
@@ -21,10 +19,11 @@ describe("Douyin account services switch", () => {
     }
   });
 
-  it("blocks Cookie processing and X-Bogus calculation when disabled", () => {
+  it("allows only the administrator when globally disabled", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
-    expect(() => createDouyinWebClient("sessionid=secret")).toThrow(DouyinAccountServicesDisabledError);
-    expect(() => signDouyinUrl("https://www.douyin.com/aweme/v1/web/comment/list/?aweme_id=1"))
-      .toThrow(DouyinAccountServicesDisabledError);
+
+    expect(canUseDouyinAccountServices({ username: "timesea" })).toBe(true);
+    expect(canUseDouyinAccountServices({ username: "test" })).toBe(false);
+    expect(canUseDouyinAccountServices(null)).toBe(false);
   });
 });

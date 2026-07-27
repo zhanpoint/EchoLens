@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
-import { isDouyinAccountServicesEnabled } from "@/lib/douyin/account-services";
+import { canUseDouyinAccountServices } from "@/lib/douyin/account-services";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { DEFAULT_DOWNLOAD_ORGANIZATION, DOWNLOAD_ORGANIZATIONS } from "@/lib/download-settings";
@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     settings: toPublicSettings(await readUserSettings(user.id, {
-      includeDouyin: isDouyinAccountServicesEnabled(),
+      includeDouyin: canUseDouyinAccountServices(user),
     })),
   });
 }
@@ -59,14 +59,14 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: "设置参数无效。" }, { status: 400 });
   }
 
-  if (parsed.data.category === "douyin") {
-    const disabled = rejectDisabledDouyinAccountServices();
-    if (disabled) return disabled;
-  }
-
   const user = await requireUser(request);
   if (user instanceof NextResponse) {
     return user;
+  }
+
+  if (parsed.data.category === "douyin") {
+    const disabled = rejectDisabledDouyinAccountServices(user);
+    if (disabled) return disabled;
   }
 
   const value = parseSettingsValue(parsed.data.category, parsed.data.value);
@@ -89,7 +89,7 @@ export async function PUT(request: Request) {
   }
   return NextResponse.json({
     settings: toPublicSettings(await readUserSettings(user.id, {
-      includeDouyin: isDouyinAccountServicesEnabled(),
+      includeDouyin: canUseDouyinAccountServices(user),
     })),
   });
 }

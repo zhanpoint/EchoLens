@@ -62,7 +62,7 @@ describe("transcript comment route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects reads and collection before authentication or credential access when disabled", async () => {
+  it("rejects non-admin reads and collection before credential access when disabled", async () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     const request = new Request("https://echolens.test/api/transcript-history/history-1/comments");
     const [getResponse, postResponse] = await Promise.all([
@@ -71,7 +71,7 @@ describe("transcript comment route", () => {
     ]);
     expect(getResponse.status).toBe(503);
     expect(postResponse.status).toBe(503);
-    expect(requireUserMock).not.toHaveBeenCalled();
+    expect(requireUserMock).toHaveBeenCalledTimes(2);
     expect(mocks.credential).not.toHaveBeenCalled();
     expect(mocks.collect).not.toHaveBeenCalled();
   });

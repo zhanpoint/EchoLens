@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { assertDouyinAccountServicesEnabled } from "./account-services";
 
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -16,7 +15,6 @@ export type SignedDouyinUrl = {
 // Ported from the downloader reference project's Apache-licensed X-Bogus helper.
 // Keep this module isolated: Douyin signature schemes change often.
 export function signDouyinUrl(url: string, userAgent = DEFAULT_USER_AGENT): SignedDouyinUrl {
-  assertDouyinAccountServicesEnabled();
   const uaMd5Array = md5StringToArray(md5(rc4(UA_KEY, Buffer.from(userAgent, "latin1")).toString("base64")));
   const emptyMd5Array = md5StringToArray(md5(md5StringToArray("d41d8cd98f00b204e9800998ecf8427e")));
   const urlMd5Array = md5Encrypt(url);
