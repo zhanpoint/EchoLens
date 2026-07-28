@@ -43,7 +43,7 @@ describe("DashScope ASR lifetime platform quota", () => {
     vi.restoreAllMocks();
   });
 
-  it("blocks new ASR submissions when successful duration would exceed 5 hours", async () => {
+  it("blocks new ASR submissions when successful duration would exceed 1 hour", async () => {
     reserveAsrTaskMock.mockResolvedValue(false);
 
     await expect(submitDashScopeAsrJob(
@@ -124,7 +124,7 @@ describe("DashScope ASR lifetime platform quota", () => {
         userId: "user-1",
         workKey: "video:1",
       }),
-      5 * 60 * 60,
+      60 * 60,
     );
   });
 

@@ -87,7 +87,7 @@ export type DashScopeAsrJobResult =
 const DASH_SCOPE_REQUEST_TIMEOUT_MS = 60_000;
 const DASH_SCOPE_SUBMIT_TIMEOUT_MS = 15_000;
 const DASH_SCOPE_QUERY_TIMEOUT_MS = 20_000;
-export const PLATFORM_ASR_QUOTA_SECONDS = 5 * 60 * 60;
+export const PLATFORM_ASR_QUOTA_SECONDS = 60 * 60;
 const NO_SPEECH_DETAIL = "未检测到可识别的语音。暂不支持转录纯静音、仅背景噪声或没有人声的音频。";
 const NO_SPEECH_TASK_CODES = new Set([
   "ASR_RESPONSE_HAVE_NO_WORDS",

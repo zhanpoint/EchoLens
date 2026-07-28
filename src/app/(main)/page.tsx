@@ -81,6 +81,7 @@ import {
 } from "@/types/douyin";
 import type { DouyinCommentsPayload } from "@/lib/douyin/comments";
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
+import { DEFAULT_DASHSCOPE_ASR_PROFILE } from "@/lib/dashscope/model-config";
 import { clearProgressStartedAt, estimateMediaProcessingDurationSeconds, readProgressStartedAt } from "@/lib/douyin/cache-estimate";
 import {
   mergeWorkMetadata,
@@ -1148,7 +1149,7 @@ function createWorkflowSessionId(): string {
 
 function createWorkflowSession(historyRecordId = createWorkflowSessionId()): DouyinWorkflowSession {
   return {
-    asrModel: "e1",
+    asrModel: DEFAULT_DASHSCOPE_ASR_PROFILE,
     createdAt: Date.now(),
     sessionName: "",
     emptyFilterWords: "",

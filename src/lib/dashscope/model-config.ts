@@ -35,6 +35,8 @@ export type DashScopeModelId<Purpose extends DashScopeModelPurpose = DashScopeMo
 
 export type EchoLensDashScopeModelIds = Record<DashScopeModelPurpose, string>;
 
+export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e2" as const;
+
 export const DEFAULT_DASHSCOPE_MODELS: EchoLensDashScopeModelIds = {
   asrE1: "qwen3-asr-flash-filetrans",
   asrE2: "fun-asr",

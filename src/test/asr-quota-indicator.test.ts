@@ -9,8 +9,8 @@ describe("AsrQuotaIndicator", () => {
       quota: {
         configuredCustomApiKey: true,
         exhausted: false,
-        limitSeconds: 18_000,
-        remainingSeconds: 18_000,
+        limitSeconds: 3_600,
+        remainingSeconds: 3_600,
       },
     }));
 
@@ -25,12 +25,12 @@ describe("AsrQuotaIndicator", () => {
       quota: {
         configuredCustomApiKey: false,
         exhausted: false,
-        limitSeconds: 18_000,
-        remainingSeconds: 16_560,
+        limitSeconds: 3_600,
+        remainingSeconds: 2_160,
       },
     }));
 
-    expect(html).toContain("free:276 分钟");
+    expect(html).toContain("free:36 分钟");
     expect(html).toContain("conic-gradient");
   });
 

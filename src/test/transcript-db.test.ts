@@ -65,7 +65,7 @@ describe("transcript db ASR quota and audio cache", () => {
   });
 
   it("atomically refuses a platform reservation that would exceed the lifetime limit", async () => {
-    await insertAsrTask(taskInput({ id: "used", seconds: 17_950 }));
+    await insertAsrTask(taskInput({ id: "used", seconds: 3_550 }));
     await markAsrTaskSucceeded("used");
 
     await expect(reserveAsrTask({
@@ -77,7 +77,7 @@ describe("transcript db ASR quota and audio cache", () => {
       objectKey: "object-next",
       userId: "user-1",
       workKey: "video:1",
-    }, 18_000)).resolves.toBe(false);
+    }, 3_600)).resolves.toBe(false);
     await expect(readAsrTask({ id: "next", userId: "user-1" })).resolves.toBeNull();
   });
 

@@ -12,7 +12,7 @@ import {
   type DashScopeAsrModelProfile,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
-import type { EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { DEFAULT_DASHSCOPE_ASR_PROFILE, type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
 import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
 import { TranscribeWorkSchema } from "@/lib/douyin/transcribe-schema";
 import { ensureHistoryAsset } from "@/lib/transcript/assets";
@@ -408,7 +408,7 @@ async function saveTranscriptHistory(input: {
 }
 
 function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLensDashScopeModelIds) {
-  const profile = input.model ?? E1_ASR_PROFILE;
+  const profile = input.model ?? DEFAULT_DASHSCOPE_ASR_PROFILE;
   const model = getDashScopeAsrModelForProfile(profile, models);
   const isE1 = profile === E1_ASR_PROFILE;
   const isE2 = profile === E2_ASR_PROFILE;
