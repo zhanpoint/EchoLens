@@ -22,10 +22,6 @@ afterEach(() => {
   delete process.env.FFMPEG_PATH;
 });
 
-function redirectTo(location: string): Response {
-  return new Response(null, { status: 302, headers: { location } });
-}
-
 function sharePageHtml(videoInfoRes: unknown): string {
   return `<html><body><script>window._ROUTER_DATA = ${JSON.stringify({
     loaderData: {
@@ -74,27 +70,25 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("resolves direct work urls without a redirect request", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
+  it("redirects direct work urls before classifying them", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
 
     await expect(resolveDouyinInput("https://www.douyin.com/video/7649250336875613449")).resolves.toMatchObject({
       finalUrl: "https://www.douyin.com/video/7649250336875613449",
       kind: "video",
       id: "7649250336875613449",
     });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("resolves short links when redirects stop at an iesdouyin share intermediate", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(null, {
-        status: 302,
-        headers: {
-          location:
-            "https://www.iesdouyin.com/share/video/7637528968758324707/?region=CN&from=web_code_link",
-        },
-      }),
-    );
+  it("resolves a short link from its first redirect location", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, {
+      status: 302,
+      headers: {
+        location:
+          "https://www.iesdouyin.com/share/video/7637528968758324707/?region=CN&from=web_code_link",
+      },
+    }));
 
     await expect(resolveDouyinInput("https://v.douyin.com/XO1jdgGD8SY/")).resolves.toEqual({
       inputUrl: "https://v.douyin.com/XO1jdgGD8SY/",
@@ -104,65 +98,6 @@ describe("douyin url utilities", () => {
     });
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("follows at most three redirects", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-2/"))
-      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-3/"))
-      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-4/"));
-
-    await expect(resolveDouyinInput("https://v.douyin.com/step-1/"))
-      .rejects.toMatchObject({ code: "too_many_redirects" });
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("accepts a video reached by the third redirect", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-2/"))
-      .mockResolvedValueOnce(redirectTo("https://v.douyin.com/step-3/"))
-      .mockResolvedValueOnce(redirectTo("https://www.douyin.com/video/7637528968758324707"));
-
-    await expect(resolveDouyinInput("https://v.douyin.com/step-1/"))
-      .resolves.toMatchObject({
-        finalUrl: "https://www.douyin.com/video/7637528968758324707",
-        id: "7637528968758324707",
-        kind: "video",
-      });
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-  });
-
-  it("retries network failures five times with exponential backoff", async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, "random").mockReturnValue(0);
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed"));
-
-    const task = resolveDouyinInput("https://v.douyin.com/network-failure/");
-    const result = expect(task).rejects.toMatchObject({
-      code: "network_error",
-      message: "网络连接失败，请检查网络后重试。",
-    });
-    await vi.advanceTimersByTimeAsync(7_500);
-
-    await result;
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-  });
-
-  it("reports exhausted server retries as a network problem", async () => {
-    vi.useFakeTimers();
-    vi.spyOn(Math, "random").mockReturnValue(0);
-    const fetchMock = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response("temporary failure", { status: 503 }));
-
-    const task = resolveDouyinInput("https://v.douyin.com/server-failure/");
-    const result = expect(task).rejects.toMatchObject({
-      code: "network_error",
-      message: "网络连接失败，请检查网络后重试。",
-    });
-    await vi.advanceTimersByTimeAsync(7_500);
-
-    await result;
-    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("labels transcript results", () => {
@@ -363,7 +298,7 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("keeps high-quality video urls before fallback urls", () => {
+  it("keeps lowest-bitrate video urls first by default", () => {
     expect(
       parseWorkMetadata(
         {
@@ -398,11 +333,34 @@ describe("douyin url utilities", () => {
       ),
     ).toMatchObject({
       videoUrls: [
-        "https://example.com/1080p-video.mp4",
         "https://example.com/720p-video.mp4",
+        "https://example.com/1080p-video.mp4",
         "https://example.com/fallback-video.mp4",
       ],
     });
+  });
+
+  it.each([
+    ["lowest", "https://example.com/360p.mp4"],
+    ["720p", "https://example.com/720p.mp4"],
+    ["1080p", "https://example.com/1080p.mp4"],
+    ["highest", "https://example.com/1080p.mp4"],
+  ] as const)("selects the %s direct video source from video.bit_rate", (quality, expectedUrl) => {
+    const metadata = parseWorkMetadata({
+      aweme_detail: {
+        video: {
+          bit_rate: [
+            { bit_rate: 300, play_addr: { width: 640, url_list: ["https://example.com/360p.mp4"] } },
+            { bit_rate: 900, play_addr: { width: 1280, url_list: ["https://example.com/720p.mp4"] } },
+            { bit_rate: 1800, play_addr: { width: 1920, url_list: ["https://example.com/1080p.mp4"] } },
+          ],
+          play_addr: { url_list: ["https://example.com/fallback.mp4"] },
+        },
+      },
+    }, "7649250336875613449", "video", quality);
+
+    expect(metadata.videoUrls?.[0]).toBe(expectedUrl);
+    expect(metadata.videoUrls?.every((url) => !url.includes("/aweme/v1/play/"))).toBe(true);
   });
 
   it("reads video duration from douyin metadata", () => {

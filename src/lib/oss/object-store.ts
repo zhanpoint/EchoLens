@@ -16,6 +16,12 @@ type OssConfig = {
 const REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 6 * 60 * 60;
 
+export type OssObjectInfo = {
+  contentLength: number;
+  contentType: string;
+  metadata: Readonly<Record<string, string>>;
+};
+
 export async function putOssObject(input: {
   body: Uint8Array;
   contentType: string;
@@ -38,6 +44,7 @@ export async function putOssStream(input: {
   cacheControl?: string;
   contentType: string;
   contentLength?: number;
+  metadata?: Readonly<Record<string, string>>;
   objectKey: string;
 }): Promise<void> {
   const response = await signedRequest(readConfig(), input.objectKey, {
@@ -45,6 +52,7 @@ export async function putOssStream(input: {
     cacheControl: input.cacheControl,
     contentLength: input.contentLength,
     contentType: input.contentType,
+    metadata: input.metadata,
     method: "PUT",
   });
   await response.body?.cancel();
@@ -64,13 +72,18 @@ export async function ossObjectExists(objectKey: string): Promise<boolean> {
   return response.ok;
 }
 
-export async function getOssObjectInfo(objectKey: string): Promise<{ contentLength: number; contentType: string } | null> {
+export async function getOssObjectInfo(objectKey: string): Promise<OssObjectInfo | null> {
   const response = await signedRequest(readConfig(), objectKey, { method: "HEAD" });
   await response.body?.cancel();
   if (!response.ok) return null;
   return {
     contentLength: Number(response.headers.get("content-length")) || 0,
     contentType: response.headers.get("content-type") || "application/octet-stream",
+    metadata: Object.fromEntries(
+      [...response.headers.entries()]
+        .filter(([name]) => name.startsWith("x-oss-meta-"))
+        .map(([name, value]) => [name.slice("x-oss-meta-".length), value]),
+    ),
   };
 }
 
@@ -107,16 +120,33 @@ export function createOssSignedUrlWithExpiration(objectKey: string): OssSignedUr
 async function signedRequest(
   config: OssConfig,
   objectKey: string,
-  input: { body?: Uint8Array | ReadableStream<Uint8Array>; cacheControl?: string; contentLength?: number; contentType?: string; method: "PUT" | "DELETE" | "HEAD" },
+  input: {
+    body?: Uint8Array | ReadableStream<Uint8Array>;
+    cacheControl?: string;
+    contentLength?: number;
+    contentType?: string;
+    metadata?: Readonly<Record<string, string>>;
+    method: "PUT" | "DELETE" | "HEAD";
+  },
 ): Promise<Response> {
   const date = new Date().toUTCString();
   const contentType = input.contentType ?? "";
+  const metadataHeaders = Object.fromEntries(
+    Object.entries(input.metadata ?? {}).map(([name, value]) => [
+      `x-oss-meta-${name.trim().toLowerCase()}`,
+      value.trim(),
+    ]),
+  );
+  const canonicalizedOssHeaders = Object.entries(metadataHeaders)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}:${value}\n`)
+    .join("");
   const authorization = `OSS ${config.accessKeyId}:${sign(config.accessKeySecret, [
     input.method,
     "",
     contentType,
     date,
-    resource(config.bucket, objectKey),
+    `${canonicalizedOssHeaders}${resource(config.bucket, objectKey)}`,
   ].join("\n"))}`;
   const response = await fetchWithRetry(objectUrl(config, objectKey), {
     body: input.body as BodyInit | undefined,
@@ -124,6 +154,7 @@ async function signedRequest(
     headers: {
       authorization,
       date,
+      ...metadataHeaders,
       ...(input.contentLength !== undefined ? { "content-length": String(input.contentLength) } :
         input.body instanceof Uint8Array ? { "content-length": String(input.body.byteLength) } : {}),
       ...(contentType ? { "content-type": contentType } : {}),

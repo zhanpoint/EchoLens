@@ -12,6 +12,10 @@ import {
   probeTranscribableAudioFromUrl,
 } from "@/lib/media/audio";
 import { createOssSignedUrl, deleteOssObjects, getOssObjectInfo, putOssStream } from "@/lib/oss/object-store";
+import {
+  DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  type DownloadVideoQuality,
+} from "@/lib/download-settings";
 import type { DouyinKind } from "@/types/douyin";
 
 export type PreparedAssetKind = "avatar" | "cover" | "video" | "originalAudio";
@@ -25,13 +29,14 @@ export type AssetPreparation = {
   completed: Promise<void>;
 };
 
-type AssetInput = { id: string; kind: DouyinKind };
+type AssetInput = { id: string; kind: DouyinKind; videoQuality?: DownloadVideoQuality };
 type CompletedVideo = { body: Uint8Array; contentType: string };
 
 const preparationTasks = new Map<string, AssetPreparation>();
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=86400, immutable";
 const REVALIDATED_CACHE_CONTROL = "no-cache";
 const ASR_AUDIO_OBJECT_NAME = "audio.m4a";
+const VIDEO_QUALITY_METADATA_KEY = "echolens-video-quality";
 const AUDIO_UPLOAD_ATTEMPTS = 5;
 
 class InvalidOriginalAudioError extends Error {
@@ -46,22 +51,25 @@ export function prepareAssetBundle(
   metadata: DouyinWorkMetadata,
   reusable: { originalAudio?: OriginalAudioAsset } = {},
 ): AssetPreparation {
-  const taskKey = `${input.kind}:${input.id}`;
+  const videoQuality = input.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY;
+  const taskKey = `${input.kind}:${input.id}:${videoQuality}`;
   const existing = preparationTasks.get(taskKey);
   if (existing) return existing;
 
   const prefix = bundlePrefix(input.kind, input.id);
+  const videoKey = `${prefix}video`;
   const avatarUrls = [...(metadata.authorAvatarUrls ?? [])];
   const coverUrls = [...(metadata.coverUrls ?? [])];
   const videoUrls = [...(metadata.videoUrls ?? [])];
   let completedVideo: Promise<CompletedVideo> | undefined;
   const getCompletedVideo = () => completedVideo ??= ensureCompletedVideo(
-    `${prefix}video`,
+    videoKey,
     videoUrls,
+    videoQuality,
   );
   const avatar = ensureImageAsset(`${prefix}avatar`, avatarUrls, "作者头像");
   const cover = ensureImageAsset(`${prefix}cover`, coverUrls, "作品封面");
-  const video = ensureVideoAsset(`${prefix}video`, getCompletedVideo);
+  const video = ensureVideoAsset(videoKey, videoQuality, getCompletedVideo);
   const originalAudio = reusable.originalAudio
     ? Promise.resolve(reusable.originalAudio)
     : ensureAudioAsset(
@@ -98,6 +106,7 @@ export async function ensurePreparedAsset(
   assetKind: PreparedAssetKind,
 ): Promise<PreparedAsset> {
   const prefix = bundlePrefix(input.kind, input.id);
+  const videoQuality = input.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY;
   if (assetKind === "avatar") {
     return {
       asset: "avatar",
@@ -112,15 +121,17 @@ export async function ensurePreparedAsset(
   }
 
   let completedVideo: Promise<CompletedVideo> | undefined;
+  const videoKey = `${prefix}video`;
   const getCompletedVideo = () => completedVideo ??= ensureCompletedVideo(
-    `${prefix}video`,
+    videoKey,
     metadata.videoUrls ?? [],
+    videoQuality,
   );
   try {
     if (assetKind === "video") {
       return {
         asset: "video",
-        value: await ensureVideoAsset(`${prefix}video`, getCompletedVideo),
+        value: await ensureVideoAsset(videoKey, videoQuality, getCompletedVideo),
       };
     }
     return {
@@ -175,13 +186,18 @@ async function ensureImageAsset(
 
 async function ensureVideoAsset(
   objectKey: string,
+  videoQuality: DownloadVideoQuality,
   source: () => Promise<CompletedVideo>,
 ): Promise<StoredAsset> {
   const cached = await getOssObjectInfo(objectKey);
-  if (cached) return fromOssInfo(objectKey, cached, "video/mp4");
+  if (cached?.metadata[VIDEO_QUALITY_METADATA_KEY] === videoQuality) {
+    return fromOssInfo(objectKey, cached, "video/mp4");
+  }
 
   const video = await source();
-  await retryOssUpload(() => uploadBuffer(video.body, objectKey, video.contentType));
+  await retryOssUpload(() => uploadBuffer(video.body, objectKey, video.contentType, {
+    [VIDEO_QUALITY_METADATA_KEY]: videoQuality,
+  }));
   return {
     contentType: video.contentType,
     objectKey,
@@ -246,21 +262,25 @@ async function assertUsableOriginalAudio(
 async function ensureCompletedVideo(
   objectKey: string,
   videoUrls: readonly string[],
+  videoQuality: DownloadVideoQuality,
 ): Promise<CompletedVideo> {
-  const cached = await getOssObjectInfo(objectKey);
-  return downloadVideoWithResume(cached, objectKey, videoUrls);
+  const stored = await getOssObjectInfo(objectKey);
+  const reusable = stored?.metadata[VIDEO_QUALITY_METADATA_KEY] === videoQuality ? stored : null;
+  return downloadVideoWithResume(reusable, objectKey, videoUrls);
 }
 
 async function uploadBuffer(
   body: Uint8Array,
   objectKey: string,
   contentType: string,
+  metadata?: Readonly<Record<string, string>>,
 ): Promise<void> {
   await putOssStream({
     body: Readable.toWeb(Readable.from([body])) as ReadableStream<Uint8Array>,
-    cacheControl: IMMUTABLE_CACHE_CONTROL,
+    cacheControl: metadata ? REVALIDATED_CACHE_CONTROL : IMMUTABLE_CACHE_CONTROL,
     contentLength: body.byteLength,
     contentType,
+    metadata,
     objectKey,
   });
 }

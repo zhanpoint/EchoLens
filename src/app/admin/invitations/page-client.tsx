@@ -5,16 +5,7 @@ import { ArrowLeft, Check, CheckCircle2, Clock3, Copy, KeyRound, LayoutDashboard
 import { useMemo, useState } from "react";
 import type { AccountServiceInvitation } from "@/lib/invitations/service";
 
-type StatusFilter = "all" | "available" | "redeemed";
-
-const FILTERS: Array<{ label: string; value: StatusFilter }> = [
-  { label: "全部邀请码", value: "all" },
-  { label: "未使用", value: "available" },
-  { label: "已核销", value: "redeemed" },
-];
-
 export function InvitationConsole({ invitations }: { invitations: AccountServiceInvitation[] }) {
-  const [filter, setFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
   const [copiedCode, setCopiedCode] = useState("");
   const redeemedCount = invitations.filter((invitation) => invitation.redeemedAt !== null).length;
@@ -22,14 +13,11 @@ export function InvitationConsole({ invitations }: { invitations: AccountService
   const visibleInvitations = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return invitations.filter((invitation) => {
-      const redeemed = invitation.redeemedAt !== null;
-      if (filter === "available" && redeemed) return false;
-      if (filter === "redeemed" && !redeemed) return false;
       return !normalizedQuery
         || invitation.code.toLowerCase().includes(normalizedQuery)
         || invitation.redeemedByUsername?.toLowerCase().includes(normalizedQuery);
     });
-  }, [filter, invitations, query]);
+  }, [invitations, query]);
 
   async function copyCode(code: string) {
     await navigator.clipboard.writeText(code);
@@ -65,25 +53,6 @@ export function InvitationConsole({ invitations }: { invitations: AccountService
               <Stat label="已经核销" value={redeemedCount} tone="redeemed" />
             </div>
 
-            <nav className="mt-3 grid gap-1 border-t border-white/8 pt-3" aria-label="邀请码筛选">
-              {FILTERS.map(({ label, value }) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setFilter(value)}
-                  className={`flex h-8 items-center justify-between rounded-md px-2.5 text-xs font-medium transition ${
-                    filter === value
-                      ? "bg-cyan/[0.1] text-cyan"
-                      : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
-                  }`}
-                >
-                  {label}
-                  <span className="tabular-nums">
-                    {value === "all" ? invitations.length : value === "available" ? availableCount : redeemedCount}
-                  </span>
-                </button>
-              ))}
-            </nav>
           </aside>
 
           <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.025]">

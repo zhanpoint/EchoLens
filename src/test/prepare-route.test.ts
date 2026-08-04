@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   leaseRelease: vi.fn(),
   prepareAssetBundle: vi.fn(),
   readReusableHistoryAsset: vi.fn(),
+  readUserSetting: vi.fn(),
   savePreparedHistoryAsset: vi.fn(),
   updateTranscriptHistoryRecordMetadata: vi.fn(),
 }));
@@ -20,6 +21,9 @@ vi.mock("@/lib/douyin/metadata-coordinator", () => ({
 vi.mock("@/lib/douyin/asset-bundle", () => ({
   assetUrl: vi.fn((asset: { objectKey: string }) => `https://oss/${asset.objectKey}`),
   prepareAssetBundle: mocks.prepareAssetBundle,
+}));
+vi.mock("@/lib/user-settings", () => ({
+  readUserSetting: mocks.readUserSetting,
 }));
 vi.mock("@/lib/transcript/assets", () => ({
   readReusableHistoryAsset: mocks.readReusableHistoryAsset,
@@ -63,6 +67,7 @@ describe("douyin prepare route", () => {
     });
     mocks.savePreparedHistoryAsset.mockImplementation(async ({ prepared: asset }) => asset.value);
     mocks.readReusableHistoryAsset.mockResolvedValue(null);
+    mocks.readUserSetting.mockResolvedValue(undefined);
     mocks.updateTranscriptHistoryRecordMetadata.mockResolvedValue({ id: "history-1" });
     mocks.prepareAssetBundle.mockReturnValue({
       assets: {
@@ -113,6 +118,26 @@ describe("douyin prepare route", () => {
       userId: "user-1",
     }));
     expect(mocks.leaseRelease).toHaveBeenCalledTimes(1);
+    expect(mocks.acquireWorkMetadata).toHaveBeenCalledWith(expect.objectContaining(work), "lowest");
+    expect(mocks.prepareAssetBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ videoQuality: "lowest" }),
+      expect.any(Object),
+      undefined,
+    );
+  });
+
+  it("uses the persisted direct-video quality for metadata and cache isolation", async () => {
+    mocks.readUserSetting.mockResolvedValueOnce({ videoQuality: "720p" });
+
+    const response = await POST(prepareRequest());
+    await response.text();
+
+    expect(mocks.acquireWorkMetadata).toHaveBeenCalledWith(expect.objectContaining(work), "720p");
+    expect(mocks.prepareAssetBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ videoQuality: "720p" }),
+      expect.any(Object),
+      undefined,
+    );
   });
 
   it("passes a persisted verified audio asset to preparation without rebuilding it", async () => {

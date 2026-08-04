@@ -49,11 +49,19 @@ describe("asset preparation pipeline", () => {
     mocks.videoInputChunks.length = 0;
     mocks.putOssStream.mockReset().mockResolvedValue(undefined);
     mocks.deleteOssObjects.mockReset().mockResolvedValue(undefined);
-    mocks.getOssObjectInfo.mockImplementation(async (objectKey: string) => (
-      mocks.putOssStream.mock.calls.some(([upload]) => upload.objectKey === objectKey)
-        ? { contentLength: 3, contentType: objectKey.endsWith("audio.m4a") ? "audio/mp4" : "video/mp4" }
-        : null
-    ));
+    mocks.getOssObjectInfo.mockImplementation(async (objectKey: string) => {
+      const upload = [...mocks.putOssStream.mock.calls]
+        .reverse()
+        .map(([candidate]) => candidate)
+        .find((candidate) => candidate.objectKey === objectKey);
+      return upload
+        ? {
+            contentLength: 3,
+            contentType: objectKey.endsWith("audio.m4a") ? "audio/mp4" : "video/mp4",
+            metadata: upload.metadata ?? {},
+          }
+        : null;
+    });
     mocks.probeTranscribableAudioFromUrl.mockResolvedValue(undefined);
     mocks.fetchRemoteMedia.mockImplementation(async (urls: string[]) => {
       mocks.requestedSources.push([...urls]);
@@ -106,6 +114,38 @@ describe("asset preparation pipeline", () => {
     expect(mocks.videoInputChunks).toHaveLength(1);
     expect(Array.from(mocks.videoInputChunks[0])).toEqual([0, 0, 0]);
     expect(mocks.audioCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps one stable video object and replaces it when quality changes", async () => {
+    const lowest = await ensurePreparedAsset(
+      { ...input, videoQuality: "lowest" },
+      { ...metadata, videoUrls: ["https://origin/video-lowest"] },
+      "video",
+    );
+    const highest = await ensurePreparedAsset(
+      { ...input, videoQuality: "highest" },
+      { ...metadata, videoUrls: ["https://origin/video-highest"] },
+      "video",
+    );
+    const repeatedHighest = await ensurePreparedAsset(
+      { ...input, videoQuality: "highest" },
+      { ...metadata, videoUrls: ["https://origin/video-highest"] },
+      "video",
+    );
+
+    expect(lowest.value.objectKey).toBe("echolens/media/video/123456/video");
+    expect(highest.value.objectKey).toBe(lowest.value.objectKey);
+    expect(repeatedHighest.value.objectKey).toBe(lowest.value.objectKey);
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledTimes(2);
+    expect(mocks.putOssStream).toHaveBeenCalledTimes(2);
+    expect(mocks.putOssStream.mock.calls.map(([upload]) => upload.objectKey)).toEqual([
+      lowest.value.objectKey,
+      lowest.value.objectKey,
+    ]);
+    expect(mocks.putOssStream.mock.calls.map(([upload]) => upload.metadata)).toEqual([
+      { "echolens-video-quality": "lowest" },
+      { "echolens-video-quality": "highest" },
+    ]);
   });
 
   it("uploads video and extracts audio concurrently from one completed download", async () => {

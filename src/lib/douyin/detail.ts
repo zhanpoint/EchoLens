@@ -1,4 +1,8 @@
 import { cleanText, uniqueMediaReferences } from "./media";
+import {
+  DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  type DownloadVideoQuality,
+} from "@/lib/download-settings";
 import { fetchWithRetry } from "@/lib/http/retry";
 import type { DouyinKind } from "../../types/douyin";
 import type { DouyinWorkIdentity } from "../../types/douyin";
@@ -48,7 +52,7 @@ export type CompleteDouyinWorkMetadata = DouyinWorkMetadata & {
 
 export async function collectWorkMetadata(
   work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; videoQuality?: DownloadVideoQuality } = {},
 ): Promise<CompleteDouyinWorkMetadata> {
   const response = await fetchWithRetry(buildSharePageUrl(work), {
     cache: "no-store",
@@ -62,7 +66,12 @@ export async function collectWorkMetadata(
   }
 
   const payload = parseSharePagePayload(await response.text(), work);
-  const metadata = parseWorkMetadata(payload, work.id, work.kind);
+  const metadata = parseWorkMetadata(
+    payload,
+    work.id,
+    work.kind,
+    options.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  );
   if (!hasCompleteMetadata(metadata)) {
     throw new Error("抖音作品信息不完整，请稍后重试。");
   }
@@ -85,6 +94,7 @@ export function parseWorkMetadata(
   payload: unknown,
   workId: string,
   kind?: DouyinKind,
+  videoQuality: DownloadVideoQuality = DEFAULT_DOWNLOAD_VIDEO_QUALITY,
 ): DouyinWorkMetadata {
   if (!payload || typeof payload !== "object") {
     return {};
@@ -98,7 +108,7 @@ export function parseWorkMetadata(
   const author = detail.author;
   const secUid = readString(author?.sec_uid) ?? readString(author?.secUid);
   const coverUrls = readCoverUrls(detail);
-  const videoUrls = kind === "video" ? readVideoUrls(detail.video) : [];
+  const videoUrls = kind === "video" ? readVideoUrls(detail.video, videoQuality) : [];
   const durationSeconds = kind === "video" ? readVideoDurationSeconds(detail) : undefined;
 
   return {
@@ -247,14 +257,29 @@ function readCoverUrlsFromVideo(video: Record<string, unknown> | null): string[]
   ]);
 }
 
-function readVideoUrls(value: unknown): string[] {
+const VIDEO_QUALITY_TARGET_WIDTH: Partial<Record<DownloadVideoQuality, number>> = {
+  "1440p": 2560,
+  "1080p": 1920,
+  "720p": 1280,
+  "540p": 960,
+  "480p": 854,
+  "360p": 640,
+};
+
+type BitRateVideoSource = {
+  bitRate: number;
+  urls: string[];
+  width: number;
+};
+
+function readVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] {
   if (!value || typeof value !== "object") {
     return [];
   }
 
   const video = value as Record<string, unknown>;
   return uniqueMediaReferences([
-    ...readBitRateVideoUrls(video.bit_rate ?? video.bitRate),
+    ...readBitRateVideoUrls(video.bit_rate ?? video.bitRate, quality),
     ...readUrlList(video.play_addr ?? video.playAddr),
     ...readUrlList(video.download_addr ?? video.downloadAddr),
   ]);
@@ -276,29 +301,37 @@ function readVideoDurationSeconds(detail: NonNullable<DouyinDetailPayload["aweme
   ].find((duration): duration is number => Boolean(duration && duration > 0));
 }
 
-function readBitRateVideoUrls(value: unknown): string[] {
+function readBitRateVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
 
-  return value
-    .flatMap((item) => {
-      if (!item || typeof item !== "object") {
-        return [];
-      }
+  const sources = value.flatMap((item): BitRateVideoSource[] => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const playAddr = record.play_addr ?? record.playAddr;
+    const urls = readUrlList(playAddr);
+    return urls.length
+      ? [{
+          bitRate: readNumber(record.bit_rate ?? record.bitRate) ?? 0,
+          urls,
+          width: readNestedNumber(playAddr, "width") ?? readNumber(record.width) ?? 0,
+        }]
+      : [];
+  });
 
-      const record = item as Record<string, unknown>;
-      const urls = readUrlList(record.play_addr ?? record.playAddr);
-      const bitRate = readNumber(record.bit_rate ?? record.bitRate) ?? 0;
-      const playAddr = record.play_addr ?? record.playAddr;
-      const width = readNestedNumber(playAddr, "width") ?? 0;
-      const height = readNestedNumber(playAddr, "height") ?? 0;
-      return urls.length > 0
-        ? [{ bitRate, pixels: width * height, urls }]
-        : [];
-    })
-    .sort((left, right) => right.pixels - left.pixels || right.bitRate - left.bitRate)
-    .flatMap((item) => item.urls);
+  const targetWidth = VIDEO_QUALITY_TARGET_WIDTH[quality];
+  sources.sort((left, right) => {
+    if (quality === "lowest") {
+      return left.bitRate - right.bitRate || left.width - right.width;
+    }
+    if (quality === "highest") {
+      return right.bitRate - left.bitRate || right.width - left.width;
+    }
+    return Math.abs(left.width - (targetWidth ?? 0)) - Math.abs(right.width - (targetWidth ?? 0))
+      || right.bitRate - left.bitRate;
+  });
+  return sources.flatMap(({ urls }) => urls);
 }
 
 function readNestedNumber(value: unknown, key: string): number | undefined {

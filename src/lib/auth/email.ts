@@ -13,6 +13,8 @@ export const EMAIL_CODE_TTL_SECONDS = 5 * 60;
 const EMAIL_CODE_RESEND_SECONDS = 60;
 const EMAIL_CODE_MAX_ATTEMPTS = 5;
 const LOGO_CID = "echolens-logo";
+const DEFAULT_SMTP_HOST = "smtpdm.aliyun.com";
+const DEFAULT_SMTP_PORT = 465;
 
 export type EmailCodePurpose = "login" | "reset" | "signup";
 
@@ -155,18 +157,17 @@ function readSmtpConfig(): {
   useTls: boolean;
   user: string;
 } {
-  const host = process.env.SMTP_HOST;
   const user = process.env.SMTP_USER;
   const password = process.env.SMTP_PASSWORD;
-  if (!host || !user || !password) {
-    throw new Error("SMTP 邮件配置缺失，请设置 SMTP_HOST、SMTP_USER 和 SMTP_PASSWORD。");
+  if (!user || !password) {
+    throw new Error("SMTP 邮件配置缺失，请设置 SMTP_USER 和 SMTP_PASSWORD。");
   }
 
   return {
     from: process.env.SMTP_FROM || user,
-    host,
+    host: process.env.SMTP_HOST || DEFAULT_SMTP_HOST,
     password,
-    port: Number(process.env.SMTP_PORT || 465),
+    port: Number(process.env.SMTP_PORT || DEFAULT_SMTP_PORT),
     useSsl: readBooleanEnv("SMTP_USE_SSL", true),
     useTls: readBooleanEnv("SMTP_USE_TLS", false),
     user,

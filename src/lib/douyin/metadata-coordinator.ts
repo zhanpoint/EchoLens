@@ -3,6 +3,10 @@ import {
   type CompleteDouyinWorkMetadata,
   type DouyinWorkMetadata,
 } from "./detail";
+import {
+  DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  type DownloadVideoQuality,
+} from "@/lib/download-settings";
 import type { DouyinWorkIdentity } from "@/types/douyin";
 
 type MetadataWork = Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">;
@@ -21,11 +25,14 @@ export type WorkMetadataLease = {
 const entries = new Map<string, MetadataEntry>();
 const METADATA_HANDOFF_TTL_MS = 30_000;
 
-export async function acquireWorkMetadata(work: MetadataWork): Promise<WorkMetadataLease> {
-  const key = `${work.kind}:${work.id}`;
+export async function acquireWorkMetadata(
+  work: MetadataWork,
+  videoQuality: DownloadVideoQuality = DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+): Promise<WorkMetadataLease> {
+  const key = `${work.kind}:${work.id}:${videoQuality}`;
   let entry = entries.get(key);
   if (!entry) {
-    entry = { references: 0, result: collectWorkMetadata(work) };
+    entry = { references: 0, result: collectWorkMetadata(work, { videoQuality }) };
     entries.set(key, entry);
     void entry.result.catch(() => {
       if (entries.get(key) === entry) entries.delete(key);

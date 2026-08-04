@@ -35,7 +35,7 @@ type DashScopeConfig = {
 };
 
 export type DashScopeAsrModel = string;
-export type DashScopeAsrModelProfile = "e1" | "e2";
+export type DashScopeAsrModelProfile = "e1" | "e2" | "e3";
 
 export type DashScopeAsrOptions = {
   diarizationEnabled?: boolean;
@@ -773,10 +773,15 @@ export function buildDashScopeAsrParameters(
         enable_words: false,
         ...(options.enableItn ? { enable_itn: true } : {}),
       }
-    : { channel_id: [0] };
+    : options.profile === "e3"
+      ? {
+          channel_id: [0],
+          ...(options.enableItn ? { enable_itn: true } : {}),
+        }
+      : { channel_id: [0] };
 
   if (options.diarizationEnabled) {
-    if (options.profile !== "e2") {
+    if (options.profile !== "e2" && options.profile !== "e3") {
       throw new Error(`当前 ASR profile ${options.profile} 的模型 ${model} 不支持说话人分离，请切换到支持说话人分离的 ASR profile。`);
     }
     parameters.diarization_enabled = true;
@@ -803,11 +808,11 @@ function normalizeDashScopeAsrOptions(
     profile: options.profile,
   };
 
-  if (options.enableItn && options.profile === "e1") {
+  if (options.enableItn && (options.profile === "e1" || options.profile === "e3")) {
     normalized.enableItn = true;
   }
 
-  if (options.diarizationEnabled && options.profile === "e2") {
+  if (options.diarizationEnabled && (options.profile === "e2" || options.profile === "e3")) {
     normalized.diarizationEnabled = true;
     if (Number.isInteger(options.speakerCount)) {
       normalized.speakerCount = options.speakerCount;
@@ -853,16 +858,18 @@ function normalizeSensitiveWordList(wordList: string[] | undefined): string[] {
 }
 
 function buildDashScopeAsrInput(options: DashScopeAsrOptions, fileUrl: string): Record<string, unknown> {
-  return options.profile === "e1"
-    ? { file_url: fileUrl }
-    : { file_urls: [fileUrl] };
+  return options.profile === "e2"
+    ? { file_urls: [fileUrl] }
+    : { file_url: fileUrl };
 }
 
 export function getDashScopeAsrModelForProfile(
   profile: DashScopeAsrModelProfile,
   models = DEFAULT_DASHSCOPE_MODELS,
 ): DashScopeAsrModel {
-  return profile === "e1" ? models.asrE1 : models.asrE2;
+  if (profile === "e1") return models.asrE1;
+  if (profile === "e2") return models.asrE2;
+  return models.asrE3 ?? "qwen-audio-3.0-asr-flash-filetrans";
 }
 
 function formatDashScopeError(status: number, payload: unknown): string {

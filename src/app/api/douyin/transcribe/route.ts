@@ -27,11 +27,13 @@ import {
   getFeatureLabel,
   type ExtractionResult,
 } from "@/types/douyin";
+import { buildWorkKey, mediaSourceFromWorkKey } from "@/lib/media/source";
 
 export const runtime = "nodejs";
 
 const E1_ASR_PROFILE: DashScopeAsrModelProfile = "e1";
 const E2_ASR_PROFILE: DashScopeAsrModelProfile = "e2";
+const E3_ASR_PROFILE: DashScopeAsrModelProfile = "e3";
 const CLIENT_JOB_ID_MAX_LENGTH = 128;
 const FALLBACK_JOB_ID_SUFFIX = ":platform";
 
@@ -52,7 +54,7 @@ const TranscribeSchema = z.object({
   historyRecordId: z.string().min(1).max(128),
   diarizationEnabled: z.boolean().optional(),
   enableItn: z.boolean().optional(),
-  model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE]).optional(),
+  model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE, E3_ASR_PROFILE]).optional(),
   specialWordFilter: SpecialWordFilterSchema.optional(),
   speakerCount: z.coerce.number().int().min(1).max(10).optional(),
 }).strict();
@@ -93,6 +95,7 @@ export async function POST(request: Request) {
     if (!history) {
       return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
     }
+    const workSource = mediaSourceFromWorkKey(history.workKey);
     const parsedWork = WorkSchema.safeParse({
       authorName: history.authorName,
       authorUrl: history.authorUrl,
@@ -102,6 +105,7 @@ export async function POST(request: Request) {
       id: history.workId,
       inputUrl: history.inputUrl,
       kind: history.workKind,
+      ...(workSource === "bilibili" ? { source: workSource } : {}),
     });
     if (!parsedWork.success) {
       return NextResponse.json({ error: "会话作品信息不完整，请重新检测作品。" }, { status: 409 });
@@ -410,8 +414,7 @@ async function saveTranscriptHistory(input: {
 function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLensDashScopeModelIds) {
   const profile = input.model ?? DEFAULT_DASHSCOPE_ASR_PROFILE;
   const model = getDashScopeAsrModelForProfile(profile, models);
-  const isE1 = profile === E1_ASR_PROFILE;
-  const isE2 = profile === E2_ASR_PROFILE;
+  const supportsSpeakerFeatures = profile === E2_ASR_PROFILE || profile === E3_ASR_PROFILE;
 
   const options: {
     diarizationEnabled?: boolean;
@@ -422,26 +425,26 @@ function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLe
     speakerCount?: number;
   } = { model, profile };
 
-  if (input.enableItn && isE1) {
+  if (input.enableItn && (profile === E1_ASR_PROFILE || profile === E3_ASR_PROFILE)) {
     options.enableItn = true;
   }
 
-  if (input.diarizationEnabled && isE2) {
+  if (input.diarizationEnabled && supportsSpeakerFeatures) {
     options.diarizationEnabled = true;
     if (input.speakerCount) {
       options.speakerCount = input.speakerCount;
     }
   }
 
-  if (input.specialWordFilter && isE2) {
+  if (input.specialWordFilter && profile === E2_ASR_PROFILE) {
     options.specialWordFilter = input.specialWordFilter;
   }
 
   return options;
 }
 
-function buildWorkCacheKey(work: { id: string; kind: string }): string {
-  return `${work.kind}:${work.id}`;
+function buildWorkCacheKey(work: { id: string; kind: string; source?: "bilibili" | "douyin" }): string {
+  return buildWorkKey(work);
 }
 
 function transcriptionResult(

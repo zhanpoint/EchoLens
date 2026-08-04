@@ -7,6 +7,12 @@ const localDevOrigins = Object.values(networkInterfaces())
   .map((address) => address.address);
 
 const nextConfig: NextConfig = {
+  images: {
+    remotePatterns: [
+      { hostname: "www.bilibili.com", pathname: "/favicon.ico", protocol: "https" },
+      { hostname: "www.douyin.com", pathname: "/favicon.ico", protocol: "https" },
+    ],
+  },
   output: "standalone",
   serverExternalPackages: ["@ffmpeg-installer/ffmpeg"],
   poweredByHeader: false,

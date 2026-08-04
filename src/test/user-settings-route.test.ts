@@ -8,14 +8,16 @@ vi.mock("@/app/api/auth/_shared", () => ({
 const settingsStore = new Map<string, unknown>();
 
 vi.mock("@/lib/user-settings", () => ({
-  isUserSettingsCategory: (value: string) => ["aiCredential", "aiModels", "douyin", "download", "transcript", "translation"].includes(value),
+  isUserSettingsCategory: (value: string) => ["aiCredential", "aiModels", "bilibili", "douyin", "download", "transcript", "translation"].includes(value),
   readUserSettings: vi.fn(async (
     userId: string,
     options: { includeDouyin?: boolean } = {},
   ) => ({
     ...(settingsStore.has(`${userId}:aiCredential`) ? { aiCredential: settingsStore.get(`${userId}:aiCredential`) } : {}),
     aiModels: settingsStore.get(`${userId}:aiModels`),
+    ...(settingsStore.has(`${userId}:bilibili`) ? { bilibili: settingsStore.get(`${userId}:bilibili`) } : {}),
     ...(options.includeDouyin === false ? {} : { douyin: settingsStore.get(`${userId}:douyin`) }),
+    ...(settingsStore.has(`${userId}:download`) ? { download: settingsStore.get(`${userId}:download`) } : {}),
     transcript: settingsStore.get(`${userId}:transcript`),
     translation: settingsStore.get(`${userId}:translation`),
   })),
@@ -34,12 +36,30 @@ vi.mock("@/lib/douyin/account", () => ({
   }),
 }));
 
+vi.mock("@/lib/bilibili/account", () => ({
+  BilibiliCredentialError: class BilibiliCredentialError extends Error {
+    constructor(message: string, readonly code: string) {
+      super(message);
+    }
+  },
+  validateAndStoreBilibiliCredential: vi.fn(async (userId: string, cookie: string) => {
+    settingsStore.set(`${userId}:bilibili`, {
+      cookie,
+      credentialCheckedAt: 2_468,
+      credentialStatus: cookie ? "valid" : "missing",
+      ...(cookie ? { username: "bili-user" } : {}),
+    });
+  }),
+}));
+
 import { requireUser } from "@/app/api/auth/_shared";
+import { validateAndStoreBilibiliCredential } from "@/lib/bilibili/account";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { GET, PUT } from "@/app/api/user/settings/route";
 import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
 
 const requireUserMock = vi.mocked(requireUser);
+const validateBilibiliCredentialMock = vi.mocked(validateAndStoreBilibiliCredential);
 const validateDouyinCredentialMock = vi.mocked(validateAndStoreDouyinCredential);
 
 describe("user settings route", () => {
@@ -162,6 +182,68 @@ describe("user settings route", () => {
         },
         transcript: undefined,
         translation: undefined,
+      },
+    });
+  });
+
+  it("persists bilibili settings through credential validation state", async () => {
+    const value = { cookie: "SESSDATA=abc; bili_jct=csrf" };
+
+    const putResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
+      body: JSON.stringify({ category: "bilibili", value }),
+      method: "PUT",
+    }));
+    expect(putResponse.status).toBe(200);
+    expect(validateBilibiliCredentialMock).toHaveBeenCalledWith("user-1", value.cookie);
+
+    const getResponse = await GET(new Request("https://echolens.test/api/user/settings"));
+    expect(await getResponse.json()).toEqual({
+      settings: {
+        aiModels: DEFAULT_DASHSCOPE_MODELS,
+        bilibili: {
+          ...value,
+          credentialCheckedAt: 2_468,
+          credentialStatus: "valid",
+          username: "bili-user",
+        },
+        transcript: undefined,
+        translation: undefined,
+      },
+    });
+  });
+
+  it("persists video quality with lowest quality as the supported default", async () => {
+    const value = {
+      bilibiliAudioQuality: "hiRes",
+      bilibiliStreamFormat: "dashFull",
+      bilibiliVideoCodec: "av1",
+      bilibiliVideoQuality: "2160p",
+      directoryPath: "Downloads",
+      organization: "work",
+      videoQuality: "1080p",
+    };
+
+    const putResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
+      body: JSON.stringify({ category: "download", value }),
+      method: "PUT",
+    }));
+
+    expect(putResponse.status).toBe(200);
+    expect(settingsStore.get("user-1:download")).toEqual(value);
+    await expect(putResponse.json()).resolves.toMatchObject({ settings: { download: value } });
+
+    const defaultResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
+      body: JSON.stringify({ category: "download", value: { directoryPath: "", organization: "work" } }),
+      method: "PUT",
+    }));
+    await expect(defaultResponse.json()).resolves.toMatchObject({
+      settings: {
+        download: {
+          bilibiliAudioQuality: "lowest",
+          bilibiliStreamFormat: "dashFull",
+          bilibiliVideoQuality: "lowest",
+          videoQuality: "lowest",
+        },
       },
     });
   });

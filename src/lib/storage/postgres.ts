@@ -251,12 +251,16 @@ const CORE_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS account_service_invitations (
       id text PRIMARY KEY,
       code text NOT NULL UNIQUE,
+      environment text NOT NULL DEFAULT 'development' CHECK (environment IN ('development', 'production')),
       created_at timestamptz(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
       redeemed_by text UNIQUE REFERENCES users(id) ON DELETE SET NULL,
       redeemed_at timestamptz(3),
       CHECK (redeemed_by IS NULL OR redeemed_at IS NOT NULL)
     )`,
-  "CREATE INDEX IF NOT EXISTS account_service_invitations_status_idx ON account_service_invitations(redeemed_at, created_at)",
+  "ALTER TABLE account_service_invitations ADD COLUMN IF NOT EXISTS environment text NOT NULL DEFAULT 'development'",
+  "ALTER TABLE account_service_invitations DROP CONSTRAINT IF EXISTS account_service_invitations_environment_check",
+  "ALTER TABLE account_service_invitations ADD CONSTRAINT account_service_invitations_environment_check CHECK (environment IN ('development', 'production'))",
+  "CREATE INDEX IF NOT EXISTS account_service_invitations_environment_status_idx ON account_service_invitations(environment, redeemed_at, created_at)",
   `CREATE TABLE IF NOT EXISTS sessions (
       token_hash text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -3,12 +3,15 @@ import type { PoolClient } from "pg";
 import { withTransaction } from "@/lib/storage/postgres";
 
 const INVITATION_POOL_SIZE = 100;
-const INVITATION_LOCK_KEY = "account-service-invitations-v1";
+const INVITATION_LOCK_KEY = "account-service-invitations-v2";
 const INVITATION_PATTERN = /^ECHO-[A-Z0-9]{4}(?:-[A-Z0-9]{4}){2}$/;
+
+type InvitationEnvironment = "development" | "production";
 
 export type AccountServiceInvitation = {
   code: string;
   createdAt: number;
+  environment: InvitationEnvironment;
   redeemedAt: number | null;
   redeemedBy: string | null;
   redeemedByUsername: string | null;
@@ -26,22 +29,27 @@ export class InvitationError extends Error {
 export async function listAccountServiceInvitations(): Promise<AccountServiceInvitation[]> {
   return withTransaction(async (client) => {
     await ensureInvitationPool(client);
+    const environment = readInvitationEnvironment();
     const result = await client.query<{
       code: string;
       created_at: number;
+      environment: InvitationEnvironment;
       redeemed_at: number | null;
       redeemed_by: string | null;
       redeemed_by_username: string | null;
     }>(
-      `SELECT invitations.code, invitations.created_at, invitations.redeemed_at,
+      `SELECT invitations.code, invitations.created_at, invitations.environment, invitations.redeemed_at,
               invitations.redeemed_by, users.username AS redeemed_by_username
        FROM account_service_invitations invitations
        LEFT JOIN users ON users.id = invitations.redeemed_by
+       WHERE invitations.environment = $1
        ORDER BY invitations.created_at, invitations.code`,
+      [environment],
     );
     return result.rows.map((row) => ({
       code: row.code,
       createdAt: row.created_at,
+      environment: row.environment,
       redeemedAt: row.redeemed_at,
       redeemedBy: row.redeemed_by,
       redeemedByUsername: row.redeemed_by_username,
@@ -68,17 +76,18 @@ export async function redeemAccountServiceInvitation(userId: string, input: stri
       throw new InvitationError("当前账号已核销邀请码，不能重复核销。", "ALREADY_REDEEMED");
     }
 
+    const environment = readInvitationEnvironment();
     const claimedInvitation = await client.query<{ redeemed_by: string }>(
       `UPDATE account_service_invitations
        SET redeemed_by = $1, redeemed_at = CURRENT_TIMESTAMP
-       WHERE code = $2 AND redeemed_at IS NULL
+       WHERE code = $2 AND environment = $3 AND redeemed_at IS NULL
        RETURNING redeemed_by`,
-      [userId, code],
+      [userId, code, environment],
     );
     if (claimedInvitation.rows.length === 0) {
       const invitationExists = await client.query<{ exists: boolean }>(
-        "SELECT EXISTS(SELECT 1 FROM account_service_invitations WHERE code = $1) AS exists",
-        [code],
+        "SELECT EXISTS(SELECT 1 FROM account_service_invitations WHERE code = $1 AND environment = $2) AS exists",
+        [code, environment],
       );
       if (invitationExists.rows[0]?.exists) {
         throw new InvitationError("邀请码已被使用。", "INVITATION_USED");
@@ -95,17 +104,38 @@ export async function redeemAccountServiceInvitation(userId: string, input: stri
 
 async function ensureInvitationPool(client: PoolClient): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [INVITATION_LOCK_KEY]);
-  const result = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM account_service_invitations");
+  for (const environment of ["development", "production"] as const) {
+    await fillInvitationPool(client, environment);
+  }
+}
+
+async function fillInvitationPool(client: PoolClient, environment: InvitationEnvironment): Promise<void> {
+  const result = await client.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM account_service_invitations WHERE environment = $1",
+    [environment],
+  );
   let count = Number(result.rows[0]?.count ?? 0);
   while (count < INVITATION_POOL_SIZE) {
     const inserted = await client.query(
-      `INSERT INTO account_service_invitations (id, code)
-       VALUES ($1, $2)
+      `INSERT INTO account_service_invitations (id, code, environment)
+       VALUES ($1, $2, $3)
        ON CONFLICT (code) DO NOTHING`,
-      [randomUUID(), createInvitationCode()],
+      [randomUUID(), createInvitationCode(), environment],
     );
     count += inserted.rowCount ?? 0;
   }
+}
+
+function readInvitationEnvironment(): InvitationEnvironment {
+  return readBooleanEnv("PROD", false) ? "production" : "development";
+}
+
+function readBooleanEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) {
+    return fallback;
+  }
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
 function createInvitationCode(): string {

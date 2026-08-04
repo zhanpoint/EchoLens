@@ -8,7 +8,7 @@ import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const MODEL_PURPOSES = ["asrE1", "asrE2", "translation", "transcriptPostprocess", "summary"] as const;
+const MODEL_PURPOSES = ["asrE1", "asrE2", "asrE3", "translation", "transcriptPostprocess", "summary"] as const;
 
 const TestCredentialSchema = z.object({
   apiKey: z.string().trim().max(256).optional(),

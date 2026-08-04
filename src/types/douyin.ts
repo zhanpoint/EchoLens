@@ -1,3 +1,5 @@
+import type { MediaSource } from "@/lib/media/source";
+
 export const DOUYIN_KINDS = ["video"] as const;
 export const MEDIA_ASSET_KINDS = ["cover", "video", "originalAudio"] as const;
 export const TRANSCRIPT_FEATURE = "audioTranscript" as const;
@@ -27,6 +29,7 @@ export type DouyinWorkIdentity = {
   finalUrl: string;
   kind: DouyinKind;
   id: string;
+  source?: MediaSource;
 };
 
 export type ResolvedDouyinWork = DouyinWorkIdentity & {

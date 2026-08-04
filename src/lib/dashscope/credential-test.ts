@@ -75,6 +75,12 @@ function readTestDefinitions(models: EchoLensDashScopeModelIds, purpose?: DashSc
       purpose: "asrE2",
     },
     {
+      id: models.asrE3 ?? "qwen-audio-3.0-asr-flash-filetrans",
+      kind: "asr",
+      profile: "e3",
+      purpose: "asrE3",
+    },
+    {
       id: models.translation,
       kind: "translation",
       purpose: "translation",
@@ -106,7 +112,7 @@ async function testAsrModel(
   const payload = await fetchJson(`${DASHSCOPE_FIXED_BASE_URL}/services/audio/asr/transcription`, {
     apiKey,
     body: {
-      input: profile === "e1" ? { file_url: audio.signedUrl } : { file_urls: [audio.signedUrl] },
+      input: profile === "e2" ? { file_urls: [audio.signedUrl] } : { file_url: audio.signedUrl },
       model: definition.id,
       parameters: buildDashScopeAsrParameters({ model: definition.id, profile }),
     },

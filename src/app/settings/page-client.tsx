@@ -29,7 +29,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type Ref } from "react";
 import {
   Select,
   SelectContent,
@@ -49,9 +49,24 @@ import {
   supportsDownloadDirectoryPicker,
 } from "@/lib/browser-download-directory";
 import {
+  DEFAULT_BILIBILI_AUDIO_QUALITY,
+  DEFAULT_BILIBILI_STREAM_FORMAT,
+  DEFAULT_BILIBILI_VIDEO_CODEC,
+  DEFAULT_BILIBILI_VIDEO_QUALITY,
   DEFAULT_DOWNLOAD_ORGANIZATION,
+  DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  isBilibiliAudioQuality,
+  isBilibiliStreamFormat,
+  isBilibiliVideoCodec,
+  isBilibiliVideoQuality,
   isDownloadOrganization,
+  isDownloadVideoQuality,
+  type BilibiliAudioQuality,
+  type BilibiliStreamFormat,
+  type BilibiliVideoCodec,
+  type BilibiliVideoQuality,
   type DownloadOrganization,
+  type DownloadVideoQuality,
 } from "@/lib/download-settings";
 import { getApiError, readJsonPayload, readUserFacingError } from "../douyin/_client-api";
 import {
@@ -70,11 +85,16 @@ type DouyinSettings = {
   credentialStatus?: "invalid" | "missing" | "unknown" | "valid";
   cookie: string;
 };
+type BilibiliSettings = {
+  credentialStatus?: "invalid" | "missing" | "valid";
+  cookie: string;
+};
 
 type UserSettingsPayload = {
   settings?: {
     aiCredential?: { configured?: boolean };
     aiModels?: Partial<EchoLensDashScopeModelIds>;
+    bilibili?: Partial<BilibiliSettings>;
     douyin?: Partial<DouyinSettings>;
     download?: Partial<DownloadSettings>;
   };
@@ -85,18 +105,141 @@ type AiCredentialPayload = {
 };
 
 type SettingsSection = "aiCredential" | "douyin" | "download";
+type CredentialMethod = "automatic" | "manual";
 
 type DownloadSettings = {
+  bilibiliAudioQuality: BilibiliAudioQuality;
+  bilibiliStreamFormat: BilibiliStreamFormat;
+  bilibiliVideoCodec: BilibiliVideoCodec;
+  bilibiliVideoQuality: BilibiliVideoQuality;
   directoryPath: string;
   organization: DownloadOrganization;
+  videoQuality: DownloadVideoQuality;
 };
 
 type CredentialStatus = "idle" | "valid" | "invalid" | "unavailable";
+
+type BilibiliQrSession = {
+  qrcodeKey: string;
+  svg: string;
+};
+
+type BilibiliQrPollPayload = {
+  message?: string;
+  state?: Partial<BilibiliSettings>;
+  status?: "confirmed" | "expired" | "pending" | "scanned";
+};
+
+type PlatformIconProps = {
+  className?: string;
+};
+
+function DouyinIcon({ className }: PlatformIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M14 4v9.5a4.5 4.5 0 1 1-4.5-4.5"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="M14 4c1.1 2.9 3.1 4.8 6 5.4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="M14 7.2c1.1 1.6 2.6 2.6 4.6 3"
+        stroke="#22D3EE"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
+function BilibiliIcon({ className }: PlatformIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="m8 5-2-2M16 5l2-2"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+      <rect
+        x="4"
+        y="6"
+        width="16"
+        height="13"
+        rx="3"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M9 12.5v1M15 12.5v1M10 16h4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  );
+}
+
+function PlatformCredentialHeading({
+  icon,
+  title,
+}: {
+  icon: ReactNode;
+  title: string;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <span className="inline-flex size-7 shrink-0 items-center justify-center text-cyan">
+        {icon}
+      </span>
+      <h3 className="text-xs font-semibold text-foreground">{title}</h3>
+    </div>
+  );
+}
 
 type Feedback = {
   message: string;
   tone: "success" | "warning" | "error";
 };
+
+function FeedbackMessage({
+  feedback,
+  feedbackRef,
+}: {
+  feedback?: Feedback;
+  feedbackRef: Ref<HTMLParagraphElement>;
+}) {
+  if (!feedback) return null;
+
+  return (
+    <p
+      ref={feedbackRef}
+      className={`mt-2 text-xs font-medium leading-5 ${
+        feedback.tone === "success"
+          ? "text-emerald-400"
+          : feedback.tone === "error"
+            ? "text-rose-400"
+            : "text-amber"
+      }`}
+      role={feedback.tone === "error" ? "alert" : "status"}
+      aria-live={feedback.tone === "error" ? "assertive" : "polite"}
+    >
+      {feedback.message}
+    </p>
+  );
+}
 
 type CredentialModelTest =
   | { id: string; ok: true; purpose: DashScopeModelPurpose }
@@ -109,11 +252,35 @@ function normalizeDouyinSettings(value: Partial<DouyinSettings> | undefined): Do
   };
 }
 
+function normalizeBilibiliSettings(value: Partial<BilibiliSettings> | undefined): BilibiliSettings {
+  return {
+    credentialStatus: value?.credentialStatus,
+    cookie: typeof value?.cookie === "string" ? value.cookie : "",
+  };
+}
+
 function normalizeDownloadSettings(value: Partial<DownloadSettings> | undefined): DownloadSettings {
   const organization = value?.organization;
   return {
+    bilibiliAudioQuality: isBilibiliAudioQuality(value?.bilibiliAudioQuality)
+      ? value.bilibiliAudioQuality
+      : DEFAULT_BILIBILI_AUDIO_QUALITY,
+    bilibiliStreamFormat: isBilibiliStreamFormat(value?.bilibiliStreamFormat)
+      ? value.bilibiliStreamFormat
+      : DEFAULT_BILIBILI_STREAM_FORMAT,
+    bilibiliVideoCodec: isBilibiliVideoCodec(value?.bilibiliVideoCodec)
+      ? value.bilibiliVideoCodec
+      : DEFAULT_BILIBILI_VIDEO_CODEC,
+    bilibiliVideoQuality: isBilibiliVideoQuality(value?.bilibiliVideoQuality)
+      ? value.bilibiliVideoQuality
+      : isDownloadVideoQuality(value?.videoQuality)
+        ? value.videoQuality
+        : DEFAULT_BILIBILI_VIDEO_QUALITY,
     directoryPath: typeof value?.directoryPath === "string" ? value.directoryPath : "",
     organization: isDownloadOrganization(organization) ? organization : DEFAULT_DOWNLOAD_ORGANIZATION,
+    videoQuality: isDownloadVideoQuality(value?.videoQuality)
+      ? value.videoQuality
+      : DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   };
 }
 
@@ -150,6 +317,71 @@ const DOWNLOAD_ORGANIZATION_OPTIONS: Array<{
   { value: "flat", label: "完全扁平化", description: "不创建任何子目录，全部文件直接放在下载目录。", example: "作品视频.mp4" },
 ];
 
+const DOWNLOAD_VIDEO_QUALITY_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: DownloadVideoQuality;
+}> = [
+  { value: "lowest", label: "最低画质（默认）", description: "选择接口返回的最低码率视频源，节省下载时间和存储空间。" },
+  { value: "360p", label: "360P", description: "选择最接近 640×360 的可用视频源。" },
+  { value: "480p", label: "480P", description: "选择最接近 854×480 的可用视频源。" },
+  { value: "540p", label: "540P", description: "选择最接近 960×540 的可用视频源。" },
+  { value: "720p", label: "720P", description: "选择最接近 1280×720 的可用视频源。" },
+  { value: "1080p", label: "1080P", description: "选择最接近 1920×1080 的可用视频源。" },
+  { value: "1440p", label: "1440P", description: "选择最接近 2560×1440 的可用视频源。" },
+  { value: "highest", label: "最高画质", description: "选择接口返回的最高码率视频源。" },
+];
+
+const BILIBILI_VIDEO_QUALITY_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: BilibiliVideoQuality;
+}> = [
+  { value: "lowest", label: "省流模式（默认）", description: "文件更小，适合只听内容或节省空间。" },
+  { value: "360p", label: "360P", description: "基础清晰度，文件较小。" },
+  { value: "480p", label: "480P", description: "日常观看清晰度。" },
+  { value: "540p", label: "540P", description: "比 480P 更清晰。" },
+  { value: "720p", label: "720P 高清", description: "清晰度与文件大小较均衡。" },
+  { value: "1080p", label: "1080P 全高清", description: "画面更清晰，文件更大。" },
+  { value: "1440p", label: "2K（1440P）", description: "需要视频和账号支持。" },
+  { value: "2160p", label: "4K（2160P）", description: "文件较大，需要视频和账号支持。" },
+  { value: "4320p", label: "8K（4320P）", description: "文件很大，仅少量视频支持。" },
+  { value: "highest", label: "最高可用清晰度", description: "自动选择当前可用的最清晰版本。" },
+];
+
+const BILIBILI_AUDIO_QUALITY_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: BilibiliAudioQuality;
+}> = [
+  { value: "lowest", label: "省流音质（默认）", description: "文件更小，适合只听内容。" },
+  { value: "64k", label: "标准音质（64K）", description: "适合普通语音和背景音乐。" },
+  { value: "132k", label: "较清晰音质（132K）", description: "人声和音乐细节更清楚。" },
+  { value: "192k", label: "高音质（192K）", description: "适合重视音乐细节的内容。" },
+  { value: "hiRes", label: "Hi-Res 无损", description: "音质最好，文件会更大。" },
+  { value: "dolby", label: "杜比音效", description: "需要视频和播放设备支持。" },
+  { value: "highest", label: "最高可用音质", description: "自动选择当前可用的最佳音质。" },
+];
+
+const BILIBILI_STREAM_FORMAT_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: BilibiliStreamFormat;
+}> = [
+  { value: "dashFull", label: "高清模式（DASH，默认）", description: "优先获取更清晰、更高音质的可用版本。" },
+  { value: "dashBasic", label: "兼容模式（基础 DASH）", description: "优先保证下载和播放兼容性。" },
+];
+
+const BILIBILI_VIDEO_CODEC_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: BilibiliVideoCodec;
+}> = [
+  { value: "avc", label: "兼容模式（H.264 / AVC，默认）", description: "大多数设备都能正常播放。" },
+  { value: "hevc", label: "省空间模式（H.265 / HEVC）", description: "文件更小，旧设备可能无法播放。" },
+  { value: "av1", label: "高效压缩模式（AV1）", description: "文件更小，需要较新的设备或播放器。" },
+];
+
 function DownloadSettingsPanel({
   isLoaded,
   onSettingsChange,
@@ -160,11 +392,22 @@ function DownloadSettingsPanel({
   settings: DownloadSettings;
 }) {
   const [feedback, setFeedback] = useState<Feedback>();
+  const [downloadPlatform, setDownloadPlatform] = useState<"douyin" | "bilibili">("douyin");
   const [isSaving, setIsSaving] = useState(false);
   const helpDetailsRef = useRef<HTMLDetailsElement>(null);
   const directoryPickerSupported = supportsDownloadDirectoryPicker();
   const selectedOrganization = DOWNLOAD_ORGANIZATION_OPTIONS.find((option) => option.value === settings.organization)
     ?? DOWNLOAD_ORGANIZATION_OPTIONS[0];
+  const selectedVideoQuality = DOWNLOAD_VIDEO_QUALITY_OPTIONS.find((option) => option.value === settings.videoQuality)
+    ?? DOWNLOAD_VIDEO_QUALITY_OPTIONS[0];
+  const selectedBilibiliVideoQuality = BILIBILI_VIDEO_QUALITY_OPTIONS.find((option) => option.value === settings.bilibiliVideoQuality)
+    ?? BILIBILI_VIDEO_QUALITY_OPTIONS[0];
+  const selectedBilibiliAudioQuality = BILIBILI_AUDIO_QUALITY_OPTIONS.find((option) => option.value === settings.bilibiliAudioQuality)
+    ?? BILIBILI_AUDIO_QUALITY_OPTIONS[0];
+  const selectedBilibiliStreamFormat = BILIBILI_STREAM_FORMAT_OPTIONS.find((option) => option.value === settings.bilibiliStreamFormat)
+    ?? BILIBILI_STREAM_FORMAT_OPTIONS[0];
+  const selectedBilibiliCodec = BILIBILI_VIDEO_CODEC_OPTIONS.find((option) => option.value === settings.bilibiliVideoCodec)
+    ?? BILIBILI_VIDEO_CODEC_OPTIONS[0];
 
   useEffect(() => {
     function closeHelpOnOutsidePointer(event: PointerEvent) {
@@ -201,9 +444,9 @@ function DownloadSettingsPanel({
         headers: { "content-type": "application/json" },
         method: "PUT",
       });
-      const payload = await readJsonPayload(response, "抖音下载配置保存失败。") as UserSettingsPayload;
+      const payload = await readJsonPayload(response, "下载配置保存失败。") as UserSettingsPayload;
       if (!response.ok) {
-        throw new Error(getApiError(payload)?.error || "抖音下载配置保存失败。");
+        throw new Error(getApiError(payload)?.error || "下载配置保存失败。");
       }
       const savedSettings = normalizeDownloadSettings(payload.settings?.download);
       onSettingsChange(savedSettings);
@@ -212,7 +455,7 @@ function DownloadSettingsPanel({
     } catch (error) {
       onSettingsChange(previousSettings);
       cacheDownloadOrganization(previousSettings.organization);
-      setFeedback({ message: readUserFacingError(error, "抖音下载配置保存失败。"), tone: "error" });
+      setFeedback({ message: readUserFacingError(error, "下载配置保存失败。"), tone: "error" });
     } finally {
       setIsSaving(false);
     }
@@ -221,7 +464,7 @@ function DownloadSettingsPanel({
   return (
     <div className="w-full max-w-4xl">
       <div className="mb-4 flex items-center gap-1.5">
-        <h2 className="text-base font-semibold text-foreground">抖音下载配置</h2>
+        <h2 className="text-base font-semibold text-foreground">下载配置</h2>
         <details ref={helpDetailsRef} className="relative">
           <summary
             className="inline-flex size-6 cursor-pointer list-none items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/30 [&::-webkit-details-marker]:hidden"
@@ -234,6 +477,39 @@ function DownloadSettingsPanel({
             Chrome 和 Edge 支持选择自定义目录，其他浏览器将使用浏览器默认下载目录。受浏览器安全限制，网页只能读取已授权目录的名称，无法获取完整磁盘路径。
           </div>
         </details>
+      </div>
+
+      <div
+        className="mb-4 grid grid-cols-2 rounded-md bg-white/[0.045] p-0.5"
+        role="group"
+        aria-label="下载配置平台"
+      >
+        <button
+          type="button"
+          aria-pressed={downloadPlatform === "douyin"}
+          onClick={() => setDownloadPlatform("douyin")}
+          className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors ${
+            downloadPlatform === "douyin"
+              ? "bg-surface-strong text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <DouyinIcon className="size-4 text-cyan" />
+          抖音下载配置
+        </button>
+        <button
+          type="button"
+          aria-pressed={downloadPlatform === "bilibili"}
+          onClick={() => setDownloadPlatform("bilibili")}
+          className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors ${
+            downloadPlatform === "bilibili"
+              ? "bg-surface-strong text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <BilibiliIcon className="size-4 text-cyan" />
+          Bilibili 下载配置
+        </button>
       </div>
 
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[auto_minmax(0,1fr)_10.5rem_auto]">
@@ -262,7 +538,7 @@ function DownloadSettingsPanel({
             >
               <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
                 <span className="shrink-0 text-foreground">目录组织方式</span>
-                <span className="ml-auto truncate font-semibold text-foreground">{selectedOrganization.label}</span>
+                <span className="ml-auto truncate text-xs font-semibold text-foreground">{selectedOrganization.label}</span>
               </span>
             </SelectTrigger>
             <SelectContent
@@ -278,7 +554,7 @@ function DownloadSettingsPanel({
                   className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]"
                 >
                   <span className="grid gap-1 text-left">
-                    <span className="text-sm font-semibold text-foreground">{option.label}</span>
+                    <span className="text-xs font-semibold text-foreground">{option.label}</span>
                     <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
                     <code className="text-[11px] text-cyan/85">示例：{option.example}</code>
                   </span>
@@ -297,6 +573,159 @@ function DownloadSettingsPanel({
           </button>
         </div>
       </div>
+
+      {downloadPlatform === "douyin" ? (
+        <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 sm:max-w-md">
+        <span className="whitespace-nowrap text-xs font-semibold text-foreground">抖音视频清晰度：</span>
+        <Select
+          value={settings.videoQuality}
+          onValueChange={(value) => {
+            if (!isDownloadVideoQuality(value)) return;
+            void persistDownloadSettings({ ...settings, videoQuality: value });
+          }}
+          disabled={!isLoaded || isSaving}
+        >
+          <SelectTrigger
+            aria-label="抖音视频清晰度"
+            className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span className="truncate text-xs font-semibold text-foreground">{selectedVideoQuality.label}</span>
+          </SelectTrigger>
+          <SelectContent align="start" sideOffset={6} className="w-[min(25rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
+            {DOWNLOAD_VIDEO_QUALITY_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
+                <span className="grid gap-1 text-left">
+                  <span className="text-xs font-semibold text-foreground">{option.label}</span>
+                  <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        </div>
+      ) : null}
+
+      {downloadPlatform === "bilibili" ? (
+        <div className="mt-3">
+          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-1.5">
+            <span className="text-xs font-semibold text-foreground">视频清晰度</span>
+            <Select
+              value={settings.bilibiliVideoQuality}
+              onValueChange={(value) => {
+                if (!isBilibiliVideoQuality(value)) return;
+                void persistDownloadSettings({ ...settings, bilibiliVideoQuality: value });
+              }}
+              disabled={!isLoaded || isSaving}
+            >
+              <SelectTrigger
+                aria-label="Bilibili 视频清晰度"
+                className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="truncate text-xs font-semibold text-foreground">{selectedBilibiliVideoQuality.label}</span>
+              </SelectTrigger>
+              <SelectContent align="start" sideOffset={6} className="w-[min(26rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
+                {BILIBILI_VIDEO_QUALITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
+                    <span className="grid gap-1 text-left">
+                      <span className="text-xs font-semibold text-foreground">{option.label}</span>
+                      <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <span className="text-xs font-semibold text-foreground">文件兼容性</span>
+            <Select
+              value={settings.bilibiliVideoCodec}
+              onValueChange={(value) => {
+                if (!isBilibiliVideoCodec(value)) return;
+                void persistDownloadSettings({ ...settings, bilibiliVideoCodec: value });
+              }}
+              disabled={!isLoaded || isSaving}
+            >
+              <SelectTrigger
+                aria-label="Bilibili 文件兼容性"
+                className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="truncate text-xs font-semibold text-foreground">{selectedBilibiliCodec.label}</span>
+              </SelectTrigger>
+              <SelectContent align="start" sideOffset={6} className="w-[min(26rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
+                {BILIBILI_VIDEO_CODEC_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
+                    <span className="grid gap-1 text-left">
+                      <span className="text-xs font-semibold text-foreground">{option.label}</span>
+                      <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <span className="text-xs font-semibold text-foreground">音频质量</span>
+            <Select
+              value={settings.bilibiliAudioQuality}
+              onValueChange={(value) => {
+                if (!isBilibiliAudioQuality(value)) return;
+                void persistDownloadSettings({ ...settings, bilibiliAudioQuality: value });
+              }}
+              disabled={!isLoaded || isSaving}
+            >
+              <SelectTrigger
+                aria-label="Bilibili 音频质量"
+                className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="truncate text-xs font-semibold text-foreground">{selectedBilibiliAudioQuality.label}</span>
+              </SelectTrigger>
+              <SelectContent align="start" sideOffset={6} className="w-[min(26rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
+                {BILIBILI_AUDIO_QUALITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
+                    <span className="grid gap-1 text-left">
+                      <span className="text-xs font-semibold text-foreground">{option.label}</span>
+                      <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid gap-1.5">
+            <span className="text-xs font-semibold text-foreground">下载模式</span>
+            <Select
+              value={settings.bilibiliStreamFormat}
+              onValueChange={(value) => {
+                if (!isBilibiliStreamFormat(value)) return;
+                void persistDownloadSettings({ ...settings, bilibiliStreamFormat: value });
+              }}
+              disabled={!isLoaded || isSaving}
+            >
+              <SelectTrigger
+                aria-label="Bilibili 下载模式"
+                className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="truncate text-xs font-semibold text-foreground">{selectedBilibiliStreamFormat.label}</span>
+              </SelectTrigger>
+              <SelectContent align="start" sideOffset={6} className="w-[min(27rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
+                {BILIBILI_STREAM_FORMAT_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
+                    <span className="grid gap-1 text-left">
+                      <span className="text-xs font-semibold text-foreground">{option.label}</span>
+                      <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        </div>
+      ) : null}
       {feedback ? (
         <p className="mt-2 text-xs font-medium leading-5 text-rose-400" role="alert">
           {feedback.message}
@@ -529,7 +958,7 @@ function AiCredentialPanel({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Cable className="size-4 text-cyan" aria-hidden="true" />
-            <h3 className="text-sm font-semibold text-foreground">连接信息</h3>
+            <h3 className="text-xs font-semibold text-foreground">连接信息</h3>
           </div>
 
           <label htmlFor="dashscope-base-url" className="mt-4 block text-xs font-semibold text-foreground">
@@ -608,7 +1037,7 @@ function AiCredentialPanel({
           <div className="mt-5">
             <div className="flex items-center gap-2">
               <BrainCircuit className="size-4 text-cyan" aria-hidden="true" />
-              <h3 className="text-sm font-semibold text-foreground">模型配置</h3>
+              <h3 className="text-xs font-semibold text-foreground">模型配置</h3>
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {(Object.keys(DASHSCOPE_MODEL_OPTIONS) as DashScopeModelPurpose[]).map((purpose) => {
@@ -676,7 +1105,7 @@ function AiCredentialPanel({
         <div className="min-w-0">
            <div className="flex items-center gap-2">
              <Bot className="size-4 text-cyan" aria-hidden="true" />
-             <h3 className="text-sm font-semibold text-foreground">创建正确 API Key</h3>
+             <h3 className="text-xs font-semibold text-foreground">创建正确 API Key</h3>
            </div>
 
            <button
@@ -691,6 +1120,7 @@ function AiCredentialPanel({
                alt="EchoLens 新加坡地域 API Key 创建流程图"
                width={1680}
                height={942}
+               loading="eager"
                className="h-auto w-full"
                sizes="(min-width: 1024px) 40vw, 100vw"
              />
@@ -889,10 +1319,8 @@ function GuideImageModal({
 }
 
 export function SettingsPage({
-  douyinAccountServicesEnabled,
   initialSection = "aiCredential",
 }: {
-  douyinAccountServicesEnabled: boolean;
   initialSection?: SettingsSection;
 }) {
   const router = useRouter();
@@ -900,9 +1328,15 @@ export function SettingsPage({
   const [aiCredentialConfigured, setAiCredentialConfigured] = useState(false);
   const [aiCredentialApiKey, setAiCredentialApiKey] = useState("");
   const [aiModels, setAiModels] = useState<EchoLensDashScopeModelIds>(DEFAULT_DASHSCOPE_MODELS);
-  const [credentialMethod, setCredentialMethod] = useState<"automatic" | "manual">("automatic");
+  const [credentialMethod, setCredentialMethod] = useState<CredentialMethod>("automatic");
+  const [bilibiliCredentialMethod, setBilibiliCredentialMethod] = useState<CredentialMethod>("automatic");
   const [credentialStatus, setCredentialStatus] = useState<CredentialStatus>("idle");
-  const [feedback, setFeedback] = useState<Feedback>();
+  const [bilibiliCredentialStatus, setBilibiliCredentialStatus] = useState<CredentialStatus>("idle");
+  const [bilibiliQrSession, setBilibiliQrSession] = useState<BilibiliQrSession>();
+  const [isBilibiliQrLoading, setIsBilibiliQrLoading] = useState(false);
+  const [isBilibiliQrPolling, setIsBilibiliQrPolling] = useState(false);
+  const [douyinFeedback, setDouyinFeedback] = useState<Feedback>();
+  const [bilibiliFeedback, setBilibiliFeedback] = useState<Feedback>();
   const [guideZoom, setGuideZoom] = useState(1);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [apiGuideZoom, setApiGuideZoom] = useState(1);
@@ -914,18 +1348,30 @@ export function SettingsPage({
     () => undefined,
   );
   const [settings, setSettings] = useState<DouyinSettings>({ cookie: "" });
+  const [bilibiliSettings, setBilibiliSettings] = useState<BilibiliSettings>({ cookie: "" });
   const [downloadSettings, setDownloadSettings] = useState<DownloadSettings>({
+    bilibiliAudioQuality: DEFAULT_BILIBILI_AUDIO_QUALITY,
+    bilibiliStreamFormat: DEFAULT_BILIBILI_STREAM_FORMAT,
+    bilibiliVideoCodec: DEFAULT_BILIBILI_VIDEO_CODEC,
+    bilibiliVideoQuality: DEFAULT_BILIBILI_VIDEO_QUALITY,
     directoryPath: "",
     organization: DEFAULT_DOWNLOAD_ORGANIZATION,
+    videoQuality: DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   });
   const [isCredentialVisible, setIsCredentialVisible] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const feedbackRef = useRef<HTMLParagraphElement>(null);
+  const [isDouyinSaving, setIsDouyinSaving] = useState(false);
+  const [isBilibiliSaving, setIsBilibiliSaving] = useState(false);
+  const douyinFeedbackRef = useRef<HTMLParagraphElement>(null);
+  const bilibiliFeedbackRef = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
-    feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [feedback]);
+    douyinFeedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [douyinFeedback]);
+
+  useEffect(() => {
+    bilibiliFeedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [bilibiliFeedback]);
 
   useEffect(() => {
     const isAnyGuideOpen = isGuideOpen || isApiGuideOpen;
@@ -1025,8 +1471,10 @@ export function SettingsPage({
 
         if (isActive) {
           const loadedSettings = normalizeDouyinSettings(settingsPayload.settings?.douyin);
+          const loadedBilibiliSettings = normalizeBilibiliSettings(settingsPayload.settings?.bilibili);
           const loadedDownloadSettings = normalizeDownloadSettings(settingsPayload.settings?.download);
           setSettings(loadedSettings);
+          setBilibiliSettings(loadedBilibiliSettings);
           setAiCredentialConfigured(Boolean(settingsPayload.settings?.aiCredential?.configured));
           setAiCredentialApiKey(typeof credentialPayload.apiKey === "string" ? credentialPayload.apiKey : "");
           setAiModels(normalizeDashScopeModelIds(settingsPayload.settings?.aiModels));
@@ -1039,11 +1487,18 @@ export function SettingsPage({
                 ? "invalid"
                 : "idle",
           );
+          setBilibiliCredentialStatus(
+            loadedBilibiliSettings.credentialStatus === "valid"
+              ? "valid"
+              : loadedBilibiliSettings.credentialStatus === "invalid"
+                ? "invalid"
+                : "idle",
+          );
           setIsLoaded(true);
         }
       } catch (loadError) {
         if (isActive) {
-          setFeedback({
+          setDouyinFeedback({
             message: readUserFacingError(loadError, "设置加载失败。"),
             tone: "error",
           });
@@ -1059,8 +1514,8 @@ export function SettingsPage({
   }, [router]);
 
   async function saveSettings(nextSettings: DouyinSettings = settings) {
-    setIsSaving(true);
-    setFeedback(undefined);
+    setIsDouyinSaving(true);
+    setDouyinFeedback(undefined);
     try {
       const response = await fetch("/api/user/settings", {
         body: JSON.stringify({ category: "douyin", value: nextSettings }),
@@ -1080,19 +1535,114 @@ export function SettingsPage({
       const savedSettings = normalizeDouyinSettings(payload.settings?.douyin);
       setSettings(savedSettings);
       setCredentialStatus(savedSettings.cookie ? "valid" : "idle");
-      setFeedback({
+      setDouyinFeedback({
         message: savedSettings.cookie
           ? "访问凭证验证成功并已保存。"
           : "抖音账号访问凭证已清除。",
         tone: "success",
       });
     } catch (saveError) {
-      setFeedback({
+      setDouyinFeedback({
         message: readUserFacingError(saveError, "抖音账号凭证保存失败。"),
         tone: "error",
       });
     } finally {
-      setIsSaving(false);
+      setIsDouyinSaving(false);
+    }
+  }
+
+  async function saveBilibiliSettings(nextSettings: BilibiliSettings = bilibiliSettings) {
+    setIsBilibiliSaving(true);
+    setBilibiliFeedback(undefined);
+    try {
+      const response = await fetch("/api/user/settings", {
+        body: JSON.stringify({ category: "bilibili", value: nextSettings }),
+        headers: { "content-type": "application/json" },
+        method: "PUT",
+      });
+      const payload = await readJsonPayload(response, "Bilibili 账号凭证保存失败。") as UserSettingsPayload;
+      if (!response.ok) {
+        const apiError = getApiError(payload);
+        setBilibiliCredentialStatus(
+          apiError?.code === "LOGIN_REQUIRED" || apiError?.code === "INVALID_COOKIE"
+            ? "invalid"
+            : "unavailable",
+        );
+        throw new Error(apiError?.error || "Bilibili 账号凭证保存失败。");
+      }
+      const savedSettings = normalizeBilibiliSettings(payload.settings?.bilibili);
+      setBilibiliSettings(savedSettings);
+      setBilibiliCredentialStatus(savedSettings.cookie ? "valid" : "idle");
+      setBilibiliFeedback({
+        message: savedSettings.cookie
+          ? "Bilibili 凭证已验证并保存。"
+          : "Bilibili 访问凭证已清除。",
+        tone: "success",
+      });
+    } catch (saveError) {
+      setBilibiliFeedback({
+        message: readUserFacingError(saveError, "Bilibili 账号凭证保存失败。"),
+        tone: "error",
+      });
+    } finally {
+      setIsBilibiliSaving(false);
+    }
+  }
+
+  async function generateBilibiliQrCode() {
+    setIsBilibiliQrLoading(true);
+    setBilibiliQrSession(undefined);
+    setBilibiliFeedback(undefined);
+    try {
+      const response = await fetch("/api/bilibili/credential/qrcode", { method: "POST" });
+      const payload = await readJsonPayload(response, "Bilibili 登录二维码生成失败。") as BilibiliQrSession;
+      if (!response.ok) {
+        throw new Error(getApiError(payload)?.error || "Bilibili 登录二维码生成失败。");
+      }
+      setBilibiliQrSession(payload);
+      setBilibiliFeedback({ message: "请使用 Bilibili App 扫码并确认登录。", tone: "warning" });
+    } catch (error) {
+      setBilibiliFeedback({ message: readUserFacingError(error, "Bilibili 登录二维码生成失败。"), tone: "error" });
+    } finally {
+      setIsBilibiliQrLoading(false);
+    }
+  }
+
+  async function pollBilibiliQrCode(session: BilibiliQrSession) {
+    if (isBilibiliQrPolling) return;
+    setIsBilibiliQrPolling(true);
+    setBilibiliFeedback(undefined);
+    try {
+      const response = await fetch("/api/bilibili/credential/qrcode/poll", {
+        body: JSON.stringify({ qrcodeKey: session.qrcodeKey }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const payload = await readJsonPayload(response, "Bilibili 登录状态检测失败。") as BilibiliQrPollPayload;
+      if (!response.ok) {
+        throw new Error(getApiError(payload)?.error || "Bilibili 登录状态检测失败。");
+      }
+      if (payload.status === "confirmed") {
+        const savedSettings = normalizeBilibiliSettings(payload.state);
+        setBilibiliSettings(savedSettings);
+        setBilibiliCredentialStatus("valid");
+        setBilibiliQrSession(undefined);
+        setBilibiliFeedback({
+          message: "Bilibili 凭证已验证并保存。",
+          tone: "success",
+        });
+        return;
+      }
+      if (payload.status === "expired") {
+        setBilibiliQrSession(undefined);
+        setBilibiliFeedback({ message: payload.message || "二维码已过期，请重新生成。", tone: "error" });
+        return;
+      }
+      setBilibiliFeedback({ message: payload.message || "等待扫码确认。", tone: "warning" });
+    } catch (error) {
+      setBilibiliFeedback({ message: readUserFacingError(error, "Bilibili 登录状态检测失败。"), tone: "error" });
+    } finally {
+      setIsBilibiliQrPolling(false);
     }
   }
 
@@ -1112,6 +1662,12 @@ export function SettingsPage({
     unavailable: { label: "检测失败", style: "bg-amber" },
     valid: { label: "凭证有效", style: "bg-emerald-500" },
   }[credentialStatus];
+  const bilibiliCredentialStatusIndicator = {
+    idle: { label: "尚未验证", style: "bg-black/35" },
+    invalid: { label: "凭证无效", style: "bg-rose-500" },
+    unavailable: { label: "检测失败", style: "bg-amber" },
+    valid: { label: "凭证有效", style: "bg-emerald-500" },
+  }[bilibiliCredentialStatus];
 
   return (
     <main className="min-h-dvh w-full bg-background text-foreground">
@@ -1142,17 +1698,15 @@ export function SettingsPage({
                 <KeyRound className="size-4" aria-hidden="true" />
                 自定义 APIKey
               </button>
-              {douyinAccountServicesEnabled ? (
-                <button
-                  type="button"
-                  onClick={() => setActiveSection("douyin")}
-                  className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
-                  aria-current={activeSection === "douyin" ? "page" : undefined}
-                >
-                  <UserRound className="size-4" aria-hidden="true" />
-                  抖音账号凭证
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => setActiveSection("douyin")}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                aria-current={activeSection === "douyin" ? "page" : undefined}
+              >
+                <UserRound className="size-4" aria-hidden="true" />
+                账号凭证
+              </button>
               <button
                 type="button"
                 onClick={() => setActiveSection("download")}
@@ -1160,7 +1714,7 @@ export function SettingsPage({
                 aria-current={activeSection === "download" ? "page" : undefined}
               >
                 <Download className="size-4" aria-hidden="true" />
-                抖音下载配置
+                下载配置
               </button>
             </nav>
           </aside>
@@ -1180,13 +1734,20 @@ export function SettingsPage({
                  onConfiguredChange={setAiCredentialConfigured}
                  onModelsChange={setAiModels}
                />
-            ) : activeSection === "douyin" && douyinAccountServicesEnabled ? (
+            ) : activeSection === "douyin" ? (
               <div className="w-full max-w-2xl">
               <div className="mb-4 border-b border-white/10 pb-3">
-                <h2 className="text-base font-semibold text-foreground">抖音账号凭证</h2>
+                <h2 className="text-base font-semibold text-foreground">账号凭证</h2>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  用于在 EchoLens 中使用需要抖音登录状态的相关功能，请妥善保管避免泄露。
+                  用于在 EchoLens 中使用需要平台登录状态的相关功能，请妥善保管避免泄露。
                 </p>
+              </div>
+
+              <div className="mb-3">
+                <PlatformCredentialHeading
+                  icon={<DouyinIcon className="size-5" />}
+                  title="抖音凭证"
+                />
               </div>
 
               <div
@@ -1227,7 +1788,7 @@ export function SettingsPage({
                   <div className="grid gap-3">
                     <div>
                       <div className="flex items-center gap-1.5">
-                        <h3 className="text-sm font-semibold text-foreground">使用自动获取程序（推荐）</h3>
+                        <h3 className="text-xs font-semibold text-foreground">使用自动获取程序（推荐）</h3>
                         {automaticDownload ? (
                           <details className="relative">
                             <summary
@@ -1302,7 +1863,7 @@ export function SettingsPage({
                 ) : (
                   <div className="grid gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-foreground">通过开发者工具获取</h3>
+                      <h3 className="text-xs font-semibold text-foreground">通过开发者工具获取</h3>
                       <ol className="sr-only">
                         <li>在浏览器中登录任意抖音页面。</li>
                         <li>打开开发者工具：Windows 按 <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-xs text-foreground">F12</kbd>，macOS 按 <kbd className="rounded bg-white/[0.07] px-1.5 py-0.5 font-mono text-xs text-foreground">Option + Command + I</kbd>。</li>
@@ -1339,10 +1900,10 @@ export function SettingsPage({
                 )}
               </div>
 
-              <div className="mt-4 border-t border-white/10 pt-4">
+              <div className="mt-4">
                 <div className="flex min-h-8 items-center">
                   <label htmlFor="douyin-credential" className="text-xs font-semibold text-foreground">
-                    访问凭证
+                    抖音访问凭证
                   </label>
                 </div>
                 <div className="mt-2 flex items-center gap-2">
@@ -1354,7 +1915,7 @@ export function SettingsPage({
                       onChange={(event) => {
                         setSettings({ ...settings, cookie: event.target.value });
                         setCredentialStatus("idle");
-                        setFeedback(undefined);
+                        setDouyinFeedback(undefined);
                       }}
                       autoCapitalize="none"
                       autoComplete="off"
@@ -1368,9 +1929,9 @@ export function SettingsPage({
                       onClick={() => {
                         setSettings((current) => ({ ...current, cookie: "" }));
                         setCredentialStatus("idle");
-                        setFeedback(undefined);
+                        setDouyinFeedback(undefined);
                       }}
-                      disabled={!settings.cookie || isSaving}
+                      disabled={!settings.cookie || isDouyinSaving}
                       className="absolute inset-y-0 right-9 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-35"
                       aria-label="清空访问凭证"
                       title="清空访问凭证"
@@ -1394,33 +1955,170 @@ export function SettingsPage({
                   <button
                     type="button"
                     onClick={() => void saveSettings()}
-                    disabled={isSaving || !isLoaded}
+                    disabled={isDouyinSaving || !isLoaded}
                     className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-cyan px-3 text-xs font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                   >
                     <span
-                      className={`mr-1.5 size-2 rounded-full ${isSaving ? "animate-pulse bg-cyan" : credentialStatusIndicator.style}`}
+                      className={`mr-1.5 size-2 rounded-full ${isDouyinSaving ? "bg-cyan" : credentialStatusIndicator.style}`}
                       role="status"
-                      aria-label={isSaving ? "正在验证并保存" : credentialStatusIndicator.label}
+                      aria-label={isDouyinSaving ? "正在验证并保存" : credentialStatusIndicator.label}
                     />
-                    {isSaving ? "验证中" : "验证并保存"}
+                    {isDouyinSaving ? "验证中" : "验证并保存"}
                   </button>
                 </div>
-                {feedback ? (
-                  <p
-                    ref={feedbackRef}
-                    className={`mt-2 text-xs font-medium leading-5 ${
-                      feedback.tone === "success"
-                        ? "text-emerald-400"
-                        : feedback.tone === "error"
-                          ? "text-rose-400"
-                          : "text-amber"
-                    }`}
-                    role={feedback.tone === "error" ? "alert" : "status"}
-                    aria-live={feedback.tone === "error" ? "assertive" : "polite"}
+                <FeedbackMessage feedback={douyinFeedback} feedbackRef={douyinFeedbackRef} />
+              </div>
+              <div className="mt-5 border-t border-white/10 pt-4">
+                <div className="flex min-h-8 items-start justify-between gap-3">
+                  <div>
+                    <PlatformCredentialHeading
+                      icon={<BilibiliIcon className="size-5" />}
+                      title="Bilibili 凭证"
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 rounded-md border border-white/10 bg-white/[0.025] p-3">
+                  <div
+                    className="grid grid-cols-2 rounded-md bg-white/[0.045] p-0.5"
+                    role="group"
+                    aria-label="Bilibili 凭证获取方式"
                   >
-                    {feedback.message}
-                  </p>
-                ) : null}
+                    <button
+                      type="button"
+                      aria-pressed={bilibiliCredentialMethod === "automatic"}
+                      onClick={() => setBilibiliCredentialMethod("automatic")}
+                      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors ${
+                        bilibiliCredentialMethod === "automatic"
+                          ? "bg-surface-strong text-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <MonitorDown className="size-3.5 text-cyan" aria-hidden="true" />
+                      自动获取
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={bilibiliCredentialMethod === "manual"}
+                      onClick={() => {
+                        setBilibiliCredentialMethod("manual");
+                        setBilibiliQrSession(undefined);
+                        setBilibiliFeedback(undefined);
+                      }}
+                      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors ${
+                        bilibiliCredentialMethod === "manual"
+                          ? "bg-surface-strong text-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <SquareTerminal className="size-3.5 text-amber" aria-hidden="true" />
+                      开发者工具
+                    </button>
+                  </div>
+                  {bilibiliCredentialMethod === "automatic" ? (
+                    <div className="mt-3 grid gap-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void generateBilibiliQrCode()}
+                          disabled={!isLoaded || isBilibiliQrLoading || isBilibiliQrPolling}
+                          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-white/[0.06] px-3 text-xs font-semibold text-cyan transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:text-muted-foreground"
+                        >
+                          {isBilibiliQrLoading ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <MonitorDown className="size-3.5" aria-hidden="true" />}
+                          生成 Bilibili 扫码登录
+                        </button>
+                        <span className="text-xs leading-5 text-muted-foreground">
+                          使用 Bilibili App 扫码并确认后，点击“立即检测”保存 Cookie。
+                        </span>
+                      </div>
+                      {bilibiliQrSession ? (
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div
+                            className="rounded-md bg-white p-2"
+                            aria-label="Bilibili 登录二维码"
+                            dangerouslySetInnerHTML={{ __html: bilibiliQrSession.svg }}
+                          />
+                          <div className="grid gap-2 text-xs leading-5 text-muted-foreground">
+                            <button
+                              type="button"
+                              onClick={() => void pollBilibiliQrCode(bilibiliQrSession)}
+                              disabled={isBilibiliQrPolling}
+                              className="inline-flex h-8 w-fit items-center justify-center gap-1.5 rounded-md bg-cyan px-3 font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                            >
+                              {isBilibiliQrPolling ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <ShieldCheck className="size-3.5" aria-hidden="true" />}
+                              立即检测
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <ol className="mt-3 grid list-decimal gap-1 pl-4 text-xs leading-5 text-muted-foreground">
+                      <li>登录 Bilibili 网页端后打开开发者工具 Network。</li>
+                      <li>刷新任意 Bilibili 页面，选中主文档请求，在 Request Headers 中复制 Cookie。</li>
+                      <li>至少需要包含 <code className="text-cyan">SESSDATA</code>；系统会用 nav 接口检测真实登录态。</li>
+                    </ol>
+                  )}
+                </div>
+                <label htmlFor="bilibili-credential" className="sr-only">
+                  Bilibili 访问凭证
+                </label>
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="relative min-w-0 flex-1">
+                    <input
+                      id="bilibili-credential"
+                      type={isCredentialVisible ? "text" : "password"}
+                      value={bilibiliSettings.cookie}
+                      onChange={(event) => {
+                        setBilibiliSettings({ ...bilibiliSettings, cookie: event.target.value });
+                        setBilibiliCredentialStatus("idle");
+                        setBilibiliFeedback(undefined);
+                      }}
+                      autoCapitalize="none"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      className="h-9 w-full rounded-md border border-cyan/40 bg-black/25 py-1.5 pl-3 pr-[4.5rem] font-mono text-xs text-foreground outline-none transition placeholder:font-sans placeholder:text-muted-foreground/65 hover:border-cyan/55 focus:border-cyan/70 focus:ring-2 focus:ring-cyan/15"
+                      placeholder="粘贴 SESSDATA、bili_jct、DedeUserID 等 Cookie"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBilibiliSettings({ cookie: "" });
+                        setBilibiliCredentialStatus("idle");
+                        setBilibiliFeedback(undefined);
+                      }}
+                      disabled={!bilibiliSettings.cookie || isBilibiliSaving}
+                      className="absolute inset-y-0 right-9 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-35"
+                      aria-label="清空 Bilibili 访问凭证"
+                      title="清空 Bilibili 访问凭证"
+                    >
+                      <X className="size-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsCredentialVisible((current) => !current)}
+                      className="absolute inset-y-0 right-0 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+                      aria-label={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
+                      title={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
+                    >
+                      {isCredentialVisible ? <EyeOff className="size-3.5" aria-hidden="true" /> : <Eye className="size-3.5" aria-hidden="true" />}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void saveBilibiliSettings()}
+                    disabled={isBilibiliSaving || !isLoaded}
+                    className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-cyan px-3 text-xs font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                  >
+                    <span
+                      className={`mr-1.5 size-2 rounded-full ${isBilibiliSaving ? "bg-cyan" : bilibiliCredentialStatusIndicator.style}`}
+                      role="status"
+                      aria-label={isBilibiliSaving ? "正在验证并保存" : bilibiliCredentialStatusIndicator.label}
+                    />
+                    {isBilibiliSaving ? "验证中" : "验证并保存"}
+                  </button>
+                </div>
+                <FeedbackMessage feedback={bilibiliFeedback} feedbackRef={bilibiliFeedbackRef} />
               </div>
               </div>
             ) : (

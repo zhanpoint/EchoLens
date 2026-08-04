@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   leaseRelease: vi.fn(),
   readTranscriptHistoryAsset: vi.fn(),
   readTranscriptHistoryRecord: vi.fn(),
+  readUserSetting: vi.fn(),
   upsertTranscriptHistoryAsset: vi.fn(),
 }));
 
@@ -16,6 +17,9 @@ vi.mock("@/lib/douyin/asset-bundle", () => ({
 }));
 vi.mock("@/lib/douyin/metadata-coordinator", () => ({
   acquireWorkMetadata: mocks.acquireWorkMetadata,
+}));
+vi.mock("@/lib/user-settings", () => ({
+  readUserSetting: mocks.readUserSetting,
 }));
 vi.mock("@/lib/oss/object-store", () => ({
   createOssSignedUrlWithExpiration: mocks.createOssSignedUrlWithExpiration,
@@ -54,6 +58,7 @@ describe("transcript history assets", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.readTranscriptHistoryRecord.mockResolvedValue(history);
+    mocks.readUserSetting.mockResolvedValue(undefined);
     mocks.readTranscriptHistoryAsset.mockResolvedValue(storedAudio);
     mocks.getOssObjectInfo.mockResolvedValue({ contentLength: 100, contentType: "audio/mp4" });
     mocks.createOssSignedUrlWithExpiration.mockReturnValue({
@@ -103,7 +108,7 @@ describe("transcript history assets", () => {
     });
 
     expect(mocks.ensurePreparedAsset).toHaveBeenCalledWith(
-      { id: history.workId, kind: "video" },
+      { id: history.workId, kind: "video", videoQuality: "lowest" },
       {},
       "cover",
     );
@@ -131,7 +136,7 @@ describe("transcript history assets", () => {
     });
 
     expect(mocks.ensurePreparedAsset).toHaveBeenCalledWith(
-      { id: history.workId, kind: "video" },
+      { id: history.workId, kind: "video", videoQuality: "lowest" },
       {},
       "originalAudio",
     );

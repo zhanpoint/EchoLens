@@ -2,7 +2,7 @@ import type { ResolvedDouyinWork } from "@/types/douyin";
 
 export type TranscribeWorkPayload = Pick<
   ResolvedDouyinWork,
-  "authorName" | "authorUrl" | "caption" | "durationSeconds" | "finalUrl" | "id" | "inputUrl" | "kind"
+  "authorName" | "authorUrl" | "caption" | "durationSeconds" | "finalUrl" | "id" | "inputUrl" | "kind" | "source"
 >;
 export type TranscribeHistoryContext = {
   historyRecordId: string;
@@ -19,5 +19,6 @@ export function buildTranscribeWorkPayload(work: ResolvedDouyinWork): Transcribe
     id: work.id,
     inputUrl: work.inputUrl,
     kind: work.kind,
+    source: work.source,
   };
 }

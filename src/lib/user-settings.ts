@@ -1,7 +1,7 @@
 import { execute, queryRows } from "@/lib/storage/postgres";
 import { decryptSensitiveValue, encryptSensitiveValue, isEncryptedValue } from "@/lib/sensitive-data";
 
-export type UserSettingsCategory = "aiCredential" | "aiModels" | "douyin" | "download" | "transcript" | "translation";
+export type UserSettingsCategory = "aiCredential" | "aiModels" | "bilibili" | "douyin" | "download" | "transcript" | "translation";
 
 type UserSettingRow = {
   category: string;
@@ -12,7 +12,7 @@ type ReadUserSettingsOptions = {
   includeDouyin?: boolean;
 };
 
-const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["aiCredential", "aiModels", "douyin", "download", "transcript", "translation"]);
+const USER_SETTINGS_CATEGORIES = new Set<UserSettingsCategory>(["aiCredential", "aiModels", "bilibili", "douyin", "download", "transcript", "translation"]);
 
 export function isUserSettingsCategory(value: string): value is UserSettingsCategory {
   return USER_SETTINGS_CATEGORIES.has(value as UserSettingsCategory);
@@ -68,7 +68,7 @@ async function readSettingValue(userId: string, category: UserSettingsCategory, 
     return value;
   }
   const stored = value as Record<string, unknown>;
-  const field = category === "douyin" ? "cookie" : "apiKey";
+  const field = category === "douyin" || category === "bilibili" ? "cookie" : "apiKey";
   if (isEncryptedValue(stored[field])) {
     return { ...stored, [field]: decryptSensitiveValue(stored[field], `${userId}:${category}:${field}`) };
   }
@@ -83,12 +83,12 @@ function protectSettingValue(userId: string, category: UserSettingsCategory, val
     return value;
   }
   const setting = value as Record<string, unknown>;
-  const field = category === "douyin" ? "cookie" : "apiKey";
+  const field = category === "douyin" || category === "bilibili" ? "cookie" : "apiKey";
   return typeof setting[field] === "string" && setting[field]
     ? { ...setting, [field]: encryptSensitiveValue(setting[field], `${userId}:${category}:${field}`) }
     : setting;
 }
 
-function isSensitiveCategory(category: UserSettingsCategory): category is "aiCredential" | "douyin" {
-  return category === "aiCredential" || category === "douyin";
+function isSensitiveCategory(category: UserSettingsCategory): category is "aiCredential" | "bilibili" | "douyin" {
+  return category === "aiCredential" || category === "bilibili" || category === "douyin";
 }

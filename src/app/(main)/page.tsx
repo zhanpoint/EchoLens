@@ -15,6 +15,7 @@ import {
   CornerUpLeft,
   Copy,
   Download,
+  Ellipsis,
   ExternalLink,
   GripVertical,
   History,
@@ -97,6 +98,12 @@ import {
   saveToDownloadDirectory,
 } from "@/lib/browser-download-directory";
 import { isDownloadOrganization, type DownloadOrganization } from "@/lib/download-settings";
+import {
+  buildWorkKey,
+  extractHttpUrl,
+  mediaSourceFromWorkKey,
+  type MediaSource,
+} from "@/lib/media/source";
 import { cn } from "@/lib/utils";
 import { AsrQuotaIndicator, type AsrQuota } from "@/components/asr-quota-indicator";
 import { InvitationDialog } from "@/components/invitation-dialog";
@@ -236,6 +243,7 @@ type SidebarEntry = {
   isPinned: boolean;
   isSession: boolean;
   sortAt: number;
+  source: MediaSource;
   statusMessage: string;
   title: string;
 };
@@ -268,6 +276,7 @@ type CachedMediaAsset = {
   verified?: boolean;
   workKey: string;
 };
+const BILIBILI_VIDEO_CACHE_MISSING_CODE = "BILIBILI_VIDEO_CACHE_MISSING";
 const assetCacheMemory = new Map<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>();
 
 type TranscriptHistoryRecord = {
@@ -301,7 +310,7 @@ type TranscriptHistoryDetail = {
   summaries: TranscriptHistorySummary[];
 };
 
-type ClipboardDouyinInput = {
+type ClipboardMediaInput = {
   tags: string[];
   text: string;
   url: string;
@@ -311,7 +320,7 @@ type SpeakerOption = {
   id: string;
   label: string;
 };
-type AsrModelId = "e1" | "e2";
+type AsrModelId = "e1" | "e2" | "e3";
 type AsrModelOption = {
   description: string;
   id: AsrModelId;
@@ -397,7 +406,8 @@ function isResolvedWorkPayload(payload: unknown): payload is
     typeof work.finalUrl === "string" &&
     typeof work.id === "string" &&
     typeof work.inputUrl === "string" &&
-    work.kind === "video";
+    work.kind === "video" &&
+    (work.source === undefined || work.source === "douyin" || work.source === "bilibili");
 }
 
 function getAvatarInitial(user: CurrentUser): string {
@@ -933,24 +943,24 @@ function parseJsonEvent<T>(event: string): T | null {
   }
 }
 
-async function readClipboardDouyinInput(): Promise<ClipboardDouyinInput | null> {
+async function readClipboardMediaInput(): Promise<ClipboardMediaInput | null> {
   if (typeof window === "undefined" || !window.isSecureContext || !navigator.clipboard?.readText) {
     return null;
   }
 
   try {
     const value = (await navigator.clipboard.readText()).trim();
-    const douyinInput = extractDouyinInput(value);
-    return value.length <= CLIPBOARD_INPUT_LIMIT && douyinInput
-      ? { text: value, ...douyinInput }
+    const mediaInput = extractMediaInput(value);
+    return value.length <= CLIPBOARD_INPUT_LIMIT && mediaInput
+      ? { text: value, ...mediaInput }
       : null;
   } catch {
     return null;
   }
 }
 
-function isSameDouyinInput(current: string, next: ClipboardDouyinInput): boolean {
-  const currentInput = extractDouyinInput(current);
+function isSameMediaInput(current: string, next: ClipboardMediaInput): boolean {
+  const currentInput = extractMediaInput(current);
   if (!currentInput) {
     return false;
   }
@@ -958,21 +968,14 @@ function isSameDouyinInput(current: string, next: ClipboardDouyinInput): boolean
   return currentInput.url === next.url || areSameTags(currentInput.tags, next.tags);
 }
 
-function extractDouyinInput(value: string): Pick<ClipboardDouyinInput, "tags" | "url"> | null {
-  const match = value.match(URL_PATTERN);
-  if (!match) {
-    return null;
-  }
+function extractMediaInput(value: string): Pick<ClipboardMediaInput, "tags" | "url"> | null {
+  const extracted = extractHttpUrl(value);
+  if (!extracted) return null;
 
-  const urlText = match[0].replace(TRAILING_URL_PUNCTUATION_PATTERN, "");
-  try {
-    const hostname = new URL(urlText).hostname;
-    return hostname === "douyin.com" || hostname.endsWith(".douyin.com")
-      ? { tags: extractTagsBeforeUrl(value, match.index ?? 0), url: urlText }
-      : null;
-  } catch {
-    return null;
-  }
+  return {
+    tags: extractTagsBeforeUrl(value, extracted.index),
+    url: extracted.value,
+  };
 }
 
 function extractTagsBeforeUrl(value: string, urlIndex: number): string[] {
@@ -996,6 +999,10 @@ function areSameTags(currentTags: string[], nextTags: string[]): boolean {
 const KIND_LABELS: Record<DouyinKind, string> = {
   video: "视频",
 };
+const SOURCE_LABELS: Record<MediaSource, string> = {
+  bilibili: "Bilibili",
+  douyin: "抖音",
+};
 
 const DOWNLOAD_ACTIONS: Array<{
   asset: MediaAssetKind;
@@ -1008,9 +1015,7 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "originalAudio", icon: AudioLines, label: "下载原声", previewLabel: "试听原声" },
 ];
 
-const CLIPBOARD_PRIVACY_HINT = "自动粘贴功能：检测到剪贴板最新记录包含抖音链接会自动填入输入框，但不会读取粘贴板历史记录，保护您的隐私。";
-const URL_PATTERN = /https?:\/\/[^\s"'<>，。！？；、）】》\\]+/i;
-const TRAILING_URL_PUNCTUATION_PATTERN = /[)\]}.,!?;:，。！？；：、]+$/u;
+const CLIPBOARD_PRIVACY_HINT = "自动粘贴功能：检测到剪贴板最新记录包含 HTTP/HTTPS 视频分享链接会自动填入输入框，但不会读取粘贴板历史记录，保护您的隐私。";
 const TAG_PATTERN = /#\s*[\p{L}\p{N}_-]+/gu;
 const SOCIAL_TOKEN_PATTERN = /([#@][\p{L}\p{N}_-]+)/gu;
 const CLIPBOARD_INPUT_LIMIT = 5000;
@@ -1116,6 +1121,11 @@ const ASR_MODEL_OPTIONS: AsrModelOption[] = [
     id: "e2",
     label: "E2模型",
   },
+  {
+    description: "全球第一的最强大的中文ASR模型，支持说话人分离和情感识别。",
+    id: "e3",
+    label: "E3模型",
+  },
 ];
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -1199,6 +1209,7 @@ function historyRecordToWork(record: TranscriptHistoryRecord): ResolvedDouyinWor
     id: record.workId,
     inputUrl: record.inputUrl,
     kind: record.workKind,
+    source: mediaSourceFromWorkKey(record.workKey),
   };
 }
 
@@ -1213,8 +1224,8 @@ function historyRecordToResult(record: TranscriptHistoryRecord): ExtractionResul
   };
 }
 
-function getWorkKey(work: Pick<ResolvedDouyinWork, "id" | "kind">): string {
-  return `${work.kind}:${work.id}`;
+function getWorkKey(work: Pick<ResolvedDouyinWork, "id" | "kind" | "source">): string {
+  return buildWorkKey(work);
 }
 
 function getWorkflowSessionStatus(
@@ -1223,10 +1234,10 @@ function getWorkflowSessionStatus(
   isCaching: boolean,
 ): Pick<SidebarEntry, "isBusy" | "statusMessage"> {
   if (session.isResolving) {
-    return { isBusy: true, statusMessage: "正在检测抖音链接" };
+    return { isBusy: true, statusMessage: "正在检测作品链接" };
   }
   if (isCaching) {
-    return { isBusy: true, statusMessage: "正在缓存抖音资源" };
+    return { isBusy: true, statusMessage: "正在缓存作品资源" };
   }
   if (liveSession?.isRunning) {
     return { isBusy: true, statusMessage: liveSession.statusMessage || "正在转录" };
@@ -1271,6 +1282,7 @@ function buildSidebarEntries(input: {
       isPinned: record?.pinnedAt !== undefined,
       isSession: Boolean(session),
       sortAt: record?.updatedAt ?? session?.createdAt ?? 0,
+      source: session?.work?.source ?? mediaSourceFromWorkKey(record?.workKey),
       statusMessage: status.statusMessage,
       title: session?.sessionName.trim()
         || session?.work?.caption?.trim()
@@ -1656,11 +1668,11 @@ export default function HomePage() {
   const effectiveSpeakerCount = speakerDiarizationEnabled && parsedSpeakerCount !== undefined && hasValidSpeakerCount
     ? parsedSpeakerCount
     : undefined;
-  const supportsQwenAsrOptions = asrModel === "e1";
-  const supportsAsrEnhancementOptions = asrModel === "e2";
+  const supportsQwenAsrOptions = asrModel === "e1" || asrModel === "e3";
+  const supportsAsrEnhancementOptions = asrModel === "e2" || asrModel === "e3";
   const signedFilterWordList = parseSpecialWordInput(signedFilterWords);
   const emptyFilterWordList = parseSpecialWordInput(emptyFilterWords);
-  const specialWordFilter = specialWordFilterEnabled && supportsAsrEnhancementOptions
+  const specialWordFilter = specialWordFilterEnabled && asrModel === "e2"
     ? buildSpecialWordFilterRequest({
         emptyWords: emptyFilterWordList,
         signedWords: signedFilterWordList,
@@ -2129,7 +2141,7 @@ export default function HomePage() {
     resolveRequestIdsRef.current.set(sessionId, requestId);
 
     if (!valueToResolve) {
-      updateWorkflowSession(sessionId, (session) => ({ ...session, error: "请输入抖音分享链接。" }));
+      updateWorkflowSession(sessionId, (session) => ({ ...session, error: "请输入抖音或 Bilibili 分享链接。" }));
       return;
     }
 
@@ -2145,7 +2157,7 @@ export default function HomePage() {
     }));
 
     try {
-      const response = await fetch("/api/douyin/resolve", {
+      const response = await fetch("/api/media/resolve", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -2234,11 +2246,11 @@ export default function HomePage() {
       }
 
       isReadingClipboardRef.current = true;
-      const clipboard = await readClipboardDouyinInput();
+      const clipboard = await readClipboardMediaInput();
       isReadingClipboardRef.current = false;
 
       const hasInputDraft = inputDraft?.sessionId === activeSessionId;
-      if (isActive && !hasInputDraft && clipboard && !isSameDouyinInput(input, clipboard)) {
+      if (isActive && !hasInputDraft && clipboard && !isSameMediaInput(input, clipboard)) {
         setInputDraft({ sessionId: activeSessionId, value: clipboard.text });
       }
     }
@@ -2664,7 +2676,7 @@ export default function HomePage() {
             />
             <div className="min-w-0 space-y-1">
               <h1 className="text-2xl font-semibold text-foreground">EchoLens</h1>
-              <p className="truncate text-sm text-muted-foreground">透视抖音作品的声音与文字</p>
+              <p className="truncate text-sm text-muted-foreground">透视视频作品的声音与文字</p>
             </div>
           </div>
           <div className="absolute right-0 top-0">
@@ -2825,7 +2837,7 @@ export default function HomePage() {
                 onChange={(event) => updateInput(event.target.value)}
                 disabled={!hasAcceptedUsage}
                 className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                placeholder={hasAcceptedUsage ? "粘贴抖音作品的分享链接或者地址。" : "请先勾选使用确认。"}
+                placeholder={hasAcceptedUsage ? "粘贴抖音或 Bilibili 作品链接。" : "请先勾选使用确认。"}
               />
               {input ? (
                 <button
@@ -2861,7 +2873,14 @@ export default function HomePage() {
             <div className="relative z-10 px-4 pt-4 sm:px-5 sm:pt-5">
               <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-2 gap-y-4 text-left text-sm xl:flex-nowrap">
                 <dl className="contents">
-                  <InfoRow className="w-20 shrink-0" label="作品类型" singleLine value={KIND_LABELS[activeKind]} />
+                  <InfoRow
+                    className="w-24 shrink-0"
+                    copyable={false}
+                    label="作品来源"
+                    leading={displayWork ? <SourceIcon source={displayWork.source ?? "douyin"} /> : null}
+                    singleLine
+                    value={displayWork ? SOURCE_LABELS[displayWork.source ?? "douyin"] : KIND_LABELS[activeKind]}
+                  />
                   <InfoRow
                     className="w-40 shrink-0"
                     label="作者"
@@ -2899,7 +2918,7 @@ export default function HomePage() {
                 {displayWork ? (
                   <WorkDownloadActions
                     cachedAssets={cachedAssets}
-                    commentsEnabled={douyinAccountServicesEnabled}
+                    commentsEnabled={douyinAccountServicesEnabled && displayWork.source !== "bilibili"}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
                     onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
@@ -2996,6 +3015,7 @@ export default function HomePage() {
                     speakerCount={speakerCount}
                     specialWordFilterEnabled={specialWordFilterEnabled}
                     supportsEnhancementOptions={supportsAsrEnhancementOptions}
+                    supportsSpecialWordFilter={asrModel === "e2"}
                   />
                 ) : activeKind === "video" && supportsQwenAsrOptions ? (
                   <QwenAsrItnSwitch
@@ -3176,8 +3196,11 @@ function TranscriptHistorySidebar({
   showReturnLive: boolean;
 }) {
   const [collapsedSections, toggleSection] = useCollapsedSidebarSections();
+  const [groupRecentBySource, setGroupRecentBySource] = useSidebarGroupBySource();
   const pinnedEntries = entries.filter((entry) => entry.isPinned);
   const recentEntries = entries.filter((entry) => !entry.isPinned);
+  const douyinRecentEntries = recentEntries.filter((entry) => entry.source === "douyin");
+  const bilibiliRecentEntries = recentEntries.filter((entry) => entry.source === "bilibili");
   const sectionProps = {
     activeId,
     collapsedSections,
@@ -3267,7 +3290,32 @@ function TranscriptHistorySidebar({
         {pinnedEntries.length ? (
           <SidebarSection {...sectionProps} entries={pinnedEntries} section="pinned" title="置顶" />
         ) : null}
-        <SidebarSection {...sectionProps} entries={recentEntries} section="recent" title="最近" />
+        <SidebarSection
+          {...sectionProps}
+          action={<RecentGroupingMenu grouped={groupRecentBySource} onGroupedChange={setGroupRecentBySource} />}
+          entries={recentEntries}
+          section="recent"
+          title="最近"
+        >
+          {groupRecentBySource ? (
+            <div className="mt-1">
+              <SidebarSection
+                {...sectionProps}
+                entries={douyinRecentEntries}
+                leading={<SourceIcon source="douyin" className="size-4 rounded-sm" />}
+                section="recent-douyin"
+                title="抖音"
+              />
+              <SidebarSection
+                {...sectionProps}
+                entries={bilibiliRecentEntries}
+                leading={<SourceIcon source="bilibili" className="size-4 rounded-sm" />}
+                section="recent-bilibili"
+                title="Bilibili"
+              />
+            </div>
+          ) : null}
+        </SidebarSection>
         {!isLoading && entries.length === 0 ? (
           <div className="px-2 py-10 text-center text-xs leading-5 text-muted-foreground">暂无转录历史</div>
         ) : null}
@@ -3397,10 +3445,146 @@ function useCollapsedSidebarSections(): [ReadonlySet<string>, (section: string) 
   return [collapsed, toggle];
 }
 
+const SIDEBAR_GROUP_BY_SOURCE_KEY = "echolens.sidebar.group-by-source";
+const SIDEBAR_GROUP_BY_SOURCE_EVENT = "echolens:sidebar-group-by-source";
+
+function useSidebarGroupBySource(): [boolean, (grouped: boolean) => void] {
+  const grouped = useSyncExternalStore(
+    (onStoreChange) => {
+      window.addEventListener("storage", onStoreChange);
+      window.addEventListener(SIDEBAR_GROUP_BY_SOURCE_EVENT, onStoreChange);
+      return () => {
+        window.removeEventListener("storage", onStoreChange);
+        window.removeEventListener(SIDEBAR_GROUP_BY_SOURCE_EVENT, onStoreChange);
+      };
+    },
+    () => window.localStorage.getItem(SIDEBAR_GROUP_BY_SOURCE_KEY) === "true",
+    () => false,
+  );
+  const setGrouped = useCallback((nextGrouped: boolean) => {
+    window.localStorage.setItem(SIDEBAR_GROUP_BY_SOURCE_KEY, String(nextGrouped));
+    window.dispatchEvent(new Event(SIDEBAR_GROUP_BY_SOURCE_EVENT));
+  }, []);
+
+  return [grouped, setGrouped];
+}
+
+function RecentGroupingMenu({
+  grouped,
+  onGroupedChange,
+}: {
+  grouped: boolean;
+  onGroupedChange: (grouped: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [panelPosition, setPanelPosition] = useState({ left: 0, top: 0 });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      if (
+        event.target instanceof Node
+        && !menuRef.current?.contains(event.target)
+        && !panelRef.current?.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    function updatePanelPosition() {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setPanelPosition({
+        left: Math.max(8, Math.min(rect.right + 6, window.innerWidth - 168)),
+        top: Math.min(rect.bottom + 6, window.innerHeight - 52),
+      });
+    }
+
+    updatePanelPosition();
+    window.addEventListener("resize", updatePanelPosition);
+    window.addEventListener("scroll", updatePanelPosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePanelPosition);
+      window.removeEventListener("scroll", updatePanelPosition, true);
+    };
+  }, [open]);
+
+  const panel = open && typeof document !== "undefined"
+    ? createPortal(
+        <div
+          ref={panelRef}
+          className="fixed z-[120] w-40 rounded-lg border border-white/12 bg-background/95 p-1.5 shadow-xl shadow-black/40 backdrop-blur-xl"
+          role="menu"
+          aria-label="历史分类设置"
+          style={panelPosition}
+        >
+          <div className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1.5 text-xs text-foreground transition hover:bg-white/[0.06]">
+            <span className="whitespace-nowrap">按视频来源分组</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={grouped}
+              aria-label="按视频来源分组"
+              onClick={() => onGroupedChange(!grouped)}
+              className={cn(
+                "relative inline-flex h-4 w-7 shrink-0 rounded-full transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/50",
+                grouped ? "bg-cyan" : "bg-white/20",
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute left-0.5 top-0.5 size-3 rounded-full bg-white shadow-sm transition-transform",
+                  grouped ? "translate-x-3" : "translate-x-0",
+                )}
+              />
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className={cn(
+          "flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground group-hover/section:opacity-100 group-focus-within/section:opacity-100",
+          open ? "opacity-100" : "opacity-0",
+        )}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label="历史分类设置"
+        title="历史分类设置"
+      >
+        <Ellipsis className="size-4" aria-hidden="true" />
+      </button>
+      {panel}
+    </div>
+  );
+}
+
 function SidebarSection({
+  action,
   activeId,
+  children,
   collapsedSections,
   entries,
+  leading,
   onDelete,
   onOpen,
   onRename,
@@ -3409,9 +3593,12 @@ function SidebarSection({
   section,
   title,
 }: {
+  action?: ReactNode;
   activeId?: string;
+  children?: ReactNode;
   collapsedSections: ReadonlySet<string>;
   entries: SidebarEntry[];
+  leading?: ReactNode;
   onDelete: (entry: SidebarEntry) => void;
   onOpen: (entry: SidebarEntry) => void;
   onRename: (entry: SidebarEntry, sessionName: string) => void;
@@ -3423,22 +3610,28 @@ function SidebarSection({
   const isCollapsed = collapsedSections.has(section);
 
   return (
-    <section className="mb-2">
-      <button
-        type="button"
-        onClick={() => onToggleSection(section)}
-        className="flex h-8 w-full items-center justify-between rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08]"
-        aria-expanded={!isCollapsed}
-      >
-        {title}
-        <ChevronRight
-          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !isCollapsed && "rotate-90")}
-          aria-hidden="true"
-        />
-      </button>
+    <section className="group/section mb-2">
+      <div className="flex h-8 items-center rounded-md transition hover:bg-white/[0.08]">
+        <button
+          type="button"
+          onClick={() => onToggleSection(section)}
+          className="flex min-w-0 flex-1 items-center justify-between rounded-md px-2.5 text-[13px] font-semibold text-foreground"
+          aria-expanded={!isCollapsed}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            {leading}
+            <span className="truncate">{title}</span>
+          </span>
+          <ChevronRight
+            className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !isCollapsed && "rotate-90")}
+            aria-hidden="true"
+          />
+        </button>
+        {action ? <div className="mr-1 shrink-0">{action}</div> : null}
+      </div>
       {isCollapsed ? null : (
         <div className="mt-1">
-          {entries.map((entry) => (
+          {children ?? entries.map((entry) => (
             <SidebarEntryItem
               active={entry.id === activeId}
               entry={entry}
@@ -3610,7 +3803,7 @@ function TranscribeControls({
     <div className={cn("empty-result-stage", hasConfig && "empty-result-stage--expanded")}>
       <div className="empty-result-main">
         <p className="animated-gradient-text empty-result-message mobile-readable relative z-10 max-w-[34rem] text-center text-sm font-semibold leading-6">
-          使用Echolens，将任何抖音作品内容即时转化为有用的可视化笔记。
+          使用 Echolens，将视频作品内容即时转化为有用的可视化笔记。
         </p>
         {notice ? <div className="relative z-10 w-full max-w-[34rem]">{notice}</div> : null}
       </div>
@@ -3655,6 +3848,7 @@ function SpeakerDiarizationSwitch({
   speakerCount,
   specialWordFilterEnabled,
   supportsEnhancementOptions,
+  supportsSpecialWordFilter,
 }: {
   checked: boolean;
   disabled?: boolean;
@@ -3666,6 +3860,7 @@ function SpeakerDiarizationSwitch({
   speakerCount: string;
   specialWordFilterEnabled: boolean;
   supportsEnhancementOptions: boolean;
+  supportsSpecialWordFilter: boolean;
 }) {
   function updateSpeakerCount(value: string) {
     onSpeakerCountChange(value.replace(/\D/gu, ""));
@@ -3735,21 +3930,25 @@ function SpeakerDiarizationSwitch({
           </span>
         </label>
       ) : null}
-      <CompactSwitch
-        checked={specialWordFilterEnabled}
-        disabled={disabled || !supportsEnhancementOptions}
-        label="敏感词过滤"
-        onChange={onSpecialWordFilterCheckedChange}
-      />
-      {specialWordFilterEnabled && supportsEnhancementOptions ? (
-        <button
-          type="button"
-          onClick={onSpecialWordFilterPanelOpen}
-          disabled={disabled}
-          className="inline-flex h-6 items-center rounded-md px-1.5 text-xs font-medium text-cyan transition hover:bg-cyan/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          配置
-        </button>
+      {supportsSpecialWordFilter ? (
+        <>
+          <CompactSwitch
+            checked={specialWordFilterEnabled}
+            disabled={disabled}
+            label="敏感词过滤"
+            onChange={onSpecialWordFilterCheckedChange}
+          />
+          {specialWordFilterEnabled ? (
+            <button
+              type="button"
+              onClick={onSpecialWordFilterPanelOpen}
+              disabled={disabled}
+              className="inline-flex h-6 items-center rounded-md px-1.5 text-xs font-medium text-cyan transition hover:bg-cyan/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              配置
+            </button>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -3900,7 +4099,13 @@ function AsrModelSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex h-8 w-[5.8rem] items-center justify-between gap-1.5 rounded-sm bg-transparent px-2 text-sm font-semibold text-foreground transition hover:text-cyan disabled:cursor-not-allowed disabled:opacity-50"
+        className={cn(
+          "inline-flex h-8 w-[5.8rem] items-center justify-between gap-1.5 rounded-sm bg-transparent px-2 text-sm font-semibold transition",
+          selected.id === "e3"
+            ? "bg-amber/[0.08] text-amber shadow-[0_0_14px_rgb(245_158_11_/_0.12)] hover:bg-amber/[0.13] hover:text-amber-300"
+            : "border border-transparent text-foreground hover:text-cyan",
+          disabled && "cursor-not-allowed opacity-50",
+        )}
         aria-expanded={open}
         aria-haspopup="listbox"
         title={selected.description}
@@ -3925,7 +4130,13 @@ function AsrModelSelect({
                     onClick={() => selectModel(option.id)}
                     className={cn(
                       "grid gap-0.5 rounded-md px-2.5 py-1.5 text-left transition",
-                      selectedOption ? "bg-cyan/[0.1] text-cyan" : "text-foreground hover:bg-white/[0.06]",
+                      selectedOption
+                        ? option.id === "e3"
+                          ? "border border-amber/35 bg-amber/[0.12] text-amber"
+                          : "border border-cyan/20 bg-cyan/[0.1] text-cyan"
+                        : option.id === "e3"
+                          ? "border border-transparent text-amber/90 hover:border-amber/25 hover:bg-amber/[0.08]"
+                          : "border border-transparent text-foreground hover:bg-white/[0.06]",
                     )}
                     role="option"
                     aria-selected={selectedOption}
@@ -4239,6 +4450,7 @@ function HighlightedTitle({ text }: { text: string }) {
 
 function InfoRow({
   className,
+  copyable = true,
   leading,
   label,
   value,
@@ -4246,6 +4458,7 @@ function InfoRow({
   href,
 }: {
   className?: string;
+  copyable?: boolean;
   leading?: ReactNode;
   label: string;
   value: string;
@@ -4283,7 +4496,7 @@ function InfoRow({
               {value}
             </span>
           )}
-          {value !== "未识别" ? (
+          {copyable && value !== "未识别" ? (
             <button
               type="button"
               onClick={() => void copyValue()}
@@ -4297,6 +4510,19 @@ function InfoRow({
         </div>
       </dd>
     </div>
+  );
+}
+
+function SourceIcon({ className, source }: { className?: string; source: MediaSource }) {
+  return (
+    <Image
+      src={source === "bilibili" ? "https://www.bilibili.com/favicon.ico" : "https://www.douyin.com/favicon.ico"}
+      alt=""
+      width={24}
+      height={24}
+      unoptimized
+      className={cn("size-6 shrink-0 rounded-md object-contain", className)}
+    />
   );
 }
 
@@ -4428,7 +4654,10 @@ function useWorkPreparation(
     startedWorkKeysRef.current.add(preparationKey);
     const controller = new AbortController();
     controllersRef.current.set(preparationKey, controller);
-    const assetKinds: ClientCacheAsset[] = ["avatar", "cover", "video", "originalAudio"];
+    const isBilibili = activeWork.source === "bilibili";
+    const assetKinds: ClientCacheAsset[] = isBilibili
+      ? ["avatar", "cover", "originalAudio"]
+      : ["avatar", "cover", "video", "originalAudio"];
 
     queueMicrotask(() => {
       if (controller.signal.aborted) return;
@@ -4447,7 +4676,7 @@ function useWorkPreparation(
       }));
     });
 
-    void fetch("/api/douyin/prepare", {
+    void fetch(`/api/${activeWork.source ?? "douyin"}/prepare`, {
       body: JSON.stringify({
         finalUrl: activeWork.finalUrl,
         historyRecordId: activeHistoryRecordId,
@@ -4576,23 +4805,62 @@ function WorkDownloadActions({
   onRetryAsset: (asset: MediaAssetKind) => void;
   work: ResolvedDouyinWork;
 }) {
-  const workKey = `${work.kind}:${work.id}`;
+  const workKey = getWorkKey(work);
   const actions = DOWNLOAD_ACTIONS;
   const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
   const [downloadError, setDownloadError] = useState("");
   const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
+  const [loadingAssets, setLoadingAssets] = useState<ReadonlySet<MediaAssetKind>>(() => new Set());
+  const [videoNeedsFetch, setVideoNeedsFetch] = useState(false);
 
-  async function ensureAssetUrl(asset: MediaAssetKind): Promise<string> {
-    const response = await fetch(
-      `/api/transcript-history/${encodeURIComponent(historyRecordId)}/assets/${encodeURIComponent(asset)}`,
-      { cache: "no-store" },
-    );
-    const payload = await readApiPayload(response, "资源准备失败。") as ApiError | { asset: { url: string } };
-    if (!response.ok || !("asset" in payload)) {
-      throw new Error(getApiError(payload)?.error || "资源准备失败。");
+  useEffect(() => {
+    setFreshAssetUrls({});
+    setLoadingAssets(new Set());
+    setVideoNeedsFetch(false);
+    setPreview(null);
+    setDownloadError("");
+  }, [historyRecordId, workKey]);
+
+  async function ensureAssetUrl(asset: MediaAssetKind, method: "GET" | "POST" = "GET"): Promise<string> {
+    setLoadingAssets((current) => new Set(current).add(asset));
+    try {
+      const response = await fetch(
+        `/api/transcript-history/${encodeURIComponent(historyRecordId)}/assets/${encodeURIComponent(asset)}`,
+        { cache: "no-store", method },
+      );
+      const payload = await readApiPayload(response, "资源准备失败。") as ApiError | { asset: { url: string } };
+      if (!response.ok || !("asset" in payload)) {
+        throwApiError(getApiError(payload), "资源准备失败。");
+      }
+      setVideoNeedsFetch(false);
+      setFreshAssetUrls((current) => ({ ...current, [asset]: payload.asset.url }));
+      return payload.asset.url;
+    } finally {
+      setLoadingAssets((current) => {
+        const next = new Set(current);
+        next.delete(asset);
+        return next;
+      });
     }
-    setFreshAssetUrls((current) => ({ ...current, [asset]: payload.asset.url }));
-    return payload.asset.url;
+  }
+
+  function handleMissingVideo(error: unknown): boolean {
+    if (work.source !== "bilibili" || readUserFacingErrorCode(error) !== BILIBILI_VIDEO_CACHE_MISSING_CODE) {
+      return false;
+    }
+    setFreshAssetUrls((current) => {
+      const next = { ...current };
+      delete next.video;
+      return next;
+    });
+    setVideoNeedsFetch(true);
+    setDownloadError("Bilibili 视频缓存不存在或已过期，请点击获取视频资源。");
+    return true;
+  }
+
+  async function generateBilibiliVideoResource(): Promise<void> {
+    setDownloadError("");
+    await ensureAssetUrl("video", "POST");
   }
 
   const previewCache = preview ? cachedAssets[preview.asset] : undefined;
@@ -4606,10 +4874,18 @@ function WorkDownloadActions({
         const previewActionLabel = action.asset === "originalAudio" ? "试听" : "预览";
         const maybeCached = cachedAssets[action.asset];
         const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
-        const isCaching = !cached || cached.isLoading;
-        const hasCacheError = Boolean(cached?.error && !cached.url);
+        const isOnDemandBilibiliVideo = work.source === "bilibili" && action.asset === "video";
+        const availableUrl = freshAssetUrls[action.asset] ?? cached?.url;
+        const isCaching = loadingAssets.has(action.asset) || cached?.isLoading === true || (!cached && !isOnDemandBilibiliVideo);
+        const hasCacheError = Boolean(cached?.error && !availableUrl);
         const canRetryCache = hasCacheError && cached?.errorCode === NETWORK_RETRY_ERROR_CODE;
-        const cacheTitle = cached?.error ?? (isCaching ? "正在准备资源" : action.previewLabel);
+        const cacheTitle = cached?.error ?? (isCaching
+          ? "正在准备资源"
+          : isOnDemandBilibiliVideo && videoNeedsFetch
+            ? "请先获取视频资源"
+            : isOnDemandBilibiliVideo && !availableUrl
+              ? "点击检查本地视频缓存"
+              : action.previewLabel);
 
         return (
           <div
@@ -4624,9 +4900,13 @@ function WorkDownloadActions({
                   setDownloadError("");
                   void ensureAssetUrl(action.asset)
                     .then(() => setPreview(action))
-                    .catch((error) => setDownloadError(readUserFacingError(error, "资源准备失败。")));
+                    .catch((error) => {
+                      if (!handleMissingVideo(error)) {
+                        setDownloadError(readUserFacingError(error, "资源准备失败。"));
+                      }
+                    });
                 }}
-                disabled={isCaching || hasCacheError}
+                disabled={isCaching || hasCacheError || (isOnDemandBilibiliVideo && videoNeedsFetch)}
                 className={cn(
                   "group/preview inline-flex h-8 w-14 shrink-0 items-center justify-center gap-1 rounded-md pl-0 pr-2 text-xs font-semibold text-cyan transition active:scale-[0.99]",
                   isCaching
@@ -4652,7 +4932,21 @@ function WorkDownloadActions({
                   isRetrying={isCaching}
                   onRetry={() => onRetryAsset(action.asset)}
                 />
-              ) : isCaching || !cached?.url ? (
+              ) : isOnDemandBilibiliVideo && videoNeedsFetch ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void generateBilibiliVideoResource()
+                      .catch((error) => setDownloadError(readUserFacingError(error, "Bilibili 视频资源获取失败。")));
+                  }}
+                  disabled={isCaching}
+                  className="inline-flex h-7 w-20 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-amber transition hover:text-cyan active:scale-[0.96] disabled:cursor-wait disabled:opacity-70"
+                  title="获取视频资源并在服务器缓存 2 小时"
+                >
+                  {isCaching ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Download className="size-3.5" aria-hidden="true" />}
+                  获取
+                </button>
+              ) : isCaching || (!availableUrl && !isOnDemandBilibiliVideo) ? (
                 <button
                   type="button"
                   disabled
@@ -4668,8 +4962,16 @@ function WorkDownloadActions({
                   onClick={() => {
                     setDownloadError("");
                     void ensureAssetUrl(action.asset)
-                      .then((url) => downloadCachedAsset(url, cached.downloadName, work))
-                      .catch((error) => setDownloadError(readUserFacingError(error, "文件保存失败。")));
+                      .then((url) => downloadCachedAsset(
+                        url,
+                        cached?.downloadName ?? buildCachedAssetFilename(work, action.asset),
+                        work,
+                      ))
+                      .catch((error) => {
+                        if (!handleMissingVideo(error)) {
+                          setDownloadError(readUserFacingError(error, "文件保存失败。"));
+                        }
+                      });
                   }}
                   className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96]"
                   title={downloadError || action.label}
@@ -9095,4 +9397,3 @@ function splitSearchMatches(text: string, query: string): Array<{ highlight: boo
 
   return parts;
 }
-

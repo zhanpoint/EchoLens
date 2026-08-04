@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 const mocks = vi.hoisted(() => ({
+  ensureBilibiliHistoryVideo: vi.fn(),
   ensureHistoryAsset: vi.fn(),
 }));
 
@@ -10,6 +11,7 @@ vi.mock("@/app/api/auth/_shared", () => ({
   requireUser: vi.fn(async () => ({ email: "test@example.com", id: "user-1", username: "test" })),
 }));
 vi.mock("@/lib/transcript/assets", () => ({
+  ensureBilibiliHistoryVideo: mocks.ensureBilibiliHistoryVideo,
   ensureHistoryAsset: mocks.ensureHistoryAsset,
 }));
 
@@ -19,7 +21,7 @@ import {
   NETWORK_RETRY_ERROR_MESSAGE,
   NetworkRetryExhaustedError,
 } from "@/lib/http/retry";
-import { GET } from "../app/api/transcript-history/[id]/assets/[kind]/route";
+import { GET, POST } from "../app/api/transcript-history/[id]/assets/[kind]/route";
 
 const asset = {
   assetKind: "cover",
@@ -36,6 +38,13 @@ describe("transcript history single asset route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(requireUser).mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
+    mocks.ensureBilibiliHistoryVideo.mockResolvedValue({
+      ...asset,
+      assetKind: "video",
+      contentType: "video/mp4",
+      objectKey: "local-cache-key",
+      url: "/api/transcript-history/history-1/assets/video/content",
+    });
     mocks.ensureHistoryAsset.mockResolvedValue(asset);
   });
 
@@ -86,6 +95,44 @@ describe("transcript history single asset route", () => {
 
     expect(response.status).toBe(400);
     expect(mocks.ensureHistoryAsset).not.toHaveBeenCalled();
+  });
+
+  it("reports missing Bilibili video cache without generating it on GET", async () => {
+    mocks.ensureHistoryAsset.mockResolvedValueOnce(null);
+
+    const response = await GET(assetRequest(), routeContext("video"));
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      code: "BILIBILI_VIDEO_CACHE_MISSING",
+      error: "Bilibili 视频缓存不存在或已过期，请先获取视频资源。",
+    });
+    expect(mocks.ensureBilibiliHistoryVideo).not.toHaveBeenCalled();
+  });
+
+  it("generates a Bilibili video resource only through POST", async () => {
+    const response = await POST(assetRequest(), routeContext("video"));
+
+    expect(response.status).toBe(200);
+    expect(mocks.ensureHistoryAsset).not.toHaveBeenCalled();
+    expect(mocks.ensureBilibiliHistoryVideo).toHaveBeenCalledWith({
+      historyRecordId: "history-1",
+      userId: "user-1",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      asset: {
+        assetKind: "video",
+        objectKey: "local-cache-key",
+        url: "/api/transcript-history/history-1/assets/video/content",
+      },
+    });
+  });
+
+  it("rejects POST generation for non-video resources", async () => {
+    const response = await POST(assetRequest(), routeContext("cover"));
+
+    expect(response.status).toBe(400);
+    expect(mocks.ensureBilibiliHistoryVideo).not.toHaveBeenCalled();
   });
 
   it("returns the unified network message when OSS retries are exhausted", async () => {

@@ -12,7 +12,9 @@ import {
   NETWORK_RETRY_ERROR_MESSAGE,
   NetworkRetryExhaustedError,
 } from "@/lib/http/retry";
+import { readDownloadVideoQuality } from "@/lib/download-settings";
 import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
+import { readUserSetting } from "@/lib/user-settings";
 import { readReusableHistoryAsset, savePreparedHistoryAsset } from "@/lib/transcript/assets";
 import { updateTranscriptHistoryRecordMetadata } from "@/lib/transcript/db";
 import { DOUYIN_KINDS } from "@/types/douyin";
@@ -42,6 +44,7 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "作品参数无效。" }, { status: 400 });
   }
+  const videoQuality = readDownloadVideoQuality(await readUserSetting(user.id, "download"));
 
   const encoder = new TextEncoder();
   let closed = false;
@@ -66,7 +69,7 @@ export async function POST(request: Request) {
       };
       request.signal.addEventListener("abort", close, { once: true });
 
-      void acquireWorkMetadata(parsed.data).then(async (lease) => {
+      void acquireWorkMetadata(parsed.data, videoQuality).then(async (lease) => {
         try {
           const { metadata } = lease;
           const history = await updateTranscriptHistoryRecordMetadata({
@@ -94,7 +97,7 @@ export async function POST(request: Request) {
             userId: user.id,
           });
           const preparation = prepareAssetBundle(
-            parsed.data,
+            { ...parsed.data, videoQuality },
             metadata,
             reusableOriginalAudio?.durationSeconds
               ? {
