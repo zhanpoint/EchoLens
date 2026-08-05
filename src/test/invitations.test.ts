@@ -21,6 +21,35 @@ describe("account service invitations", () => {
     expect(first.every(({ code }) => /^ECHO-[A-Z0-9]{4}(?:-[A-Z0-9]{4}){2}$/.test(code))).toBe(true);
   });
 
+  it("migrates legacy invitations to production without losing redemption state", async () => {
+    const code = "ECHO-AAAA-BBBB-CCCC";
+    const userId = "legacy-user";
+    await insertUser(userId, "legacy-reader");
+    await execute(
+      `INSERT INTO account_service_invitations (id, code, environment, redeemed_by, redeemed_at)
+       VALUES ($1, $2, 'development', $3, CURRENT_TIMESTAMP)`,
+      [randomUUID(), code, userId],
+    );
+
+    process.env.PROD = "true";
+    try {
+      const invitations = await listAccountServiceInvitations();
+      const migrated = invitations.find((invitation) => invitation.code === code);
+
+      expect(migrated).toMatchObject({
+        code,
+        environment: "production",
+        redeemedBy: userId,
+      });
+      expect(migrated?.redeemedAt).not.toBeNull();
+      await expect(queryRow<{ count: number }>(
+        "SELECT count(*)::int AS count FROM account_service_invitations WHERE environment = 'development'",
+      )).resolves.toMatchObject({ count: 0 });
+    } finally {
+      delete process.env.PROD;
+    }
+  });
+
   it("atomically grants permanent access and prevents a second user from redeeming the code", async () => {
     await insertUser("user-1", "reader-one");
     await insertUser("user-2", "reader-two");

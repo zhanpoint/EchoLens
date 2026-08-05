@@ -104,9 +104,21 @@ export async function redeemAccountServiceInvitation(userId: string, input: stri
 
 async function ensureInvitationPool(client: PoolClient): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [INVITATION_LOCK_KEY]);
-  for (const environment of ["development", "production"] as const) {
-    await fillInvitationPool(client, environment);
+  const environment = readInvitationEnvironment();
+  await migrateLegacyInvitationEnvironment(client, environment);
+  await fillInvitationPool(client, environment);
+}
+
+async function migrateLegacyInvitationEnvironment(
+  client: PoolClient,
+  environment: InvitationEnvironment,
+): Promise<void> {
+  if (environment !== "production") {
+    return;
   }
+  await client.query(
+    "UPDATE account_service_invitations SET environment = 'production' WHERE environment = 'development'",
+  );
 }
 
 async function fillInvitationPool(client: PoolClient, environment: InvitationEnvironment): Promise<void> {
