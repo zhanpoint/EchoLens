@@ -2917,6 +2917,7 @@ export default function HomePage() {
                 </dl>
                 {displayWork ? (
                   <WorkDownloadActions
+                    key={`${historyDetail?.record.id ?? activeSession.historyRecordId}:${activeWorkKey}`}
                     cachedAssets={cachedAssets}
                     commentsEnabled={douyinAccountServicesEnabled && displayWork.source !== "bilibili"}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
@@ -4812,14 +4813,6 @@ function WorkDownloadActions({
   const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
   const [loadingAssets, setLoadingAssets] = useState<ReadonlySet<MediaAssetKind>>(() => new Set());
   const [videoNeedsFetch, setVideoNeedsFetch] = useState(false);
-
-  useEffect(() => {
-    setFreshAssetUrls({});
-    setLoadingAssets(new Set());
-    setVideoNeedsFetch(false);
-    setPreview(null);
-    setDownloadError("");
-  }, [historyRecordId, workKey]);
 
   async function ensureAssetUrl(asset: MediaAssetKind, method: "GET" | "POST" = "GET"): Promise<string> {
     setLoadingAssets((current) => new Set(current).add(asset));
