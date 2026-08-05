@@ -9,13 +9,17 @@ export { DouyinApiError, normalizeCookie } from "./web-client";
 
 export type DouyinFavoriteVideo = {
   author: string;
+  authorAvatarUrl?: string;
   authorId: string;
-  commentCount: number;
+  bvid?: string;
+  commentCount?: number;
   coverUrl: string;
-  favoriteCount: number;
+  favoriteCount?: number;
+  isAvailable?: boolean;
   isFollowing: boolean;
-  likeCount: number;
-  publishedAt: number;
+  likeCount?: number;
+  platform?: "douyin" | "bilibili";
+  publishedAt?: number;
   title: string;
   url: string;
 };
@@ -35,6 +39,7 @@ export type DouyinFavoriteFolder = {
   isPrivate: boolean;
   name: string;
   total: number;
+  url?: string;
   works: DouyinFavoriteVideo[];
 };
 

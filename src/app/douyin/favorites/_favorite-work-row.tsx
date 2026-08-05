@@ -28,7 +28,14 @@ export function FavoriteWorkRow({
   video: DouyinFavoriteVideo;
 }) {
   const [copied, setCopied] = useState(false);
+  const [unavailableNotice, setUnavailableNotice] = useState(false);
   const authorName = author?.name || video.author;
+  const publishedAt = video.publishedAt;
+
+  function showUnavailableNotice() {
+    setUnavailableNotice(true);
+    window.setTimeout(() => setUnavailableNotice(false), 2_500);
+  }
 
   async function copyLink() {
     await navigator.clipboard.writeText(video.url);
@@ -40,7 +47,7 @@ export function FavoriteWorkRow({
     <article className="flex min-h-20 min-w-0 items-center px-3 py-2 transition-colors hover:bg-cyan/[0.035] sm:px-4 md:h-20 md:py-0">
       <div className="grid w-full min-w-0 gap-x-5 gap-y-1.5 md:grid-cols-[minmax(9rem,14rem)_minmax(0,1fr)_auto] md:items-center">
         <div className="flex min-w-0 items-center gap-2.5">
-          <DouyinAvatar name={authorName} url={author?.avatarUrl ?? ""} />
+          <DouyinAvatar name={authorName} url={author?.avatarUrl || video.authorAvatarUrl || ""} />
           <p className="truncate text-sm font-medium text-foreground" title={authorName}>{authorName}</p>
         </div>
         <div className="min-w-0">
@@ -48,12 +55,15 @@ export function FavoriteWorkRow({
             {renderSocialTokens(video.title)}
           </h2>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] tabular-nums text-muted-foreground">
-            {video.publishedAt > 0 ? (
-              <time dateTime={new Date(video.publishedAt * 1_000).toISOString()}>
-                发布于 {PUBLISHED_DATE_FORMATTER.format(video.publishedAt * 1_000)}
+            {publishedAt !== undefined && publishedAt > 0 ? (
+              <time dateTime={new Date(publishedAt * 1_000).toISOString()}>
+                发布于 {PUBLISHED_DATE_FORMATTER.format(publishedAt * 1_000)}
               </time>
             ) : null}
-            {WORK_METRICS.map(({ field, icon: Icon, iconClassName, label }) => {
+            {video.platform !== "bilibili" ? WORK_METRICS.map(({ field, icon: Icon, iconClassName, label }) => {
+              if (video[field] === undefined) {
+                return null;
+              }
               const formatted = formatDouyinCount(video[field]);
               return (
                 <span
@@ -66,18 +76,35 @@ export function FavoriteWorkRow({
                   {formatted}
                 </span>
               );
-            })}
+            }) : null}
           </div>
         </div>
         <div className="flex items-center justify-end gap-1">
-          <Link
-            href={{ pathname: "/", query: { transcribe: video.url } }}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-cyan/[0.07] hover:text-cyan"
-            aria-label="转录此作品"
-            title="转录此作品"
-          >
-            <AudioLines className="size-4 text-cyan motion-safe:animate-pulse" aria-hidden="true" />
-          </Link>
+          {unavailableNotice ? (
+            <span className="mr-1 whitespace-nowrap text-[11px] font-medium text-amber" role="status">
+              视频已下架，无法转录
+            </span>
+          ) : null}
+          {video.isAvailable === false ? (
+            <button
+              type="button"
+              onClick={showUnavailableNotice}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-amber/[0.08] hover:text-amber"
+              aria-label="视频已下架，无法转录"
+              title="视频已下架，无法转录"
+            >
+              <AudioLines className="size-4" aria-hidden="true" />
+            </button>
+          ) : (
+            <Link
+              href={{ pathname: "/", query: { transcribe: video.url } }}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-cyan/[0.07] hover:text-cyan"
+              aria-label="转录此作品"
+              title="转录此作品"
+            >
+              <AudioLines className="size-4 text-cyan motion-safe:animate-pulse" aria-hidden="true" />
+            </Link>
+          )}
           <button
             type="button"
             onClick={() => void copyLink()}

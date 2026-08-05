@@ -1,4 +1,4 @@
-export type DouyinClientListKind = "favorites" | "following";
+export type DouyinClientListKind = "favorites" | "following" | "bilibili-favorites-v5";
 
 type DouyinClientListRecord = {
   data: unknown;

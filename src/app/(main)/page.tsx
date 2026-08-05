@@ -3616,19 +3616,27 @@ function SidebarSection({
         <button
           type="button"
           onClick={() => onToggleSection(section)}
-          className="flex min-w-0 flex-1 items-center justify-between rounded-md px-2.5 text-[13px] font-semibold text-foreground"
+          className="flex min-w-0 flex-1 items-center rounded-md px-2.5 text-[13px] font-semibold text-foreground"
           aria-expanded={!isCollapsed}
         >
           <span className="flex min-w-0 items-center gap-2">
             {leading}
             <span className="truncate">{title}</span>
           </span>
+        </button>
+        {action ? <div className="shrink-0">{action}</div> : null}
+        <button
+          type="button"
+          onClick={() => onToggleSection(section)}
+          className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+          aria-expanded={!isCollapsed}
+          aria-label={isCollapsed ? `展开${title}` : `收起${title}`}
+        >
           <ChevronRight
-            className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", !isCollapsed && "rotate-90")}
+            className={cn("size-3.5 transition-transform", !isCollapsed && "rotate-90")}
             aria-hidden="true"
           />
         </button>
-        {action ? <div className="mr-1 shrink-0">{action}</div> : null}
       </div>
       {isCollapsed ? null : (
         <div className="mt-1">

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Check,
@@ -26,6 +26,7 @@ import {
 import { DouyinAvatar } from "../_avatar";
 import { DouyinUserMeta } from "../_user-meta";
 import { DouyinSectionNav } from "../_section-nav";
+import { PlatformSwitcher, type Platform } from "../_platform-switcher";
 import { DouyinLastSynced } from "../_last-synced";
 import { readDouyinClientSnapshot, writeDouyinClientSnapshot } from "@/lib/douyin/client-list-cache";
 import {
@@ -96,6 +97,10 @@ async function requestFollowing(): Promise<FollowingPayload> {
 
 export function DouyinFollowingPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const [platform, setPlatform] = useState<Platform>(
+    searchParams.get("platform") === "bilibili" ? "bilibili" : "douyin",
+  );
   const [users, setUsers] = useState<FollowingUser[]>([]);
   const [userId, setUserId] = useState("");
   const [query, setQuery] = useState("");
@@ -119,6 +124,11 @@ export function DouyinFollowingPage() {
 
   useEffect(() => {
     let active = true;
+    if (platform === "bilibili") {
+      return () => {
+        active = false;
+      };
+    }
     requestCurrentUser()
       .then(async (user) => {
         if (active) {
@@ -154,10 +164,10 @@ export function DouyinFollowingPage() {
     return () => {
       active = false;
     };
-  }, [handleError]);
+  }, [handleError, platform]);
 
   async function refreshFollowing() {
-    if (!userId) {
+    if (!userId || platform === "bilibili") {
       return;
     }
     setIsRefreshing(true);
@@ -192,6 +202,10 @@ export function DouyinFollowingPage() {
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const pageUsers = filteredUsers.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const pageIsLoading = platform === "bilibili" ? false : isLoading;
+  const displayError = platform === "bilibili"
+    ? "Bilibili 当前仅支持收藏夹和合集，暂不提供关注列表。"
+    : error;
 
   return (
     <main className="min-h-dvh w-full bg-background text-foreground lg:h-dvh lg:overflow-hidden">
@@ -207,13 +221,24 @@ export function DouyinFollowingPage() {
               <ArrowLeft className="size-5" strokeWidth={2} aria-hidden="true" />
             </Link>
             <h1 className="truncate text-xl font-semibold">收藏与关注</h1>
+            <PlatformSwitcher
+              value={platform}
+              onChange={(nextPlatform) => {
+                setPlatform(nextPlatform);
+                router.replace(nextPlatform === "bilibili" ? "/douyin/following?platform=bilibili" : "/douyin/following");
+                setPage(1);
+                setUsers([]);
+                setRefreshedAt(null);
+                setError(nextPlatform === "bilibili" ? "Bilibili 当前仅支持收藏夹和合集，暂不提供关注列表。" : "");
+              }}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             <DouyinLastSynced refreshedAt={refreshedAt} />
             <button
               type="button"
               onClick={() => void refreshFollowing()}
-              disabled={isLoading || isRefreshing}
+              disabled={pageIsLoading || isRefreshing}
               className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
             >
               {isRefreshing ? (
@@ -229,7 +254,7 @@ export function DouyinFollowingPage() {
         <div className="grid flex-1 lg:min-h-0 lg:grid-cols-[clamp(18rem,22vw,23rem)_minmax(0,1fr)]">
           <aside className="border-b border-white/10 px-4 pb-4 pt-2 sm:px-6 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:px-5">
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
-              <DouyinSectionNav active="following" />
+              <DouyinSectionNav active="following" platform={platform} />
               <section>
                 <label className="relative block">
                   <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
@@ -309,9 +334,9 @@ export function DouyinFollowingPage() {
           </aside>
 
           <section className="flex min-w-0 flex-col px-4 py-4 sm:px-6 lg:min-h-0 lg:px-6">
-            {error ? (
+            {displayError ? (
               <div className="mb-3 shrink-0 rounded-md border border-amber/25 bg-amber/[0.08] px-3 py-2 text-sm text-amber">
-                {error}
+                {displayError}
                 {needsCredentialUpdate ? (
                   <Link href="/settings" className="ml-2 font-semibold underline underline-offset-4">
                     前往设置
@@ -320,7 +345,7 @@ export function DouyinFollowingPage() {
               </div>
             ) : null}
             <div className="min-h-[22rem] flex-1 overflow-hidden lg:min-h-0">
-              {isLoading || isRefreshing ? (
+              {pageIsLoading || isRefreshing ? (
                 <FollowingSkeleton />
               ) : filteredUsers.length ? (
                 <div className="content-scroll h-full overflow-y-auto">

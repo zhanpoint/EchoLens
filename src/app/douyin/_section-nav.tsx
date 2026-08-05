@@ -1,14 +1,16 @@
 import Link from "next/link";
+import type { Platform } from "./_platform-switcher";
 
-export function DouyinSectionNav({ active }: { active: "favorites" | "following" }) {
+export function DouyinSectionNav({ active, platform = "douyin" }: { active: "favorites" | "following"; platform?: Platform }) {
+  const query = platform === "bilibili" ? "?platform=bilibili" : "";
   return (
     <nav
       className="grid grid-cols-2 gap-1 rounded-md bg-white/[0.04] p-1 sm:col-span-2 lg:col-span-1"
       aria-label="收藏与关注"
       role="tablist"
     >
-      <SectionLink active={active === "favorites"} href="/douyin/favorites" label="收藏" />
-      <SectionLink active={active === "following"} href="/douyin/following" label="关注" />
+      <SectionLink active={active === "favorites"} href={`/douyin/favorites${query}`} label="收藏" />
+      <SectionLink active={active === "following"} href={`/douyin/following${query}`} label="关注" />
     </nav>
   );
 }

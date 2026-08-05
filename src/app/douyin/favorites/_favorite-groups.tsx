@@ -15,6 +15,7 @@ type FavoriteGroupsProps = {
   groups: DouyinFavoriteFolder[] | DouyinFavoriteMix[];
   kind: "folder" | "mix";
   onSelectedIdChange: (id: string) => void;
+  platform: "douyin" | "bilibili";
   query: string;
   selectedId: string;
 };
@@ -24,9 +25,11 @@ export function FavoriteGroups({
   groups,
   kind,
   onSelectedIdChange,
+  platform,
   query,
   selectedId,
 }: FavoriteGroupsProps) {
+  const platformLabel = platform === "bilibili" ? "Bilibili" : "抖音";
   const keyword = query.trim().toLocaleLowerCase();
   const filteredGroups = useMemo(
     () => groups.filter((group) => !keyword || group.name.toLocaleLowerCase().includes(keyword)),
@@ -56,8 +59,8 @@ export function FavoriteGroups({
               target="_blank"
               rel="noreferrer"
               className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-cyan"
-              aria-label="在抖音打开合集"
-              title="在抖音打开合集"
+              aria-label={`在${platformLabel}打开合集`}
+              title={`在${platformLabel}打开合集`}
             >
               <ExternalLink className="size-4" aria-hidden="true" />
             </a>
@@ -142,7 +145,7 @@ function FolderCard({ folder, onOpen }: { folder: DouyinFavoriteFolder; onOpen: 
         <ArrowRight className="size-4" aria-hidden="true" />
       </button>
       <a
-        href={DOUYIN_FAVORITES_URL}
+        href={folder.url || DOUYIN_FAVORITES_URL}
         target="_blank"
         rel="noreferrer"
         className="absolute right-12 top-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-white/[0.07] hover:text-cyan"

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   ChevronLeft,
@@ -31,6 +31,7 @@ import {
   requireValidDouyinCredential,
 } from "../_client-api";
 import { DouyinSectionNav } from "../_section-nav";
+import { PlatformSwitcher, type Platform } from "../_platform-switcher";
 import { DouyinLastSynced } from "../_last-synced";
 import { readDouyinClientSnapshot, writeDouyinClientSnapshot } from "@/lib/douyin/client-list-cache";
 import type {
@@ -49,6 +50,7 @@ import {
 import { FavoriteGroups } from "./_favorite-groups";
 import { FavoriteWorkRow } from "./_favorite-work-row";
 
+type FavoritesPlatform = Platform;
 type FavoritesPayload = {
   authors: DouyinFavoriteAuthor[];
   folders: DouyinFavoriteFolder[];
@@ -72,12 +74,8 @@ function isDouyinFavoriteVideo(value: unknown): value is DouyinFavoriteVideo {
   const item = value as Partial<DouyinFavoriteVideo>;
   return typeof item.author === "string" &&
     typeof item.authorId === "string" &&
-    typeof item.commentCount === "number" &&
     typeof item.coverUrl === "string" &&
-    typeof item.favoriteCount === "number" &&
     typeof item.isFollowing === "boolean" &&
-    typeof item.likeCount === "number" &&
-    typeof item.publishedAt === "number" &&
     typeof item.title === "string" &&
     typeof item.url === "string";
 }
@@ -151,12 +149,14 @@ function parseFavoritesSnapshot(value: unknown): Omit<FavoritesPayload, "refresh
   };
 }
 
-async function requestFavorites(): Promise<FavoritesPayload> {
-  const response = await fetch("/api/douyin/favorites", {
+async function requestFavorites(platform: FavoritesPlatform): Promise<FavoritesPayload> {
+  const endpoint = platform === "bilibili" ? "/api/bilibili/favorites" : "/api/douyin/favorites";
+  const platformLabel = platform === "bilibili" ? "Bilibili" : "抖音";
+  const response = await fetch(endpoint, {
     cache: "no-store",
     method: "POST",
   });
-  const payload = await readJsonPayload(response, "抖音收藏列表获取失败。") as {
+  const payload = await readJsonPayload(response, `${platformLabel}收藏列表获取失败。`) as {
     authors?: unknown;
     folders?: unknown;
     mixes?: unknown;
@@ -168,10 +168,10 @@ async function requestFavorites(): Promise<FavoritesPayload> {
     throw new Error("UNAUTHENTICATED");
   }
   if (!response.ok) {
-    if (apiError?.code?.startsWith("CREDENTIAL_")) {
+    if (apiError?.code === "CREDENTIAL_INVALID" || apiError?.code === "LOGIN_REQUIRED") {
       throw new DouyinCredentialRequiredError(apiError.error);
     }
-    throw new Error(apiError?.error || "抖音收藏列表获取失败。");
+    throw new Error(apiError?.error || `${platformLabel}收藏列表获取失败。`);
   }
   return {
     authors: Array.isArray(payload.authors) ? payload.authors.filter(isDouyinFavoriteAuthor) : [],
@@ -184,6 +184,10 @@ async function requestFavorites(): Promise<FavoritesPayload> {
 
 export function DouyinFavoritesPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const [platform, setPlatform] = useState<FavoritesPlatform>(
+    searchParams.get("platform") === "bilibili" ? "bilibili" : "douyin",
+  );
   const [videos, setVideos] = useState<DouyinFavoriteVideo[]>([]);
   const [authors, setAuthors] = useState<DouyinFavoriteAuthor[]>([]);
   const [folders, setFolders] = useState<DouyinFavoriteFolder[]>([]);
@@ -209,17 +213,18 @@ export function DouyinFavoritesPage() {
       return;
     }
     setNeedsCredentialUpdate(loadError instanceof DouyinCredentialRequiredError);
-    setError(readUserFacingError(loadError, "抖音收藏列表获取失败。"));
-  }, [router]);
+    setError(readUserFacingError(loadError, `${platform === "bilibili" ? "Bilibili" : "抖音"}收藏列表获取失败。`));
+  }, [platform, router]);
 
   useEffect(() => {
     let isActive = true;
+    const cacheKind = platform === "bilibili" ? "bilibili-favorites-v5" : "favorites";
     requestCurrentUser()
       .then(async (user) => {
         if (isActive) {
           setUserId(user.id);
         }
-        const cache = await readDouyinClientSnapshot(user.id, "favorites", parseFavoritesSnapshot);
+        const cache = await readDouyinClientSnapshot(user.id, cacheKind, parseFavoritesSnapshot);
         if (!isActive) {
           return;
         }
@@ -232,11 +237,13 @@ export function DouyinFavoritesPage() {
           setDataVersion((current) => current + 1);
           return;
         }
-        await requireValidDouyinCredential();
-        const payload = await requestFavorites();
+        if (platform === "douyin") {
+          await requireValidDouyinCredential();
+        }
+        const payload = await requestFavorites(platform);
         await writeDouyinClientSnapshot(
           user.id,
-          "favorites",
+          cacheKind,
           {
             authors: payload.authors,
             folders: payload.folders,
@@ -267,7 +274,7 @@ export function DouyinFavoritesPage() {
     return () => {
       isActive = false;
     };
-  }, [handleRequestError]);
+  }, [handleRequestError, platform]);
 
   async function refreshFavorites() {
     if (!userId) {
@@ -277,11 +284,13 @@ export function DouyinFavoritesPage() {
     setError("");
     setNeedsCredentialUpdate(false);
     try {
-      await requireValidDouyinCredential();
-      const payload = await requestFavorites();
+      if (platform === "douyin") {
+        await requireValidDouyinCredential();
+      }
+      const payload = await requestFavorites(platform);
       await writeDouyinClientSnapshot(
         userId,
-        "favorites",
+        platform === "bilibili" ? "bilibili-favorites-v5" : "favorites",
         {
           authors: payload.authors,
           folders: payload.folders,
@@ -361,6 +370,26 @@ export function DouyinFavoritesPage() {
               <ArrowLeft className="size-5" strokeWidth={2} aria-hidden="true" />
             </Link>
             <h1 className="truncate text-xl font-semibold text-foreground">收藏与关注</h1>
+            <PlatformSwitcher
+              value={platform}
+              onChange={(nextPlatform) => {
+                setPlatform(nextPlatform);
+                router.replace(nextPlatform === "bilibili" ? "/douyin/favorites?platform=bilibili" : "/douyin/favorites");
+                setActiveCategory("folders");
+                setSelectedGroupId("");
+                setQuery("");
+                setFollowFilter("all");
+                setPage(1);
+                setAuthors([]);
+                setFolders([]);
+                setMixes([]);
+                setVideos([]);
+                setRefreshedAt(null);
+                setError("");
+                setNeedsCredentialUpdate(false);
+                setIsLoading(true);
+              }}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             <DouyinLastSynced refreshedAt={refreshedAt} />
@@ -383,9 +412,10 @@ export function DouyinFavoritesPage() {
         <div className="grid flex-1 lg:min-h-0 lg:grid-cols-[clamp(18rem,22vw,23rem)_minmax(0,1fr)]">
           <aside className="border-b border-white/10 px-4 pb-4 pt-2 sm:px-6 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:px-5">
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
-              <DouyinSectionNav active="favorites" />
+              <DouyinSectionNav active="favorites" platform={platform} />
               <FavoriteCategoryNav
                 active={activeCategory}
+                platform={platform}
                 counts={{ folders: folders.length, mixes: mixes.length, videos: videos.length }}
                 onChange={(category) => {
                   setActiveCategory(category);
@@ -499,6 +529,7 @@ export function DouyinFavoritesPage() {
                 <FavoriteGroups
                   groups={folders}
                   kind="folder"
+                  platform={platform}
                   query={query}
                   selectedId={selectedGroupId}
                   onSelectedIdChange={(id) => {
@@ -522,6 +553,7 @@ export function DouyinFavoritesPage() {
                 <FavoriteGroups
                   groups={mixes}
                   kind="mix"
+                  platform={platform}
                   query={query}
                   selectedId={selectedGroupId}
                   onSelectedIdChange={(id) => {
@@ -569,14 +601,16 @@ function FavoriteCategoryNav({
   active,
   counts,
   onChange,
+  platform,
 }: {
   active: FavoriteCategory;
   counts: Record<FavoriteCategory, number>;
   onChange: (category: FavoriteCategory) => void;
+  platform: FavoritesPlatform;
 }) {
   const items = [
     { icon: FolderHeart, id: "folders" as const, label: "收藏夹" },
-    { icon: VideoIcon, id: "videos" as const, label: "视频" },
+    ...(platform === "douyin" ? [{ icon: VideoIcon, id: "videos" as const, label: "视频" }] : []),
     { icon: Layers3, id: "mixes" as const, label: "合集" },
   ];
   return (
