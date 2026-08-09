@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { AuthError, readCurrentUserFromRequest, type AuthUser } from "@/lib/auth/service";
+import { readUserFromApiAccessToken } from "@/lib/api-access-tokens/service";
 import { AuthRateLimitError } from "@/lib/auth/rate-limit";
 
 export const EmailSchema = z.string().trim().email().max(254);
@@ -26,8 +27,16 @@ export function errorJson(error: unknown): NextResponse {
 }
 
 export async function requireUser(request: Request): Promise<AuthUser | NextResponse> {
+  const bearerUser = await readUserFromApiAccessToken(readBearerToken(request));
+  if (bearerUser) return bearerUser;
   const user = await readCurrentUserFromRequest(request);
   return user ?? unauthenticatedJson();
+}
+
+function readBearerToken(request: Request): string | undefined {
+  const authorization = request.headers.get("authorization");
+  const match = authorization?.match(/^Bearer\s+(.+)$/i);
+  return match?.[1];
 }
 
 export function unauthenticatedJson(): NextResponse {

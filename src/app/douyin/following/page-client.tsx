@@ -21,6 +21,7 @@ import {
   readJsonPayload,
   readUserFacingError,
   requestCurrentUser,
+  requestOnce,
   requireValidDouyinCredential,
 } from "../_client-api";
 import { DouyinAvatar } from "../_avatar";
@@ -73,7 +74,7 @@ function isFollowingUser(value: unknown): value is FollowingUser {
     typeof user.workCount === "number";
 }
 
-async function requestFollowing(): Promise<FollowingPayload> {
+async function fetchFollowing(): Promise<FollowingPayload> {
   const response = await fetch("/api/douyin/following", { cache: "no-store", method: "POST" });
   const payload = await readJsonPayload(response, "抖音关注列表获取失败。") as {
     refreshedAt?: unknown;
@@ -93,6 +94,10 @@ async function requestFollowing(): Promise<FollowingPayload> {
     refreshedAt: typeof payload.refreshedAt === "number" ? payload.refreshedAt : Date.now(),
     users: Array.isArray(payload.users) ? payload.users.filter(isFollowingUser) : [],
   };
+}
+
+function requestFollowing(): Promise<FollowingPayload> {
+  return requestOnce("following:douyin", fetchFollowing);
 }
 
 export function DouyinFollowingPage() {
@@ -134,22 +139,30 @@ export function DouyinFollowingPage() {
         if (active) {
           setUserId(user.id);
         }
-        const cache = await readDouyinClientSnapshot(user.id, "following", parseFollowingSnapshot);
+        let cache = null;
+        try {
+          cache = await readDouyinClientSnapshot(user.id, "following", parseFollowingSnapshot);
+        } catch {
+          // IndexedDB is an optional optimization; the network remains authoritative.
+        }
         if (!active) {
           return;
         }
         if (cache) {
           setUsers(cache.data);
           setRefreshedAt(cache.refreshedAt);
-          return;
         }
+        setIsLoading(!cache);
+        setIsRefreshing(true);
         await requireValidDouyinCredential();
         const payload = await requestFollowing();
-        await writeDouyinClientSnapshot(user.id, "following", payload.users, payload.refreshedAt);
         if (active) {
           setUsers(payload.users);
           setRefreshedAt(payload.refreshedAt);
+          setPage(1);
         }
+        void writeDouyinClientSnapshot(user.id, "following", payload.users, payload.refreshedAt)
+          .catch(() => undefined);
       })
       .catch((loadError) => {
         if (active) {
@@ -159,6 +172,7 @@ export function DouyinFollowingPage() {
       .finally(() => {
         if (active) {
           setIsLoading(false);
+          setIsRefreshing(false);
         }
       });
     return () => {
@@ -345,7 +359,7 @@ export function DouyinFollowingPage() {
               </div>
             ) : null}
             <div className="min-h-[22rem] flex-1 overflow-hidden lg:min-h-0">
-              {pageIsLoading || isRefreshing ? (
+              {pageIsLoading ? (
                 <FollowingSkeleton />
               ) : filteredUsers.length ? (
                 <div className="content-scroll h-full overflow-y-auto">

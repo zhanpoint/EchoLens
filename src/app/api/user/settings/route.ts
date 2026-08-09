@@ -8,11 +8,9 @@ import { BilibiliCredentialError, validateAndStoreBilibiliCredential } from "@/l
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import {
   BILIBILI_AUDIO_QUALITIES,
-  BILIBILI_STREAM_FORMATS,
   BILIBILI_VIDEO_CODECS,
   BILIBILI_VIDEO_QUALITIES,
   DEFAULT_BILIBILI_AUDIO_QUALITY,
-  DEFAULT_BILIBILI_STREAM_FORMAT,
   DEFAULT_BILIBILI_VIDEO_QUALITY,
   DEFAULT_DOWNLOAD_ORGANIZATION,
   DEFAULT_DOWNLOAD_VIDEO_QUALITY,
@@ -48,7 +46,6 @@ const AiCredentialSettingsSchema = z.object({
 }).strict();
 const DownloadSettingsSchema = z.object({
   bilibiliAudioQuality: z.enum(BILIBILI_AUDIO_QUALITIES).catch(DEFAULT_BILIBILI_AUDIO_QUALITY),
-  bilibiliStreamFormat: z.enum(BILIBILI_STREAM_FORMATS).catch(DEFAULT_BILIBILI_STREAM_FORMAT),
   bilibiliVideoCodec: z.enum(BILIBILI_VIDEO_CODECS).optional(),
   bilibiliVideoQuality: z.enum(BILIBILI_VIDEO_QUALITIES).catch(DEFAULT_BILIBILI_VIDEO_QUALITY),
   directoryPath: z.string().max(500).catch(""),

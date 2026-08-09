@@ -38,7 +38,7 @@ vi.mock("@/lib/douyin/favorites", async (importOriginal) => {
 });
 
 import { requireUser } from "@/app/api/auth/_shared";
-import { collectDouyinFavorites } from "@/lib/douyin/favorites";
+import { collectDouyinFavorites, DouyinApiError } from "@/lib/douyin/favorites";
 import { POST } from "@/app/api/douyin/favorites/route";
 
 const requireUserMock = vi.mocked(requireUser);
@@ -92,5 +92,14 @@ describe("douyin favorites route", () => {
     expect(payload.videos[0].author).toBe("最新作者");
     expect(payload.refreshedAt).toEqual(expect.any(Number));
     expect(collectMock).toHaveBeenCalledOnce();
+  });
+
+  it("maps upstream access blocking without invalidating the credential", async () => {
+    collectMock.mockRejectedValueOnce(new DouyinApiError("收藏接口被抖音临时拒绝。", "ACCESS_BLOCKED"));
+
+    const response = await POST(new Request("https://echolens.test/api/douyin/favorites", { method: "POST" }));
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "ACCESS_BLOCKED" });
   });
 });

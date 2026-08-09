@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { fetchWithRetry } from "@/lib/http/retry";
-import type {
-  BilibiliAudioQuality,
-  BilibiliStreamFormat,
-  BilibiliVideoCodec,
-  BilibiliVideoQuality,
+import {
+  DEFAULT_BILIBILI_AUDIO_QUALITY,
+  DEFAULT_BILIBILI_VIDEO_CODEC,
+  DEFAULT_BILIBILI_VIDEO_QUALITY,
+  type BilibiliAudioQuality,
+  type BilibiliVideoCodec,
+  type BilibiliVideoQuality,
 } from "@/lib/download-settings";
 import { resolveMediaUrl } from "@/lib/media/redirect";
+import type { OpenApiPlatformRequestPolicy } from "@/lib/open-api/platform-request-policy";
 import { extractHttpUrl, parseHttpUrl } from "@/lib/media/source";
 
 const NAV_URL = "https://api.bilibili.com/x/web-interface/nav";
@@ -29,7 +32,6 @@ const BVID_IN_PATH_PATTERN = /\/video\/(BV[\p{L}\p{N}]+)(?:\/|$)/iu;
 
 export type {
   BilibiliAudioQuality,
-  BilibiliStreamFormat,
   BilibiliVideoCodec,
   BilibiliVideoQuality,
 } from "@/lib/download-settings";
@@ -113,13 +115,13 @@ export function isBilibiliBvid(value: string): boolean {
 export async function resolveBilibiliWork(
   input: string,
   cookie = "",
-  options: { finalUrl?: string } = {},
+  options: { finalUrl?: string; requestPolicy?: OpenApiPlatformRequestPolicy } = {},
 ): Promise<{ metadata: BilibiliWorkMetadata; work: BilibiliResolvedWork }> {
   const normalizedInput = readBilibiliInput(input);
   const inputUrl = normalizedInput.inputUrl;
   const canonicalInput = options.finalUrl ?? normalizedInput.finalUrl ?? await resolveBilibiliFinalUrl(inputUrl);
   const identity = parseBilibiliIdentity(canonicalInput);
-  const view = await requestWbiJson(VIEW_URL, { bvid: identity.bvid }, cookie);
+  const view = await requestWbiJsonAnonymousFirst(VIEW_URL, { bvid: identity.bvid }, cookie, options.requestPolicy);
   const data = asRecord(view.data);
   if (!data) throw invalidViewData();
 
@@ -189,28 +191,88 @@ export async function getBilibiliDashSelection(input: {
   cid: number;
   codec?: BilibiliVideoCodec;
   cookie?: string;
-  streamFormat?: BilibiliStreamFormat;
+  requestPolicy?: OpenApiPlatformRequestPolicy;
   videoQuality?: BilibiliVideoQuality;
 }): Promise<BilibiliDashSelection> {
-  const streamFormat = input.streamFormat ?? "dashFull";
-  const payload = await requestWbiJson(PLAY_URL, {
+  const preferred = {
+    audioQuality: input.audioQuality ?? DEFAULT_BILIBILI_AUDIO_QUALITY,
+    codec: input.codec ?? DEFAULT_BILIBILI_VIDEO_CODEC,
+    videoQuality: input.videoQuality ?? DEFAULT_BILIBILI_VIDEO_QUALITY,
+  };
+  const anonymousSession = await getWbiSession("", input.requestPolicy);
+  const anonymousPayload = await requestDashPayload(input, preferred, anonymousSession, input.requestPolicy);
+  const anonymousSelection = selectDashStreams(anonymousPayload, preferred, true);
+  if (anonymousSelection) return anonymousSelection;
+
+  const cookie = input.cookie?.trim() ?? "";
+  if (cookie) {
+    const authenticatedSession = await getWbiSession(cookie, input.requestPolicy);
+    const authenticatedPayload = await requestDashPayload(input, preferred, authenticatedSession, input.requestPolicy);
+    const authenticatedSelection = selectDashStreams(authenticatedPayload, preferred, true);
+    if (authenticatedSelection) return authenticatedSelection;
+  }
+
+  const fallback = {
+    audioQuality: DEFAULT_BILIBILI_AUDIO_QUALITY,
+    codec: DEFAULT_BILIBILI_VIDEO_CODEC,
+    videoQuality: DEFAULT_BILIBILI_VIDEO_QUALITY,
+  };
+  const fallbackPayload = isDefaultDashOptions(preferred)
+    ? anonymousPayload
+    : await requestDashPayload(input, fallback, anonymousSession, input.requestPolicy);
+  const fallbackSelection = selectDashStreams(fallbackPayload, fallback, false);
+  if (fallbackSelection) return fallbackSelection;
+  throw new BilibiliApiError("Bilibili DASH 播放地址不可用。", "DASH_UNAVAILABLE");
+}
+
+async function requestDashPayload(
+  input: Pick<Parameters<typeof getBilibiliDashSelection>[0], "bvid" | "cid">,
+  options: {
+    audioQuality: BilibiliAudioQuality;
+    codec: BilibiliVideoCodec;
+    videoQuality: BilibiliVideoQuality;
+  },
+  session: WbiSession,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<Record<string, unknown>> {
+  return await requestWbiJsonWithSession(PLAY_URL, {
     bvid: input.bvid,
     cid: input.cid,
-    fnval: streamFormatToFnval(streamFormat),
+    fnval: 4048,
     fnver: 0,
-    fourk: streamFormat === "dashFull" ? 1 : 0,
-    qn: qualityToQn(input.videoQuality ?? "lowest"),
-  }, input.cookie ?? "");
+    fourk: 1,
+    qn: qualityToQn(options.videoQuality),
+  }, session, requestPolicy);
+}
+
+function selectDashStreams(
+  payload: Record<string, unknown>,
+  options: {
+    audioQuality: BilibiliAudioQuality;
+    codec: BilibiliVideoCodec;
+    videoQuality: BilibiliVideoQuality;
+  },
+  strict: boolean,
+): BilibiliDashSelection | null {
   const dash = asRecord(asRecord(payload.data)?.dash);
   const videos = readStreams(dash?.video);
   const standardAudio = readStreams(dash?.audio);
   const dolby = readStreams(asRecord(dash?.dolby)?.audio).map((stream) => ({ ...stream, id: 30250 }));
   const flacValue = asRecord(dash?.flac)?.audio;
   const flac = readStreams(flacValue ? [{ ...flacValue, id: 30251 }] : []);
-  const audio = chooseAudio([...standardAudio, ...dolby, ...flac], input.audioQuality ?? "lowest");
-  const video = chooseVideo(videos, input.codec ?? "avc", input.videoQuality ?? "lowest");
-  if (!video || !audio) throw new BilibiliApiError("Bilibili DASH 播放地址不可用。", "DASH_UNAVAILABLE");
-  return { audio, video };
+  const audio = chooseAudio([...standardAudio, ...dolby, ...flac], options.audioQuality);
+  const video = chooseVideo(videos, options.codec, options.videoQuality, strict);
+  return video && audio ? { audio, video } : null;
+}
+
+function isDefaultDashOptions(options: {
+  audioQuality: BilibiliAudioQuality;
+  codec: BilibiliVideoCodec;
+  videoQuality: BilibiliVideoQuality;
+}): boolean {
+  return options.audioQuality === DEFAULT_BILIBILI_AUDIO_QUALITY &&
+    options.codec === DEFAULT_BILIBILI_VIDEO_CODEC &&
+    options.videoQuality === DEFAULT_BILIBILI_VIDEO_QUALITY;
 }
 
 export async function validateBilibiliCookie(cookie: string): Promise<{
@@ -292,22 +354,48 @@ function invalidViewData(): BilibiliApiError {
   return new BilibiliApiError("Bilibili 作品信息不完整。", "INVALID_VIEW_DATA");
 }
 
+async function requestWbiJsonAnonymousFirst(
+  endpoint: string,
+  params: Record<string, string | number>,
+  cookie: string,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<Record<string, unknown>> {
+  try {
+    return await requestWbiJson(endpoint, params, "", requestPolicy);
+  } catch (error) {
+    if (!cookie.trim()) throw error;
+    return await requestWbiJson(endpoint, params, cookie, requestPolicy);
+  }
+}
+
 async function requestWbiJson(
   endpoint: string,
   params: Record<string, string | number>,
   cookie: string,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
 ): Promise<Record<string, unknown>> {
-  const session = await getWbiSession(cookie);
-  const query = signWbi(params, session);
-  return requestJson(`${endpoint}?${query}`, session.cookie);
+  return await requestWbiJsonWithSession(endpoint, params, await getWbiSession(cookie, requestPolicy), requestPolicy);
 }
 
-async function getWbiSession(cookie: string): Promise<WbiSession> {
+async function requestWbiJsonWithSession(
+  endpoint: string,
+  params: Record<string, string | number>,
+  session: WbiSession,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<Record<string, unknown>> {
+  const query = signWbi(params, session);
+  return await requestJson(`${endpoint}?${query}`, session.cookie, requestPolicy);
+}
+
+async function getWbiSession(
+  cookie: string,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<WbiSession> {
   let effectiveCookie = cookie.trim();
-  let payload = await requestPayload(NAV_URL, effectiveCookie);
+  let payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy);
   let keys = readWbiKeys(payload);
   if (!keys && !effectiveCookie) {
-    const spi = await requestJson(SPI_URL, "");
+    const spi = await requestJson(SPI_URL, "", requestPolicy);
     const data = asRecord(spi.data);
     const buvid3 = readString(data?.b_3);
     const buvid4 = readString(data?.b_4);
@@ -315,7 +403,7 @@ async function getWbiSession(cookie: string): Promise<WbiSession> {
       .filter(Boolean)
       .join("; ");
     if (effectiveCookie) {
-      payload = await requestPayload(NAV_URL, effectiveCookie);
+      payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy);
       keys = readWbiKeys(payload);
     }
   }
@@ -344,19 +432,34 @@ function signWbi(params: Record<string, string | number>, keys: Pick<WbiSession,
   return `${query}&w_rid=${wRid}`;
 }
 
-async function requestJson(url: string, cookie: string): Promise<Record<string, unknown>> {
-  const payload = await requestPayload(url, cookie);
+async function requestJson(
+  url: string,
+  cookie: string,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<Record<string, unknown>> {
+  const payload = await requestPayload(url, cookie, requestPolicy);
   assertSuccessfulPayload(payload);
   return payload;
 }
 
-async function requestPayload(url: string, cookie: string): Promise<Record<string, unknown>> {
+async function requestPayload(
+  url: string,
+  cookie: string,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
+): Promise<Record<string, unknown>> {
+  await requestPolicy?.beforeRequest("bilibili");
   const response = await fetchWithRetry(url, {
     cache: "no-store",
     headers: requestHeaders(cookie),
-    retry: { timeoutMs: REQUEST_TIMEOUT_MS },
+    retry: {
+      onResponse: (value) => requestPolicy?.observeResponse("bilibili", value),
+      retryHttpStatuses: [429],
+      retryOnDefaultHttpStatuses: !requestPolicy,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    },
   });
   const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  requestPolicy?.observePayload("bilibili", payload);
   if (!response.ok || !payload) throw new BilibiliApiError(`Bilibili 接口请求失败：HTTP ${response.status}`);
   return payload;
 }
@@ -384,10 +487,16 @@ function chooseVideo(
   streams: BilibiliMediaStream[],
   codec: BilibiliVideoCodec,
   quality: BilibiliVideoQuality,
+  strict: boolean,
 ): BilibiliMediaStream | undefined {
   const codecId = { avc: 7, hevc: 12, av1: 13 }[codec];
   const preferred = streams.filter((stream) => stream.codecId === codecId);
+  if (strict && !preferred.length) return undefined;
   const candidates = preferred.length ? preferred : streams;
+  const targetHeight = videoQualityTargetHeight(quality);
+  if (strict && targetHeight) {
+    return candidates.filter((stream) => stream.height === targetHeight).sort(byHighestVideo)[0];
+  }
   return [...candidates].sort(videoQualityComparator(quality))[0];
 }
 
@@ -448,15 +557,8 @@ function audioQualityToId(quality: BilibiliAudioQuality): number | undefined {
   }[quality];
 }
 
-function streamFormatToFnval(format: BilibiliStreamFormat): number {
+function videoQualityTargetHeight(quality: BilibiliVideoQuality): number | undefined {
   return {
-    dashBasic: 16,
-    dashFull: 4048,
-  }[format];
-}
-
-function videoQualityComparator(quality: BilibiliVideoQuality): (left: BilibiliMediaStream, right: BilibiliMediaStream) => number {
-  const targetHeight = {
     "360p": 360,
     "480p": 480,
     "540p": 540,
@@ -468,6 +570,10 @@ function videoQualityComparator(quality: BilibiliVideoQuality): (left: BilibiliM
     highest: undefined,
     lowest: undefined,
   }[quality];
+}
+
+function videoQualityComparator(quality: BilibiliVideoQuality): (left: BilibiliMediaStream, right: BilibiliMediaStream) => number {
+  const targetHeight = videoQualityTargetHeight(quality);
   if (!targetHeight) return quality === "highest" ? byHighestVideo : byLowestVideo;
   return (left, right) => {
     const leftDistance = Math.abs((left.height ?? 0) - targetHeight);

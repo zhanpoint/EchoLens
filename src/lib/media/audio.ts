@@ -6,10 +6,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 
+const BILIBILI_REFERER = "https://www.bilibili.com/";
 const DOUYIN_REFERER = "https://www.douyin.com/";
-const DOUYIN_USER_AGENT =
+const MEDIA_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 600_000;
 const FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS = 600_000;
 const FFMPEG_AUDIO_PROBE_TIMEOUT_MS = 60_000;
@@ -18,6 +19,7 @@ const MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS = 12 * 60 * 60;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 2 * 1024 * 1024 * 1024;
 
 export type RemoteMediaSource = string | readonly string[];
+export type MediaSourcePlatform = "bilibili" | "douyin";
 export type AudioTranscriptionLimits = {
   durationLimitMessage?: string;
   maxBytes?: number;
@@ -41,7 +43,11 @@ export function resolveBundledFfmpegPath(): string {
 /** Proxies an upstream media response without retaining it on the application server. */
 export async function fetchRemoteMedia(
   source: RemoteMediaSource,
-  options: { range?: string | null; signal?: AbortSignal } = {},
+  options: {
+    mediaSource?: MediaSourcePlatform;
+    range?: string | null;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<Response> {
   const urls = normalizeRemoteMediaSource(source);
   if (!urls.length) {
@@ -55,7 +61,7 @@ export async function fetchRemoteMedia(
     const signal = linkedAbortSignal(controller.signal, options.signal);
     try {
       const response = await fetch(url, {
-        headers: { ...mediaDownloadHeaders(), ...(options.range ? { range: options.range } : {}) },
+        headers: { ...mediaDownloadHeaders(options.mediaSource), ...(options.range ? { range: options.range } : {}) },
         signal,
       });
       if (response.ok && response.body) {
@@ -191,8 +197,12 @@ function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {
   return Array.from(new Set(urls.map((url) => url.trim()).filter((url) => /^https?:\/\//u.test(url))));
 }
 
-function mediaDownloadHeaders(): Record<string, string> {
-  return { accept: "video/mp4,audio/*,*/*;q=0.8", referer: DOUYIN_REFERER, "user-agent": DOUYIN_USER_AGENT };
+function mediaDownloadHeaders(mediaSource: MediaSourcePlatform = "douyin"): Record<string, string> {
+  return {
+    accept: "video/mp4,audio/*,*/*;q=0.8",
+    referer: mediaSource === "bilibili" ? BILIBILI_REFERER : DOUYIN_REFERER,
+    "user-agent": MEDIA_USER_AGENT,
+  };
 }
 
 function parseFfmpegProgressDurationSeconds(chunk: string): number {

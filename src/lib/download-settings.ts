@@ -23,28 +23,24 @@ export const BILIBILI_VIDEO_QUALITIES = [
 ] as const;
 export const BILIBILI_VIDEO_CODECS = ["avc", "hevc", "av1"] as const;
 export const BILIBILI_AUDIO_QUALITIES = ["lowest", "64k", "132k", "192k", "hiRes", "dolby", "highest"] as const;
-export const BILIBILI_STREAM_FORMATS = ["dashFull", "dashBasic"] as const;
 
 export type DownloadOrganization = (typeof DOWNLOAD_ORGANIZATIONS)[number];
 export type DownloadVideoQuality = (typeof DOWNLOAD_VIDEO_QUALITIES)[number];
 export type BilibiliVideoQuality = (typeof BILIBILI_VIDEO_QUALITIES)[number];
 export type BilibiliVideoCodec = (typeof BILIBILI_VIDEO_CODECS)[number];
 export type BilibiliAudioQuality = (typeof BILIBILI_AUDIO_QUALITIES)[number];
-export type BilibiliStreamFormat = (typeof BILIBILI_STREAM_FORMATS)[number];
 
 export const DEFAULT_DOWNLOAD_ORGANIZATION: DownloadOrganization = "work";
 export const DEFAULT_DOWNLOAD_VIDEO_QUALITY: DownloadVideoQuality = "lowest";
 export const DEFAULT_BILIBILI_VIDEO_QUALITY: BilibiliVideoQuality = "lowest";
 export const DEFAULT_BILIBILI_VIDEO_CODEC: BilibiliVideoCodec = "avc";
 export const DEFAULT_BILIBILI_AUDIO_QUALITY: BilibiliAudioQuality = "lowest";
-export const DEFAULT_BILIBILI_STREAM_FORMAT: BilibiliStreamFormat = "dashFull";
 
 const DOWNLOAD_ORGANIZATION_SET = new Set<string>(DOWNLOAD_ORGANIZATIONS);
 const DOWNLOAD_VIDEO_QUALITY_SET = new Set<string>(DOWNLOAD_VIDEO_QUALITIES);
 const BILIBILI_VIDEO_QUALITY_SET = new Set<string>(BILIBILI_VIDEO_QUALITIES);
 const BILIBILI_VIDEO_CODEC_SET = new Set<string>(BILIBILI_VIDEO_CODECS);
 const BILIBILI_AUDIO_QUALITY_SET = new Set<string>(BILIBILI_AUDIO_QUALITIES);
-const BILIBILI_STREAM_FORMAT_SET = new Set<string>(BILIBILI_STREAM_FORMATS);
 
 export function isDownloadOrganization(value: unknown): value is DownloadOrganization {
   return typeof value === "string" && DOWNLOAD_ORGANIZATION_SET.has(value);
@@ -72,10 +68,6 @@ export function isBilibiliAudioQuality(value: unknown): value is BilibiliAudioQu
   return typeof value === "string" && BILIBILI_AUDIO_QUALITY_SET.has(value);
 }
 
-export function isBilibiliStreamFormat(value: unknown): value is BilibiliStreamFormat {
-  return typeof value === "string" && BILIBILI_STREAM_FORMAT_SET.has(value);
-}
-
 export function readBilibiliVideoQuality(settings: unknown): BilibiliVideoQuality {
   if (!settings || typeof settings !== "object") return DEFAULT_BILIBILI_VIDEO_QUALITY;
   const record = settings as Record<string, unknown>;
@@ -94,12 +86,6 @@ export function readBilibiliAudioQuality(settings: unknown): BilibiliAudioQualit
   if (!settings || typeof settings !== "object") return DEFAULT_BILIBILI_AUDIO_QUALITY;
   const quality = (settings as Record<string, unknown>).bilibiliAudioQuality;
   return isBilibiliAudioQuality(quality) ? quality : DEFAULT_BILIBILI_AUDIO_QUALITY;
-}
-
-export function readBilibiliStreamFormat(settings: unknown): BilibiliStreamFormat {
-  if (!settings || typeof settings !== "object") return DEFAULT_BILIBILI_STREAM_FORMAT;
-  const format = (settings as Record<string, unknown>).bilibiliStreamFormat;
-  return isBilibiliStreamFormat(format) ? format : DEFAULT_BILIBILI_STREAM_FORMAT;
 }
 
 export type DownloadPathContext = {

@@ -15,7 +15,7 @@ export default async function Page({
   const { section } = await searchParams;
   return (
     <SettingsPage
-      initialSection={section === "douyin" || section === "download" ? section : "aiCredential"}
+      initialSection={section === "apiTokens" || section === "douyin" || section === "download" ? section : "aiCredential"}
     />
   );
 }

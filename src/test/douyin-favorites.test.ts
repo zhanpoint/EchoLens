@@ -29,7 +29,7 @@ describe("douyin favorites", () => {
         }));
       }
 
-      if (url.pathname === "/aweme/v1/web/aweme/favorite/") {
+      if (url.pathname === "/aweme/v1/web/aweme/listcollection/") {
         return new Response(JSON.stringify({
           aweme_list: [],
           has_more: 0,
@@ -231,7 +231,7 @@ describe("douyin favorites", () => {
       if (url.pathname === "/aweme/v1/web/user/profile/self/") {
         return new Response(JSON.stringify({ status_code: 0, user: { sec_uid: "self-sec" } }));
       }
-      if (url.pathname === "/aweme/v1/web/aweme/favorite/") {
+      if (url.pathname === "/aweme/v1/web/aweme/listcollection/") {
         return new Response(JSON.stringify({ aweme_list: [], has_more: 0, max_cursor: 0 }));
       }
       if (url.pathname === "/aweme/v1/web/collects/list/") {
@@ -271,7 +271,7 @@ describe("douyin favorites", () => {
 
     expect(result.folders.map((folder) => folder.id)).toEqual(folderIds);
     expect(result.mixes.map((mix) => mix.id)).toEqual(mixIds);
-    expect(peakRequests).toBe(4);
+    expect(peakRequests).toBe(1);
   });
 
   it("caps each favorite category at 5000 works", async () => {
@@ -286,7 +286,7 @@ describe("douyin favorites", () => {
       if (url.pathname === "/aweme/v1/web/user/profile/self/") {
         return new Response(JSON.stringify({ status_code: 0, user: { sec_uid: "self-sec" } }));
       }
-      if (url.pathname === "/aweme/v1/web/aweme/favorite/") {
+      if (url.pathname === "/aweme/v1/web/aweme/listcollection/") {
         return new Response(JSON.stringify({ aweme_list: makeWorks("video"), has_more: 0, max_cursor: 0 }));
       }
       if (url.pathname === "/aweme/v1/web/collects/list/") {
@@ -320,7 +320,7 @@ describe("douyin favorites", () => {
   });
 
   it("reads the logged-in account favorite stream even when collect folders are empty", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(String(input));
 
       if (url.pathname === "/aweme/v1/web/user/profile/self/") {
@@ -330,8 +330,9 @@ describe("douyin favorites", () => {
         }));
       }
 
-      if (url.pathname === "/aweme/v1/web/aweme/favorite/") {
-        expect(url.searchParams.get("sec_user_id")).toBe("self-sec");
+      if (url.pathname === "/aweme/v1/web/aweme/listcollection/") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe("count=20&cursor=0");
         return new Response(JSON.stringify({
           aweme_list: [
             {
@@ -420,6 +421,14 @@ describe("douyin favorites", () => {
     } satisfies Partial<DouyinApiError>);
   });
 
+  it("classifies a forbidden upstream response as access blocking", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("forbidden", { status: 403 }));
+
+    await expect(validateDouyinCredential("sessionid=abc")).rejects.toMatchObject({
+      code: "ACCESS_BLOCKED",
+      details: { endpoint: "/aweme/v1/web/user/profile/self/", status: 403 },
+    });
+  });
   it("uses one upstream request when credential validation is unavailable", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("service unavailable", { status: 503 }),

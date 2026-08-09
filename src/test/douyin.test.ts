@@ -335,7 +335,6 @@ describe("douyin url utilities", () => {
       videoUrls: [
         "https://example.com/720p-video.mp4",
         "https://example.com/1080p-video.mp4",
-        "https://example.com/fallback-video.mp4",
       ],
     });
   });
@@ -361,6 +360,21 @@ describe("douyin url utilities", () => {
 
     expect(metadata.videoUrls?.[0]).toBe(expectedUrl);
     expect(metadata.videoUrls?.every((url) => !url.includes("/aweme/v1/play/"))).toBe(true);
+  });
+
+  it("falls back to platform play_addr when bit_rate has no comparable dimensions", () => {
+    const metadata = parseWorkMetadata({
+      aweme_detail: {
+        video: {
+          bit_rate: [
+            { bit_rate: 900, play_addr: { url_list: ["https://example.com/no-width.mp4"] } },
+          ],
+          play_addr: { url_list: ["https://example.com/fallback.mp4"] },
+        },
+      },
+    }, "7649250336875613449", "video", "1080p");
+
+    expect(metadata.videoUrls).toEqual(["https://example.com/fallback.mp4"]);
   });
 
   it("reads video duration from douyin metadata", () => {

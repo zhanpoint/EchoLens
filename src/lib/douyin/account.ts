@@ -53,7 +53,9 @@ export async function validateAndStoreDouyinCredential(userId: string, cookie: s
     await writeDouyinCredentialState(userId, state);
     return state;
   } catch (error) {
-    if (error instanceof DouyinApiError && error.code !== "UPSTREAM_ERROR") {
+    if (error instanceof DouyinApiError &&
+        error.code !== "UPSTREAM_ERROR" &&
+        error.code !== "ACCESS_BLOCKED") {
       await writeDouyinCredentialState(userId, {
         checkedAt: Date.now(),
         cookie: normalized,

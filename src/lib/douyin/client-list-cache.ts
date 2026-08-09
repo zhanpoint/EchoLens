@@ -20,11 +20,11 @@ export async function readDouyinClientSnapshot<T>(
   kind: DouyinClientListKind,
   parse: (value: unknown) => T | null,
 ): Promise<DouyinClientSnapshot<T> | null> {
-  const database = await openDatabase();
+  const database = await withTimeout(openDatabase(), 500);
   try {
-    const record = await requestToPromise<DouyinClientListRecord | undefined>(
+    const record = await withTimeout(requestToPromise<DouyinClientListRecord | undefined>(
       database.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(cacheKey(userId, kind)),
-    );
+    ), 500);
     if (!record) {
       return null;
     }
@@ -47,7 +47,7 @@ export async function writeDouyinClientSnapshot<T>(
   data: T,
   refreshedAt = Date.now(),
 ): Promise<void> {
-  const database = await openDatabase();
+  const database = await withTimeout(openDatabase(), 500);
   try {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     transaction.objectStore(STORE_NAME).put({
@@ -59,6 +59,16 @@ export async function writeDouyinClientSnapshot<T>(
   } finally {
     database.close();
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = globalThis.setTimeout(
+      () => reject(new Error("本地列表缓存读取超时。")),
+      milliseconds,
+    );
+    promise.then(resolve, reject).finally(() => globalThis.clearTimeout(timeout));
+  });
 }
 
 function cacheKey(userId: string, kind: DouyinClientListKind): string {

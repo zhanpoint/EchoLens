@@ -24,6 +24,9 @@ export type RetryableFetchInit = RequestInit & {
   retry?: Omit<RetryOptions, "signal" | "shouldRetry"> & {
     retryNetworkErrors?: boolean;
     timeoutMs?: number;
+    retryHttpStatuses?: number[];
+    retryOnDefaultHttpStatuses?: boolean;
+    onResponse?: (response: Response) => void | Promise<void>;
   };
 };
 
@@ -65,6 +68,7 @@ export async function fetchWithRetry(
   const baseDelayMs = readPositiveInteger(init.retry?.baseDelayMs, DEFAULT_BASE_DELAY_MS);
   const maxDelayMs = readPositiveInteger(init.retry?.maxDelayMs, DEFAULT_MAX_DELAY_MS);
   const timeoutMs = init.retry?.timeoutMs;
+  const retryHttpStatuses = new Set(init.retry?.retryHttpStatuses ?? []);
   const { signal: externalSignal, ...requestInit } = withoutRetry(init);
   let lastError: unknown;
 
@@ -72,7 +76,13 @@ export async function fetchWithRetry(
     throwIfExternallyAborted(externalSignal);
     try {
       const response = await fetchOnce(url, requestInit, timeoutMs, externalSignal);
-      if (!isRetryableHttpStatus(response.status) || attempt === attempts) return response;
+      try {
+        await init.retry?.onResponse?.(response);
+      } catch (error) {
+        await response.body?.cancel();
+        throw error;
+      }
+      if (!isRetryableHttpStatus(response.status, retryHttpStatuses, init.retry?.retryOnDefaultHttpStatuses !== false) || attempt === attempts) return response;
 
       await response.body?.cancel();
       await abortableDelay(readRetryDelay(response, attempt, baseDelayMs, maxDelayMs), externalSignal);
@@ -88,8 +98,12 @@ export async function fetchWithRetry(
   throw new NetworkRetryExhaustedError({ cause: lastError });
 }
 
-export function isRetryableHttpStatus(status: number): boolean {
-  return RETRYABLE_HTTP_STATUSES.has(status) || status >= 500;
+export function isRetryableHttpStatus(
+  status: number,
+  extraStatuses: ReadonlySet<number> = new Set(),
+  includeDefaultStatuses = true,
+): boolean {
+  return extraStatuses.has(status) || (includeDefaultStatuses && RETRYABLE_HTTP_STATUSES.has(status)) || status >= 500;
 }
 
 export function isRetryableNetworkError(error: unknown): boolean {

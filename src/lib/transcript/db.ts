@@ -395,15 +395,64 @@ export async function markAsrTaskCanceled(id: string, detail = "用户已放弃�
   );
 }
 
+export async function reserveOpenApiAsrQuota(input: {
+  durationSeconds: number;
+  limitSeconds: number;
+  userId: string;
+}): Promise<boolean> {
+  return await withTransaction(async (transaction) => {
+    await queryRow(
+      "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+      [input.userId],
+      transaction,
+    );
+    const usedSeconds = await readPlatformAsrQuotaUsageSeconds({ userId: input.userId }, transaction);
+    if (usedSeconds + input.durationSeconds > input.limitSeconds) return false;
+
+    await execute(
+      `INSERT INTO transcript_open_api_quota_usage (user_id, used_seconds, updated_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT(user_id) DO UPDATE SET
+         used_seconds = transcript_open_api_quota_usage.used_seconds + excluded.used_seconds,
+         updated_at = excluded.updated_at`,
+      [input.userId, input.durationSeconds, Date.now()],
+      transaction,
+    );
+    return true;
+  });
+}
+
+export async function releaseOpenApiAsrQuota(input: {
+  durationSeconds: number;
+  userId: string;
+}): Promise<void> {
+  await execute(
+    `UPDATE transcript_open_api_quota_usage
+     SET used_seconds = CASE
+           WHEN used_seconds > $1 THEN used_seconds - $1
+           ELSE 0
+         END,
+         updated_at = $2
+     WHERE user_id = $3`,
+    [input.durationSeconds, Date.now(), input.userId],
+  );
+}
+
 export async function readPlatformAsrQuotaUsageSeconds(input: {
   userId: string;
 }, executor?: DbExecutor): Promise<number> {
   const row = await queryRow<{ total: number | null }>(
-    `SELECT COALESCE(SUM(audio_duration_seconds), 0)::double precision AS total
-     FROM transcript_asr_tasks
-     WHERE user_id = $1
-       AND status IN ('running', 'succeeded')
-       AND credential_source = 'platform'`,
+    `SELECT (
+       SELECT COALESCE(SUM(audio_duration_seconds), 0)
+       FROM transcript_asr_tasks
+       WHERE user_id = $1
+         AND status IN ('running', 'succeeded')
+         AND credential_source = 'platform'
+     ) + (
+       SELECT COALESCE(SUM(used_seconds), 0)
+       FROM transcript_open_api_quota_usage
+       WHERE user_id = $1
+     ) AS total`,
     [input.userId],
     executor,
   );

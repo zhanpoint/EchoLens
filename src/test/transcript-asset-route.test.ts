@@ -42,8 +42,8 @@ describe("transcript history single asset route", () => {
       ...asset,
       assetKind: "video",
       contentType: "video/mp4",
-      objectKey: "local-cache-key",
-      url: "/api/transcript-history/history-1/assets/video/content",
+      objectKey: "bilibili:BV1xx411c7mD:100:video:32:7",
+      url: "https://cdn.example/32",
     });
     mocks.ensureHistoryAsset.mockResolvedValue(asset);
   });
@@ -97,15 +97,14 @@ describe("transcript history single asset route", () => {
     expect(mocks.ensureHistoryAsset).not.toHaveBeenCalled();
   });
 
-  it("reports missing Bilibili video cache without generating it on GET", async () => {
+  it("reports a missing resource without generating it on GET", async () => {
     mocks.ensureHistoryAsset.mockResolvedValueOnce(null);
 
     const response = await GET(assetRequest(), routeContext("video"));
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
-      code: "BILIBILI_VIDEO_CACHE_MISSING",
-      error: "Bilibili 视频缓存不存在或已过期，请先获取视频资源。",
+      error: "会话不存在或资源不可用。",
     });
     expect(mocks.ensureBilibiliHistoryVideo).not.toHaveBeenCalled();
   });
@@ -122,8 +121,8 @@ describe("transcript history single asset route", () => {
     await expect(response.json()).resolves.toMatchObject({
       asset: {
         assetKind: "video",
-        objectKey: "local-cache-key",
-        url: "/api/transcript-history/history-1/assets/video/content",
+        objectKey: "bilibili:BV1xx411c7mD:100:video:32:7",
+        url: "https://cdn.example/32",
       },
     });
   });

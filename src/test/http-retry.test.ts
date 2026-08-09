@@ -96,6 +96,33 @@ describe("fetchWithRetry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("uses Retry-After for 429 responses", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("limited", { headers: { "retry-after": "2" }, status: 429 }))
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+
+    const task = fetchWithRetry("https://example.com", { retry: { attempts: 2 } });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(task).resolves.toMatchObject({ status: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("can limit retries to network errors, 429, and 5xx", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("timeout", { status: 408 }));
+
+    const response = await fetchWithRetry("https://example.com", {
+      retry: { retryHttpStatuses: [429], retryOnDefaultHttpStatuses: false },
+    });
+
+    expect(response.status).toBe(408);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("retries server errors but not client errors", async () => {
     vi.useFakeTimers();
     const fetchMock = vi

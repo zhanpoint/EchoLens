@@ -32,8 +32,9 @@ describe("Bilibili client", () => {
     30_000,
   );
 
-  it("accepts a bare BV id and resolves it through the WBI view API", async () => {
+  it("accepts a bare BV id and resolves it anonymously through the WBI view API", async () => {
     const requests: string[] = [];
+    const cookies: Array<string | null> = [];
     const responses = [
       jsonResponse(navPayload()),
       jsonResponse({
@@ -50,14 +51,15 @@ describe("Bilibili client", () => {
         },
       }),
     ];
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       requests.push(String(input));
+      cookies.push(new Headers(init?.headers).get("cookie"));
       const next = responses.shift();
       if (!next) throw new Error("unexpected request");
       return next;
     }));
 
-    const result = await resolveBilibiliWork("BV1xx411c7mD");
+    const result = await resolveBilibiliWork("BV1xx411c7mD", "SESSDATA=private");
 
     expect(result.work).toMatchObject({
       bvid: "BV1xx411c7mD",
@@ -69,6 +71,7 @@ describe("Bilibili client", () => {
     expect(viewUrl.origin + viewUrl.pathname).toBe("https://api.bilibili.com/x/web-interface/wbi/view");
     expect(viewUrl.searchParams.get("bvid")).toBe("BV1xx411c7mD");
     expect(viewUrl.searchParams.get("w_rid")).toMatch(/^[a-f0-9]{32}$/u);
+    expect(cookies).toEqual([null, null]);
   });
 
   it("follows b23, signs WBI view requests, and selects the requested part CID", async () => {
@@ -148,7 +151,6 @@ describe("Bilibili client", () => {
       bvid: "BV1xx411c7mD",
       cid: 100,
       codec: "av1",
-      streamFormat: "dashFull",
       videoQuality: "2160p",
     });
 
@@ -203,6 +205,124 @@ describe("Bilibili client", () => {
     expect(playUrl.searchParams.get("fnval")).toBe("4048");
     expect(playUrl.searchParams.get("qn")).toBe("16");
     expect(playUrl.searchParams.get("w_rid")).toMatch(/^[a-f0-9]{32}$/u);
+  });
+
+  it("does not send a configured Cookie when anonymous streams satisfy the request", async () => {
+    const cookies: Array<string | null> = [];
+    const responses = [
+      jsonResponse(navPayload()),
+      jsonResponse({
+        code: 0,
+        data: {
+          dash: {
+            audio: [stream(30216, 64_000, 0)],
+            video: [{ ...stream(32, 300_000, 7), height: 360 }],
+          },
+        },
+      }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      cookies.push(new Headers(init?.headers).get("cookie"));
+      const next = responses.shift();
+      if (!next) throw new Error("unexpected request");
+      return next;
+    }));
+
+    const selection = await getBilibiliDashSelection({
+      bvid: "BV1xx411c7mD",
+      cid: 100,
+      cookie: "SESSDATA=private",
+    });
+
+    expect(selection.audio.id).toBe(30216);
+    expect(selection.video.id).toBe(32);
+    expect(cookies).toEqual([null, null]);
+  });
+
+  it("retries configured streams with Cookie only when anonymous streams are insufficient", async () => {
+    const cookies: Array<string | null> = [];
+    const responses = [
+      jsonResponse(navPayload()),
+      jsonResponse({
+        code: 0,
+        data: {
+          dash: {
+            audio: [stream(30216, 64_000, 0)],
+            video: [{ ...stream(32, 300_000, 7), height: 360 }],
+          },
+        },
+      }),
+      jsonResponse(navPayload()),
+      jsonResponse({
+        code: 0,
+        data: {
+          dash: {
+            audio: [stream(30280, 192_000, 0)],
+            video: [{ ...stream(120, 1_400_000, 13), height: 2160 }],
+          },
+        },
+      }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      cookies.push(new Headers(init?.headers).get("cookie"));
+      const next = responses.shift();
+      if (!next) throw new Error("unexpected request");
+      return next;
+    }));
+
+    const selection = await getBilibiliDashSelection({
+      audioQuality: "192k",
+      bvid: "BV1xx411c7mD",
+      cid: 100,
+      codec: "av1",
+      cookie: "SESSDATA=private",
+      videoQuality: "2160p",
+    });
+
+    expect(selection.audio.id).toBe(30280);
+    expect(selection.video.id).toBe(120);
+    expect(cookies).toEqual([null, null, "SESSDATA=private", "SESSDATA=private"]);
+  });
+
+  it("falls back to anonymous default streams when configured streams remain unavailable", async () => {
+    const requests: string[] = [];
+    const unavailable = {
+      code: 0,
+      data: {
+        dash: {
+          audio: [stream(30216, 64_000, 0)],
+          video: [{ ...stream(32, 300_000, 7), height: 360 }],
+        },
+      },
+    };
+    const responses = [
+      jsonResponse(navPayload()),
+      jsonResponse(unavailable),
+      jsonResponse(navPayload()),
+      jsonResponse(unavailable),
+      jsonResponse(unavailable),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      const next = responses.shift();
+      if (!next) throw new Error("unexpected request");
+      return next;
+    }));
+
+    const selection = await getBilibiliDashSelection({
+      audioQuality: "hiRes",
+      bvid: "BV1xx411c7mD",
+      cid: 100,
+      codec: "av1",
+      cookie: "SESSDATA=private",
+      videoQuality: "2160p",
+    });
+
+    expect(selection.audio.id).toBe(30216);
+    expect(selection.video).toMatchObject({ codecId: 7, height: 360, id: 32 });
+    const fallbackUrl = new URL(requests[4]);
+    expect(fallbackUrl.searchParams.get("fnval")).toBe("4048");
+    expect(fallbackUrl.searchParams.get("qn")).toBe("16");
   });
 });
 

@@ -47,16 +47,17 @@ export async function putOssStream(input: {
   metadata?: Readonly<Record<string, string>>;
   objectKey: string;
 }): Promise<void> {
-  const response = await signedRequest(readConfig(), input.objectKey, {
-    body: input.body,
-    cacheControl: input.cacheControl,
-    contentLength: input.contentLength,
-    contentType: input.contentType,
-    metadata: input.metadata,
-    method: "PUT",
-  });
-  await response.body?.cancel();
-  if (!response.ok) throw new Error(`OSS 上传对象失败：HTTP ${response.status}`);
+  await putOssStreamForConfig(readConfig(), input);
+}
+
+export async function putPublicOssStream(input: {
+  body: ReadableStream<Uint8Array>;
+  cacheControl?: string;
+  contentType: string;
+  contentLength?: number;
+  objectKey: string;
+}): Promise<void> {
+  await putOssStreamForConfig(readPublicConfig(), input);
 }
 
 export async function deleteOssObjects(objectKeys: readonly string[]): Promise<void> {
@@ -73,18 +74,11 @@ export async function ossObjectExists(objectKey: string): Promise<boolean> {
 }
 
 export async function getOssObjectInfo(objectKey: string): Promise<OssObjectInfo | null> {
-  const response = await signedRequest(readConfig(), objectKey, { method: "HEAD" });
-  await response.body?.cancel();
-  if (!response.ok) return null;
-  return {
-    contentLength: Number(response.headers.get("content-length")) || 0,
-    contentType: response.headers.get("content-type") || "application/octet-stream",
-    metadata: Object.fromEntries(
-      [...response.headers.entries()]
-        .filter(([name]) => name.startsWith("x-oss-meta-"))
-        .map(([name, value]) => [name.slice("x-oss-meta-".length), value]),
-    ),
-  };
+  return await getOssObjectInfoForConfig(readConfig(), objectKey);
+}
+
+export async function getPublicOssObjectInfo(objectKey: string): Promise<OssObjectInfo | null> {
+  return await getOssObjectInfoForConfig(readPublicConfig(), objectKey);
 }
 
 export function buildPublicOssObjectUrl(input: { bucket: string; objectKey: string }): string {
@@ -92,6 +86,10 @@ export function buildPublicOssObjectUrl(input: { bucket: string; objectKey: stri
   if (!bucket) throw new Error("ALI_OSS_PUBLIC_BUCKET 未配置。");
   const endpoint = normalizeEndpoint(required("ALI_OSS_ENDPOINT"), bucket);
   return `${endpoint}/${encodeObjectKey(input.objectKey)}`;
+}
+
+export function buildConfiguredPublicOssObjectUrl(objectKey: string): string {
+  return buildPublicOssObjectUrl({ bucket: required("ALI_OSS_PUBLIC_BUCKET"), objectKey });
 }
 
 export type OssSignedUrl = {
@@ -115,6 +113,44 @@ export function createOssSignedUrlWithExpiration(objectKey: string): OssSignedUr
   url.searchParams.set("Expires", String(expires));
   url.searchParams.set("Signature", signature);
   return { expiresAt: expires * 1_000, url: url.toString() };
+}
+
+async function putOssStreamForConfig(
+  config: OssConfig,
+  input: {
+    body: ReadableStream<Uint8Array>;
+    cacheControl?: string;
+    contentType: string;
+    contentLength?: number;
+    metadata?: Readonly<Record<string, string>>;
+    objectKey: string;
+  },
+): Promise<void> {
+  const response = await signedRequest(config, input.objectKey, {
+    body: input.body,
+    cacheControl: input.cacheControl,
+    contentLength: input.contentLength,
+    contentType: input.contentType,
+    metadata: input.metadata,
+    method: "PUT",
+  });
+  await response.body?.cancel();
+  if (!response.ok) throw new Error(`OSS 上传对象失败：HTTP ${response.status}`);
+}
+
+async function getOssObjectInfoForConfig(config: OssConfig, objectKey: string): Promise<OssObjectInfo | null> {
+  const response = await signedRequest(config, objectKey, { method: "HEAD" });
+  await response.body?.cancel();
+  if (!response.ok) return null;
+  return {
+    contentLength: Number(response.headers.get("content-length")) || 0,
+    contentType: response.headers.get("content-type") || "application/octet-stream",
+    metadata: Object.fromEntries(
+      [...response.headers.entries()]
+        .filter(([name]) => name.startsWith("x-oss-meta-"))
+        .map(([name, value]) => [name.slice("x-oss-meta-".length), value]),
+    ),
+  };
 }
 
 async function signedRequest(
@@ -186,6 +222,18 @@ function readConfig(): OssConfig {
       process.env.ALI_OSS_SIGNED_URL_EXPIRES_SECONDS,
       DEFAULT_SIGNED_URL_EXPIRES_SECONDS,
     ),
+  };
+}
+
+function readPublicConfig(): OssConfig {
+  const bucket = required("ALI_OSS_PUBLIC_BUCKET");
+  const endpoint = normalizeEndpoint(required("ALI_OSS_ENDPOINT"), bucket);
+  return {
+    accessKeyId: required("ALI_OSS_ACCESS_KEY_ID"),
+    accessKeySecret: required("ALI_OSS_ACCESS_KEY_SECRET"),
+    bucket,
+    endpoint,
+    signedUrlExpiresSeconds: 0,
   };
 }
 

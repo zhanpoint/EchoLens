@@ -4,6 +4,7 @@ import {
   type DownloadVideoQuality,
 } from "@/lib/download-settings";
 import { fetchWithRetry } from "@/lib/http/retry";
+import type { OpenApiPlatformRequestPolicy } from "@/lib/open-api/platform-request-policy";
 import type { DouyinKind } from "../../types/douyin";
 import type { DouyinWorkIdentity } from "../../types/douyin";
 
@@ -52,20 +53,32 @@ export type CompleteDouyinWorkMetadata = DouyinWorkMetadata & {
 
 export async function collectWorkMetadata(
   work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
-  options: { signal?: AbortSignal; videoQuality?: DownloadVideoQuality } = {},
+  options: {
+    requestPolicy?: OpenApiPlatformRequestPolicy;
+    signal?: AbortSignal;
+    videoQuality?: DownloadVideoQuality;
+  } = {},
 ): Promise<CompleteDouyinWorkMetadata> {
+  await options.requestPolicy?.beforeRequest("douyin");
   const response = await fetchWithRetry(buildSharePageUrl(work), {
     cache: "no-store",
     headers: buildSharePageHeaders(),
     signal: options.signal,
-    retry: { timeoutMs: METADATA_REQUEST_TIMEOUT_MS },
+    retry: {
+      onResponse: (value) => options.requestPolicy?.observeResponse("douyin", value),
+      retryHttpStatuses: [429],
+      retryOnDefaultHttpStatuses: !options.requestPolicy,
+      timeoutMs: METADATA_REQUEST_TIMEOUT_MS,
+    },
   });
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`抖音作品信息请求失败：HTTP ${response.status}`);
   }
 
-  const payload = parseSharePagePayload(await response.text(), work);
+  const text = await response.text();
+  options.requestPolicy?.observePayload("douyin", text);
+  const payload = parseSharePagePayload(text, work);
   const metadata = parseWorkMetadata(
     payload,
     work.id,
@@ -278,8 +291,9 @@ function readVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] 
   }
 
   const video = value as Record<string, unknown>;
+  const selectedUrls = readBitRateVideoUrls(video.bit_rate ?? video.bitRate, quality);
+  if (selectedUrls.length) return uniqueMediaReferences(selectedUrls);
   return uniqueMediaReferences([
-    ...readBitRateVideoUrls(video.bit_rate ?? video.bitRate, quality),
     ...readUrlList(video.play_addr ?? video.playAddr),
     ...readUrlList(video.download_addr ?? video.downloadAddr),
   ]);
@@ -311,14 +325,13 @@ function readBitRateVideoUrls(value: unknown, quality: DownloadVideoQuality): st
     const record = item as Record<string, unknown>;
     const playAddr = record.play_addr ?? record.playAddr;
     const urls = readUrlList(playAddr);
-    return urls.length
-      ? [{
-          bitRate: readNumber(record.bit_rate ?? record.bitRate) ?? 0,
-          urls,
-          width: readNestedNumber(playAddr, "width") ?? readNumber(record.width) ?? 0,
-        }]
+    const width = readNestedNumber(playAddr, "width") ?? readNumber(record.width);
+    const bitRate = readNumber(record.bit_rate ?? record.bitRate);
+    return urls.length && width
+      ? [{ bitRate: bitRate ?? 0, urls, width }]
       : [];
   });
+  if (!sources.length) return [];
 
   const targetWidth = VIDEO_QUALITY_TARGET_WIDTH[quality];
   sources.sort((left, right) => {

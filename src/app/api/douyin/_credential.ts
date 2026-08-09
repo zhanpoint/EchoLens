@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { readDouyinCredentialState } from "@/lib/douyin/account";
+import { markDouyinCredentialInvalid, readDouyinCredentialState } from "@/lib/douyin/account";
+import { DouyinApiError } from "@/lib/douyin/web-client";
 
 export async function readValidDouyinCredential(userId: string): Promise<string | NextResponse> {
   const state = await readDouyinCredentialState(userId);
@@ -21,4 +22,23 @@ export async function readValidDouyinCredential(userId: string): Promise<string 
     },
   }[state.status];
   return NextResponse.json(issue, { status: 409 });
+}
+
+export async function toDouyinApiErrorResponse(
+  error: DouyinApiError,
+  userId: string,
+): Promise<NextResponse> {
+  if (error.code === "LOGIN_REQUIRED" || error.code === "INVALID_COOKIE") {
+    await markDouyinCredentialInvalid(userId);
+    return NextResponse.json({
+      code: "CREDENTIAL_INVALID",
+      error: "抖音账号访问凭证已失效，请前往设置更新后重试。",
+    }, { status: 409 });
+  }
+
+  const status = {
+    ACCESS_BLOCKED: 503,
+    UPSTREAM_ERROR: 502,
+  }[error.code] ?? 400;
+  return NextResponse.json({ code: error.code, error: error.message }, { status });
 }

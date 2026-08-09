@@ -2,14 +2,17 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import { readUsableBilibiliCookie } from "@/lib/bilibili/account";
-import { bilibiliAssetUrl, ensureBilibiliAsset } from "@/lib/bilibili/assets";
-import { resolveBilibiliWork } from "@/lib/bilibili/client";
+import {
+  buildBilibiliWorkId,
+  getBilibiliDashSelection,
+  resolveBilibiliWork,
+  type BilibiliMediaStream,
+} from "@/lib/bilibili/client";
 import {
   readBilibiliAudioQuality,
-  readBilibiliStreamFormat,
+  readBilibiliVideoCodec,
+  readBilibiliVideoQuality,
 } from "@/lib/download-settings";
-import type { PreparedAsset, PreparedAssetKind } from "@/lib/douyin/asset-bundle";
-import { readReusableHistoryAsset, savePreparedHistoryAsset } from "@/lib/transcript/assets";
 import { updateTranscriptHistoryRecordMetadata } from "@/lib/transcript/db";
 import { readUserSetting } from "@/lib/user-settings";
 
@@ -22,12 +25,21 @@ const InputSchema = z.object({
   id: z.string().regex(/^BV[\p{L}\p{N}]+:\d+$/iu),
   kind: z.literal("video"),
 });
-const AUTO_ASSETS = ["avatar", "cover", "originalAudio"] as const satisfies readonly PreparedAssetKind[];
 
+type PreparedBilibiliAssetKind = "avatar" | "cover" | "originalAudio" | "video";
+type SerializedAsset = {
+  asset: PreparedBilibiliAssetKind;
+  contentType: string;
+  durationSeconds?: number;
+  objectKey: string;
+  sizeBytes: number;
+  url: string;
+  verified?: boolean;
+};
 type PrepareEvent =
   | { metadata: Record<string, unknown>; type: "metadata" }
-  | { asset: ReturnType<typeof serializeAsset>; type: "asset" }
-  | { asset: PreparedAssetKind; error: string; type: "asset-error" }
+  | { asset: SerializedAsset; type: "asset" }
+  | { asset: PreparedBilibiliAssetKind; error: string; type: "asset-error" }
   | { type: "done" }
   | { error: string; type: "error" };
 
@@ -54,7 +66,7 @@ export async function POST(request: Request) {
       request.signal.addEventListener("abort", close, { once: true });
       void prepare().catch((error) => {
         logServerError("bilibili.prepare", error);
-        send({ error: "Bilibili 作品资源准备失败，请稍后重试。", type: "error" });
+        send({ error: "Bilibili DASH 资源准备失败，请稍后重试。", type: "error" });
       }).finally(close);
 
       async function prepare() {
@@ -64,7 +76,9 @@ export async function POST(request: Request) {
         ]);
         const cookie = readUsableBilibiliCookie(bilibiliSettings);
         const { metadata, work } = await resolveBilibiliWork(input.finalUrl, cookie);
-        if (work.id !== input.id) throw new Error("Bilibili 作品标识与链接不一致。");
+        if (work.id !== input.id || buildBilibiliWorkId(metadata.bvid, metadata.cid) !== input.id) {
+          throw new Error("Bilibili 作品标识与链接不一致。");
+        }
         const history = await updateTranscriptHistoryRecordMetadata({
           authorName: metadata.authorName,
           authorUrl: metadata.authorUrl,
@@ -84,43 +98,52 @@ export async function POST(request: Request) {
           type: "metadata",
         });
 
-        const reusableAudio = await readReusableHistoryAsset({
-          assetKind: "originalAudio",
-          historyRecordId: input.historyRecordId,
-          userId,
+        sendOptionalImage("avatar", metadata.authorAvatarUrls[0], `bilibili:${work.id}:avatar`);
+        sendOptionalImage("cover", metadata.coverUrls[0], `bilibili:${work.id}:cover`);
+        const selection = await getBilibiliDashSelection({
+          audioQuality: readBilibiliAudioQuality(downloadSettings),
+          bvid: metadata.bvid,
+          cid: metadata.cid,
+          codec: readBilibiliVideoCodec(downloadSettings),
+          cookie,
+          videoQuality: readBilibiliVideoQuality(downloadSettings),
         });
-        await Promise.all(AUTO_ASSETS.map(async (assetKind) => {
-          try {
-            const prepared = assetKind === "originalAudio" && reusableAudio
-              ? {
-                  asset: "originalAudio" as const,
-                  value: {
-                    contentType: reusableAudio.contentType,
-                    durationSeconds: reusableAudio.durationSeconds ?? metadata.durationSeconds,
-                    objectKey: reusableAudio.objectKey,
-                    sizeBytes: reusableAudio.sizeBytes,
-                  },
-                }
-              : await ensureBilibiliAsset({
-                  assetKind,
-                  cookie,
-                  metadata,
-                  audioQuality: readBilibiliAudioQuality(downloadSettings),
-                  streamFormat: readBilibiliStreamFormat(downloadSettings),
-                });
-            const saved = await savePreparedHistoryAsset({
-              historyRecordId: input.historyRecordId,
-              prepared,
-              userId,
-            });
-            if (!saved) throw new Error("会话不存在或无权访问。");
-            send({ asset: serializeAsset(prepared), type: "asset" });
-          } catch (error) {
-            logServerError(`bilibili.prepare.${assetKind}`, error);
-            send({ asset: assetKind, error: `${assetLabel(assetKind)}缓存失败。`, type: "asset-error" });
-          }
-        }));
+        sendDashAsset({
+          asset: "video",
+          contentType: "video/mp4",
+          objectKey: `bilibili:${work.id}:video:${selection.video.id}:${selection.video.codecId ?? "unknown"}`,
+          stream: selection.video,
+        });
+        sendDashAsset({
+          asset: "originalAudio",
+          contentType: contentTypeForAudio(selection.audio),
+          durationSeconds: metadata.durationSeconds,
+          objectKey: `bilibili:${work.id}:audio:${selection.audio.id}`,
+          stream: selection.audio,
+          verified: true,
+        });
         send({ type: "done" });
+      }
+
+      function sendOptionalImage(asset: "avatar" | "cover", url: string | undefined, objectKey: string) {
+        if (!url) {
+          send({ asset, error: `${asset === "avatar" ? "作者头像" : "封面"}不可用。`, type: "asset-error" });
+          return;
+        }
+        send({
+          asset: { asset, contentType: "image/jpeg", objectKey, sizeBytes: 0, url },
+          type: "asset",
+        });
+      }
+
+      function sendDashAsset(input: Omit<SerializedAsset, "sizeBytes" | "url"> & { stream: BilibiliMediaStream }) {
+        const url = input.stream.urls[0];
+        if (!url) {
+          send({ asset: input.asset, error: "Bilibili DASH 地址不可用。", type: "asset-error" });
+          return;
+        }
+        const { stream: _stream, ...asset } = input;
+        send({ asset: { ...asset, sizeBytes: 0, url }, type: "asset" });
       }
     },
     cancel() { closed = true; },
@@ -134,21 +157,8 @@ export async function POST(request: Request) {
   });
 }
 
-function serializeAsset(prepared: PreparedAsset) {
-  return {
-    asset: prepared.asset,
-    contentType: prepared.value.contentType,
-    ...(prepared.asset === "originalAudio"
-      ? { durationSeconds: prepared.value.durationSeconds, verified: true }
-      : {}),
-    objectKey: prepared.value.objectKey,
-    sizeBytes: prepared.value.sizeBytes,
-    url: bilibiliAssetUrl(prepared.value),
-  };
-}
-
-function assetLabel(asset: PreparedAssetKind): string {
-  if (asset === "avatar") return "作者头像";
-  if (asset === "cover") return "作品封面";
-  return "原声";
+function contentTypeForAudio(stream: BilibiliMediaStream): string {
+  if (stream.id === 30251) return "audio/flac";
+  if (stream.id === 30250) return "audio/eac3";
+  return "audio/mp4";
 }

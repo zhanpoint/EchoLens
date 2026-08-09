@@ -5,13 +5,19 @@ import {
 } from "@/lib/douyin/asset-bundle";
 import {
   readBilibiliAudioQuality,
-  readBilibiliStreamFormat,
   readBilibiliVideoCodec,
   readBilibiliVideoQuality,
   readDownloadVideoQuality,
 } from "@/lib/download-settings";
+import { readUsableBilibiliCookie } from "@/lib/bilibili/account";
+import {
+  buildBilibiliWorkId,
+  getBilibiliDashSelection,
+  resolveBilibiliWork,
+  type BilibiliMediaStream,
+} from "@/lib/bilibili/client";
 import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
-import { readUserSetting } from "@/lib/user-settings";
+import { mediaSourceFromWorkKey } from "@/lib/media/source";
 import { createOssSignedUrlWithExpiration, getOssObjectInfo } from "@/lib/oss/object-store";
 import {
   readTranscriptHistoryAsset,
@@ -19,20 +25,20 @@ import {
   upsertTranscriptHistoryAsset,
   type TranscriptHistoryAsset,
 } from "@/lib/transcript/db";
+import { readUserSetting } from "@/lib/user-settings";
 import type { DouyinKind } from "@/types/douyin";
-import { readUsableBilibiliCookie } from "@/lib/bilibili/account";
-import { ensureBilibiliAsset } from "@/lib/bilibili/assets";
-import { buildBilibiliWorkId, resolveBilibiliWork } from "@/lib/bilibili/client";
-import {
-  buildBilibiliVideoCacheKey,
-  ensureBilibiliVideoCached,
-  readBilibiliVideoCache,
-} from "@/lib/bilibili/video-cache";
-import { mediaSourceFromWorkKey } from "@/lib/media/source";
 
-export type AvailableHistoryAsset = TranscriptHistoryAsset & {
+export type AvailableHistoryAsset = {
+  assetKind: PreparedAssetKind | "avatar";
+  contentType: string;
+  durationSeconds?: number;
+  historyRecordId: string;
+  objectKey: string;
+  sizeBytes: number;
+  updatedAt: number;
   url: string;
   urlExpiresAt: number;
+  verifiedAt?: number;
 };
 
 export async function ensureHistoryAsset(input: {
@@ -47,37 +53,15 @@ export async function ensureHistoryAsset(input: {
   if (!history || history.workKind !== "video") return null;
 
   const source = mediaSourceFromWorkKey(history.workKey);
-  if (source === "bilibili" && input.assetKind === "video") {
-    return readBilibiliHistoryVideo({ history, userId: input.userId });
+  if (source === "bilibili") {
+    return await resolveBilibiliHistoryAsset({ history, assetKind: input.assetKind, userId: input.userId });
   }
 
   const stored = await readReusableHistoryAsset(input);
-  if (stored) {
-    return withSignedUrl(stored);
-  }
+  if (stored) return withSignedUrl(stored);
 
   const downloadSettings = await readUserSetting(input.userId, "download");
   const videoQuality = readDownloadVideoQuality(downloadSettings);
-  if (source === "bilibili") {
-    if (input.assetKind === "video") return null;
-    const bilibiliSettings = await readUserSetting(input.userId, "bilibili");
-    const cookie = readUsableBilibiliCookie(bilibiliSettings);
-    const { metadata, work } = await resolveBilibiliWork(history.finalUrl, cookie);
-    if (work.id !== history.workId) return null;
-    const prepared = await ensureBilibiliAsset({
-      audioQuality: readBilibiliAudioQuality(downloadSettings),
-      assetKind: input.assetKind,
-      cookie,
-      metadata,
-      streamFormat: readBilibiliStreamFormat(downloadSettings),
-    });
-    const saved = await savePreparedHistoryAsset({
-      historyRecordId: history.id,
-      prepared,
-      userId: input.userId,
-    });
-    return saved ? withSignedUrl(saved) : null;
-  }
   const lease = await acquireWorkMetadata({
     finalUrl: history.finalUrl,
     id: history.workId,
@@ -100,85 +84,90 @@ export async function ensureHistoryAsset(input: {
   }
 }
 
-async function readBilibiliHistoryVideo(input: {
-  history: {
-    id: string;
-    workId: string;
-  };
-  userId: string;
-}): Promise<AvailableHistoryAsset | null> {
-  const context = await readBilibiliVideoContext(input);
-  const cached = await readBilibiliVideoCache(context.cacheKey);
-  return cached ? toBilibiliVideoAsset(input.history.id, cached) : null;
-}
-
 export async function ensureBilibiliHistoryVideo(input: {
   historyRecordId: string;
   userId: string;
 }): Promise<AvailableHistoryAsset | null> {
   const history = await readTranscriptHistoryRecord({ id: input.historyRecordId, userId: input.userId });
   if (!history || mediaSourceFromWorkKey(history.workKey) !== "bilibili") return null;
-  const context = await readBilibiliVideoContext({ history, userId: input.userId });
+  return await resolveBilibiliHistoryAsset({ history, assetKind: "video", userId: input.userId });
+}
+
+async function resolveBilibiliHistoryAsset(input: {
+  assetKind: PreparedAssetKind | "avatar";
+  history: {
+    finalUrl: string;
+    id: string;
+    workId: string;
+  };
+  userId: string;
+}): Promise<AvailableHistoryAsset | null> {
   const bilibiliSettings = await readUserSetting(input.userId, "bilibili");
-  const cookie = readUsableBilibiliCookie(bilibiliSettings);
-  const { metadata, work } = await resolveBilibiliWork(history.finalUrl, cookie);
-  if (buildBilibiliWorkId(metadata.bvid, metadata.cid) !== history.workId || work.id !== history.workId) return null;
-  const cached = await ensureBilibiliVideoCached({
-    cacheKey: context.cacheKey,
-    cookie,
-    metadata,
-    options: context.options,
-  });
-  return toBilibiliVideoAsset(history.id, cached);
-}
-
-async function readBilibiliVideoContext(input: {
-  history: { workId: string };
-  userId: string;
-}) {
   const downloadSettings = await readUserSetting(input.userId, "download");
-  const options = {
-    audioQuality: readBilibiliAudioQuality(downloadSettings),
-    streamFormat: readBilibiliStreamFormat(downloadSettings),
-    videoCodec: readBilibiliVideoCodec(downloadSettings),
-    videoQuality: readBilibiliVideoQuality(downloadSettings),
-  };
-  return {
-    cacheKey: buildBilibiliVideoCacheKey({
-      options,
-      userId: input.userId,
-      workId: input.history.workId,
-    }),
-    options,
-  };
-}
+  const cookie = readUsableBilibiliCookie(bilibiliSettings);
+  const { metadata, work } = await resolveBilibiliWork(input.history.finalUrl, cookie);
+  if (buildBilibiliWorkId(metadata.bvid, metadata.cid) !== input.history.workId || work.id !== input.history.workId) {
+    return null;
+  }
 
-function toBilibiliVideoAsset(historyRecordId: string, cached: {
-  cacheKey: string;
-  contentType: "video/mp4";
-  expiresAt: number;
-  sizeBytes: number;
-}): AvailableHistoryAsset {
-  return {
-    assetKind: "video",
-    contentType: cached.contentType,
-    historyRecordId,
-    objectKey: cached.cacheKey,
-    sizeBytes: cached.sizeBytes,
+  const base = {
+    historyRecordId: input.history.id,
+    sizeBytes: 0,
     updatedAt: Date.now(),
-    url: `/api/transcript-history/${encodeURIComponent(historyRecordId)}/assets/video/content`,
-    urlExpiresAt: cached.expiresAt,
+    urlExpiresAt: Date.now() + 15 * 60_000,
   };
+  if (input.assetKind === "avatar") {
+    const url = metadata.authorAvatarUrls[0];
+    return url ? { ...base, assetKind: "avatar", contentType: "image/jpeg", objectKey: `bilibili:${work.id}:avatar`, url } : null;
+  }
+  if (input.assetKind === "cover") {
+    const url = metadata.coverUrls[0];
+    return url ? { ...base, assetKind: "cover", contentType: "image/jpeg", objectKey: `bilibili:${work.id}:cover`, url } : null;
+  }
+
+  const selection = await getBilibiliDashSelection({
+    audioQuality: readBilibiliAudioQuality(downloadSettings),
+    bvid: metadata.bvid,
+    cid: metadata.cid,
+    codec: readBilibiliVideoCodec(downloadSettings),
+    cookie,
+    videoQuality: readBilibiliVideoQuality(downloadSettings),
+  });
+  if (input.assetKind === "originalAudio") {
+    return dashAsset({
+      ...base,
+      assetKind: "originalAudio",
+      contentType: contentTypeForAudio(selection.audio),
+      durationSeconds: metadata.durationSeconds,
+      objectKey: `bilibili:${work.id}:audio:${selection.audio.id}`,
+      stream: selection.audio,
+      verifiedAt: Date.now(),
+    });
+  }
+  return dashAsset({
+    ...base,
+    assetKind: "video",
+    contentType: contentTypeForVideo(selection.video),
+    objectKey: `bilibili:${work.id}:video:${selection.video.id}:${selection.video.codecId ?? "unknown"}`,
+    stream: selection.video,
+  });
 }
 
-export async function readBilibiliHistoryVideoFile(input: {
-  historyRecordId: string;
-  userId: string;
-}) {
-  const history = await readTranscriptHistoryRecord({ id: input.historyRecordId, userId: input.userId });
-  if (!history || mediaSourceFromWorkKey(history.workKey) !== "bilibili") return null;
-  const context = await readBilibiliVideoContext({ history, userId: input.userId });
-  return readBilibiliVideoCache(context.cacheKey);
+function dashAsset(input: Omit<AvailableHistoryAsset, "url"> & { stream: BilibiliMediaStream }): AvailableHistoryAsset | null {
+  const url = input.stream.urls[0];
+  if (!url) return null;
+  const { stream: _stream, ...asset } = input;
+  return { ...asset, url };
+}
+
+function contentTypeForAudio(stream: BilibiliMediaStream): string {
+  if (stream.id === 30251) return "audio/flac";
+  if (stream.id === 30250) return "audio/eac3";
+  return "audio/mp4";
+}
+
+function contentTypeForVideo(_stream: BilibiliMediaStream): string {
+  return "video/mp4";
 }
 
 export async function readReusableHistoryAsset(input: {

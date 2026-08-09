@@ -15,7 +15,6 @@ export const runtime = "nodejs";
 export const maxDuration = 600;
 
 const AssetKindSchema = z.enum(["avatar", "cover", "video", "originalAudio"]);
-const BILIBILI_VIDEO_CACHE_MISSING_CODE = "BILIBILI_VIDEO_CACHE_MISSING";
 
 type RouteContext = {
   params: Promise<{ id: string; kind: string }>;
@@ -38,12 +37,7 @@ export async function GET(request: Request, context: RouteContext) {
       userId: user.id,
     });
     if (!asset) {
-      return parsedKind.data === "video"
-        ? NextResponse.json({
-            code: BILIBILI_VIDEO_CACHE_MISSING_CODE,
-            error: "Bilibili 视频缓存不存在或已过期，请先获取视频资源。",
-          }, { status: 404 })
-        : NextResponse.json({ error: "会话不存在。" }, { status: 404 });
+      return NextResponse.json({ error: "会话不存在或资源不可用。" }, { status: 404 });
     }
 
     return NextResponse.json(

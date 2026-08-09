@@ -30,6 +30,7 @@ vi.mock("@/lib/douyin/following", () => ({
 import { requireUser } from "@/app/api/auth/_shared";
 import { readDouyinCredentialState } from "@/lib/douyin/account";
 import { collectDouyinFollowingUsers } from "@/lib/douyin/following";
+import { DouyinApiError } from "@/lib/douyin/web-client";
 import { POST } from "@/app/api/douyin/following/route";
 
 const requireUserMock = vi.mocked(requireUser);
@@ -86,5 +87,14 @@ describe("douyin following route", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "CREDENTIAL_INVALID" });
     expect(collectMock).not.toHaveBeenCalled();
+  });
+
+  it("maps upstream access blocking without invalidating the credential", async () => {
+    collectMock.mockRejectedValueOnce(new DouyinApiError("关注接口被抖音临时拒绝。", "ACCESS_BLOCKED"));
+
+    const response = await POST(new Request("https://echolens.test/api/douyin/following", { method: "POST" }));
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "ACCESS_BLOCKED" });
   });
 });

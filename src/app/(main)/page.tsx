@@ -107,6 +107,7 @@ import {
 import { cn } from "@/lib/utils";
 import { AsrQuotaIndicator, type AsrQuota } from "@/components/asr-quota-indicator";
 import { InvitationDialog } from "@/components/invitation-dialog";
+import { FeedbackDialog } from "@/components/feedback-dialog";
 import { NetworkRetryButton } from "@/components/network-retry-button";
 import {
   NETWORK_RETRY_ERROR_CODE,
@@ -276,7 +277,6 @@ type CachedMediaAsset = {
   verified?: boolean;
   workKey: string;
 };
-const BILIBILI_VIDEO_CACHE_MISSING_CODE = "BILIBILI_VIDEO_CACHE_MISSING";
 const assetCacheMemory = new Map<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>();
 
 type TranscriptHistoryRecord = {
@@ -1361,6 +1361,7 @@ export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
   const [asrQuota, setAsrQuota] = useState<AsrQuota | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [invitationDialogOpen, setInvitationDialogOpen] = useState(false);
   const historyListRequestIdRef = useRef(0);
   const hasRestoredCurrentWorkflowRef = useRef(false);
@@ -2622,6 +2623,15 @@ export default function HomePage() {
   return (
     <main className="app-shell h-[100dvh] overflow-hidden bg-background text-foreground">
       {toast ? <TopToast message={toast.message} onDismiss={() => setToast(null)} tone={toast.tone} /> : null}
+      {feedbackDialogOpen ? (
+        <FeedbackDialog
+          onClose={() => setFeedbackDialogOpen(false)}
+          onSubmitted={() => {
+            setFeedbackDialogOpen(false);
+            showToast("反馈已提交，感谢你的帮助。", "info");
+          }}
+        />
+      ) : null}
       {invitationDialogOpen ? (
         <InvitationDialog
           invitationRedeemed={invitationRedeemed}
@@ -2645,6 +2655,13 @@ export default function HomePage() {
           onDelete={deleteSidebarEntry}
           onNew={startNewLiveSession}
           onOpen={openSidebarEntry}
+          onOpenFeedback={() => {
+            if (currentUser) {
+              setFeedbackDialogOpen(true);
+              return;
+            }
+            redirectToLogin();
+          }}
           onOpenInvitation={() => setInvitationDialogOpen(true)}
           onRename={renameSidebarEntry}
           onReturnLive={showLiveSession}
@@ -3167,6 +3184,7 @@ function TranscriptHistorySidebar({
   onDelete,
   onNew,
   onOpen,
+  onOpenFeedback,
   onOpenInvitation,
   onRename,
   onReturnLive,
@@ -3187,6 +3205,7 @@ function TranscriptHistorySidebar({
   onDelete: (entry: SidebarEntry) => void;
   onNew: () => void;
   onOpen: (entry: SidebarEntry) => void;
+  onOpenFeedback: () => void;
   onOpenInvitation: () => void;
   onRename: (entry: SidebarEntry, sessionName: string) => void;
   onReturnLive: () => void;
@@ -3198,6 +3217,7 @@ function TranscriptHistorySidebar({
 }) {
   const [collapsedSections, toggleSection] = useCollapsedSidebarSections();
   const [groupRecentBySource, setGroupRecentBySource] = useSidebarGroupBySource();
+  const normalizedQuery = query.trim();
   const pinnedEntries = entries.filter((entry) => entry.isPinned);
   const recentEntries = entries.filter((entry) => !entry.isPinned);
   const douyinRecentEntries = recentEntries.filter((entry) => entry.source === "douyin");
@@ -3210,6 +3230,7 @@ function TranscriptHistorySidebar({
     onRename,
     onToggleSection: toggleSection,
     onTogglePin,
+    query: normalizedQuery,
   };
   const content = (
     <div className="flex h-full min-h-0 flex-col px-1.5 py-2">
@@ -3259,15 +3280,29 @@ function TranscriptHistorySidebar({
           <SquarePen className="size-4 shrink-0 text-cyan" aria-hidden="true" />
           新建转录
         </button>
-        <label className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-[13px] text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
+        <div className="flex h-9 w-full items-center gap-2.5 overflow-hidden rounded-md px-2.5 text-[13px] text-foreground transition focus-within:bg-white/[0.08] hover:bg-white/[0.08]">
           <Search className="size-4 shrink-0 text-cyan" aria-hidden="true" />
-          <input
-            value={query}
-            onChange={(event) => onSearch(event.target.value)}
-            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
-            placeholder="搜索历史"
-          />
-        </label>
+          <div className="relative min-w-0 flex-1">
+            <input
+              value={query}
+              onChange={(event) => onSearch(event.target.value)}
+              className="w-full bg-transparent pr-7 outline-none placeholder:text-muted-foreground"
+              placeholder="搜索历史"
+              aria-label="搜索历史"
+            />
+            {normalizedQuery ? (
+              <button
+                type="button"
+                onClick={() => onSearch("")}
+                className="absolute right-0 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+                aria-label="清空搜索"
+                title="清空搜索"
+              >
+                <X className="size-3.5" aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+        </div>
       </div>
       {douyinAccountServicesEnabled ? (
         <div className="mt-4 border-t border-white/10 pt-2">
@@ -3321,11 +3356,26 @@ function TranscriptHistorySidebar({
           <div className="px-2 py-10 text-center text-xs leading-5 text-muted-foreground">暂无转录历史</div>
         ) : null}
       </div>
-      <div className="border-t border-white/8 pt-2">
+      <div className="grid gap-0.5 border-t border-white/8 pt-2">
+        <Link
+          href="/docs"
+          className="flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-xs font-medium text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-[0.98]"
+        >
+          <Info className="size-3.5 shrink-0" aria-hidden="true" />
+          文档
+        </Link>
+        <button
+          type="button"
+          onClick={onOpenFeedback}
+          className="flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-xs font-medium text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-[0.98]"
+        >
+          <MessageCircle className="size-3.5 shrink-0" aria-hidden="true" />
+          反馈
+        </button>
         <button
           type="button"
           onClick={onOpenInvitation}
-          className="group flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-xs font-medium text-muted-foreground transition duration-150 hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-[0.98] active:bg-cyan/[0.12]"
+          className="group mt-1 flex h-8 w-full items-center gap-2.5 border-t border-white/8 px-2.5 pt-1 text-left text-xs font-medium text-muted-foreground transition duration-150 hover:text-cyan focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35"
         >
           <KeyRound className="size-3.5 shrink-0 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
           输入邀请码
@@ -3393,15 +3443,34 @@ function TranscriptHistorySidebar({
                 <Star className="size-4" aria-hidden="true" />
               </Link>
             ) : null}
-            <button
-              type="button"
-              onClick={onOpenInvitation}
-              className="group mt-auto inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition duration-150 hover:bg-cyan/[0.1] hover:text-cyan focus-visible:bg-cyan/[0.1] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-90"
-              aria-label="输入邀请码"
-              title="输入邀请码"
-            >
-              <KeyRound className="size-4 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
-            </button>
+            <div className="mt-auto flex flex-col items-center gap-2.5">
+              <Link
+                href="/docs"
+                className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.1] hover:text-cyan"
+                aria-label="文档"
+                title="文档"
+              >
+                <Info className="size-4" aria-hidden="true" />
+              </Link>
+              <button
+                type="button"
+                onClick={onOpenFeedback}
+                className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.1] hover:text-cyan"
+                aria-label="反馈"
+                title="反馈"
+              >
+                <MessageCircle className="size-4" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={onOpenInvitation}
+                className="group inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition duration-150 hover:bg-cyan/[0.1] hover:text-cyan focus-visible:bg-cyan/[0.1] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-90"
+                aria-label="输入邀请码"
+                title="输入邀请码"
+              >
+                <KeyRound className="size-4 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         )}
       </aside>
@@ -3591,6 +3660,7 @@ function SidebarSection({
   onRename,
   onToggleSection,
   onTogglePin,
+  query,
   section,
   title,
 }: {
@@ -3605,10 +3675,11 @@ function SidebarSection({
   onRename: (entry: SidebarEntry, sessionName: string) => void;
   onToggleSection: (section: string) => void;
   onTogglePin: (entry: SidebarEntry) => void;
+  query: string;
   section: string;
   title: string;
 }) {
-  const isCollapsed = collapsedSections.has(section);
+  const isCollapsed = collapsedSections.has(section) && !(query && entries.length);
 
   return (
     <section className="group/section mb-2">
@@ -3645,6 +3716,7 @@ function SidebarSection({
               active={entry.id === activeId}
               entry={entry}
               key={entry.id}
+              query={query}
               onDelete={() => onDelete(entry)}
               onOpen={() => onOpen(entry)}
               onRename={(sessionName) => onRename(entry, sessionName)}
@@ -3657,6 +3729,26 @@ function SidebarSection({
   );
 }
 
+function HighlightedSidebarText({ query, text }: { query: string; text: string }) {
+  const normalizedQuery = query.toLocaleLowerCase();
+  const matchIndex = normalizedQuery ? text.toLocaleLowerCase().indexOf(normalizedQuery) : -1;
+
+  if (matchIndex === -1) {
+    return text;
+  }
+
+  const matchEnd = matchIndex + query.length;
+  return (
+    <>
+      {text.slice(0, matchIndex)}
+      <mark className="rounded-sm bg-cyan/20 px-0.5 font-semibold text-cyan">
+        {text.slice(matchIndex, matchEnd)}
+      </mark>
+      {text.slice(matchEnd)}
+    </>
+  );
+}
+
 function SidebarEntryItem({
   active,
   entry,
@@ -3664,6 +3756,7 @@ function SidebarEntryItem({
   onOpen,
   onRename,
   onTogglePin,
+  query,
 }: {
   active: boolean;
   entry: SidebarEntry;
@@ -3671,6 +3764,7 @@ function SidebarEntryItem({
   onOpen: () => void;
   onRename: (sessionName: string) => void;
   onTogglePin: () => void;
+  query: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(entry.title);
@@ -3733,7 +3827,11 @@ function SidebarEntryItem({
   return (
     <div className={cn(
       "group mb-1 flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 transition",
-      active ? "bg-cyan/[0.12] text-cyan" : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+      active
+        ? "bg-cyan/[0.12] text-cyan"
+        : query
+          ? "bg-cyan/[0.06] text-foreground"
+          : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
     )}>
       <button
         type="button"
@@ -3744,7 +3842,7 @@ function SidebarEntryItem({
         {entry.isBusy ? (
           <Loader2 className="mr-2 inline size-3.5 animate-spin text-cyan" aria-hidden="true" />
         ) : null}
-        {entry.title}
+        <HighlightedSidebarText query={query} text={entry.title} />
       </button>
       <div className="flex w-0 shrink-0 items-center overflow-hidden opacity-0 transition-[width,opacity] duration-150 group-hover:w-[5.25rem] group-hover:opacity-100 group-focus-within:w-[5.25rem] group-focus-within:opacity-100">
         <button
@@ -4820,7 +4918,6 @@ function WorkDownloadActions({
   const [downloadError, setDownloadError] = useState("");
   const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
   const [loadingAssets, setLoadingAssets] = useState<ReadonlySet<MediaAssetKind>>(() => new Set());
-  const [videoNeedsFetch, setVideoNeedsFetch] = useState(false);
 
   async function ensureAssetUrl(asset: MediaAssetKind, method: "GET" | "POST" = "GET"): Promise<string> {
     setLoadingAssets((current) => new Set(current).add(asset));
@@ -4833,7 +4930,6 @@ function WorkDownloadActions({
       if (!response.ok || !("asset" in payload)) {
         throwApiError(getApiError(payload), "资源准备失败。");
       }
-      setVideoNeedsFetch(false);
       setFreshAssetUrls((current) => ({ ...current, [asset]: payload.asset.url }));
       return payload.asset.url;
     } finally {
@@ -4843,25 +4939,6 @@ function WorkDownloadActions({
         return next;
       });
     }
-  }
-
-  function handleMissingVideo(error: unknown): boolean {
-    if (work.source !== "bilibili" || readUserFacingErrorCode(error) !== BILIBILI_VIDEO_CACHE_MISSING_CODE) {
-      return false;
-    }
-    setFreshAssetUrls((current) => {
-      const next = { ...current };
-      delete next.video;
-      return next;
-    });
-    setVideoNeedsFetch(true);
-    setDownloadError("Bilibili 视频缓存不存在或已过期，请点击获取视频资源。");
-    return true;
-  }
-
-  async function generateBilibiliVideoResource(): Promise<void> {
-    setDownloadError("");
-    await ensureAssetUrl("video", "POST");
   }
 
   const previewCache = preview ? cachedAssets[preview.asset] : undefined;
@@ -4875,18 +4952,13 @@ function WorkDownloadActions({
         const previewActionLabel = action.asset === "originalAudio" ? "试听" : "预览";
         const maybeCached = cachedAssets[action.asset];
         const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
-        const isOnDemandBilibiliVideo = work.source === "bilibili" && action.asset === "video";
         const availableUrl = freshAssetUrls[action.asset] ?? cached?.url;
-        const isCaching = loadingAssets.has(action.asset) || cached?.isLoading === true || (!cached && !isOnDemandBilibiliVideo);
+        const isCaching = loadingAssets.has(action.asset) || cached?.isLoading === true || !cached;
         const hasCacheError = Boolean(cached?.error && !availableUrl);
         const canRetryCache = hasCacheError && cached?.errorCode === NETWORK_RETRY_ERROR_CODE;
         const cacheTitle = cached?.error ?? (isCaching
           ? "正在准备资源"
-          : isOnDemandBilibiliVideo && videoNeedsFetch
-            ? "请先获取视频资源"
-            : isOnDemandBilibiliVideo && !availableUrl
-              ? "点击检查本地视频缓存"
-              : action.previewLabel);
+          : action.previewLabel);
 
         return (
           <div
@@ -4902,12 +4974,10 @@ function WorkDownloadActions({
                   void ensureAssetUrl(action.asset)
                     .then(() => setPreview(action))
                     .catch((error) => {
-                      if (!handleMissingVideo(error)) {
-                        setDownloadError(readUserFacingError(error, "资源准备失败。"));
-                      }
+                      setDownloadError(readUserFacingError(error, "资源准备失败。"));
                     });
                 }}
-                disabled={isCaching || hasCacheError || (isOnDemandBilibiliVideo && videoNeedsFetch)}
+                disabled={isCaching || hasCacheError}
                 className={cn(
                   "group/preview inline-flex h-8 w-14 shrink-0 items-center justify-center gap-1 rounded-md pl-0 pr-2 text-xs font-semibold text-cyan transition active:scale-[0.99]",
                   isCaching
@@ -4933,21 +5003,7 @@ function WorkDownloadActions({
                   isRetrying={isCaching}
                   onRetry={() => onRetryAsset(action.asset)}
                 />
-              ) : isOnDemandBilibiliVideo && videoNeedsFetch ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void generateBilibiliVideoResource()
-                      .catch((error) => setDownloadError(readUserFacingError(error, "Bilibili 视频资源获取失败。")));
-                  }}
-                  disabled={isCaching}
-                  className="inline-flex h-7 w-20 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-amber transition hover:text-cyan active:scale-[0.96] disabled:cursor-wait disabled:opacity-70"
-                  title="获取视频资源并在服务器缓存 2 小时"
-                >
-                  {isCaching ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Download className="size-3.5" aria-hidden="true" />}
-                  获取
-                </button>
-              ) : isCaching || (!availableUrl && !isOnDemandBilibiliVideo) ? (
+              ) : isCaching || !availableUrl ? (
                 <button
                   type="button"
                   disabled
@@ -4969,9 +5025,7 @@ function WorkDownloadActions({
                         work,
                       ))
                       .catch((error) => {
-                        if (!handleMissingVideo(error)) {
-                          setDownloadError(readUserFacingError(error, "文件保存失败。"));
-                        }
+                        setDownloadError(readUserFacingError(error, "文件保存失败。"));
                       });
                   }}
                   className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96]"

@@ -2,6 +2,7 @@ import { cleanText, readDouyinAvatarUrl } from "./media";
 import {
   createDouyinWebClient,
   DOUYIN_BASE_URL,
+  DouyinApiError,
   type DouyinWebClient,
 } from "./web-client";
 
@@ -74,13 +75,10 @@ type ItemBudget = {
   remaining: number;
 };
 
-type AsyncLimiter = <T>(task: () => Promise<T>) => Promise<T>;
-
 const MAX_COLLECT_FOLDERS = 100;
 const MAX_COLLECT_MIXES = 100;
 const MAX_WORKS_PER_CATEGORY = 5_000;
 const PAGE_SIZE = 20;
-const GROUP_FETCH_CONCURRENCY = 4;
 
 export async function collectDouyinFavorites(
   settings: DouyinFavoriteSettings,
@@ -88,25 +86,23 @@ export async function collectDouyinFavorites(
   const client = createDouyinWebClient(settings.cookie);
   const self = await client.getSelfProfile();
   const secUid = readString(self.sec_uid ?? self.secUid);
+  if (!secUid) {
+    throw new DouyinApiError("访问凭证无效或已过期，请重新获取。", "LOGIN_REQUIRED");
+  }
   const folderAuthors = new Map<string, DouyinFavoriteAuthor>();
   const mixAuthors = new Map<string, DouyinFavoriteAuthor>();
-  const expandGroup = createConcurrencyLimiter(GROUP_FETCH_CONCURRENCY);
-  const [folders, favoriteItems, mixes] = await Promise.all([
-    collectAllPages(
-      (cursor) => requestCollectFolders(cursor, client),
-      MAX_COLLECT_FOLDERS,
-    ).then((items) => collectFolders(items, client, folderAuthors, expandGroup)),
-    secUid
-      ? collectAllPages(
-          (cursor) => requestFavoriteVideos(secUid, cursor, client),
-          MAX_WORKS_PER_CATEGORY,
-        )
-      : Promise.resolve([]),
-    collectAllPages(
-      (cursor) => requestFavoriteMixes(cursor, client),
-      MAX_COLLECT_MIXES,
-    ).then((items) => collectMixes(items, client, mixAuthors, expandGroup)),
-  ]);
+  const favoriteItems = await collectAllPages(
+    (cursor) => requestFavoriteVideos(cursor, client),
+    MAX_WORKS_PER_CATEGORY,
+  );
+  const folders = await collectAllPages(
+    (cursor) => requestCollectFolders(cursor, client),
+    MAX_COLLECT_FOLDERS,
+  ).then((items) => collectFolders(items, client, folderAuthors));
+  const mixes = await collectAllPages(
+    (cursor) => requestFavoriteMixes(cursor, client),
+    MAX_COLLECT_MIXES,
+  ).then((items) => collectMixes(items, client, mixAuthors));
 
   const authors = new Map<string, DouyinFavoriteAuthor>();
   const videos: DouyinFavoriteVideo[] = [];
@@ -121,15 +117,15 @@ async function collectFolders(
   items: unknown[],
   client: DouyinWebClient,
   authors: Map<string, DouyinFavoriteAuthor>,
-  expandGroup: AsyncLimiter,
 ): Promise<DouyinFavoriteFolder[]> {
   const budget = { remaining: MAX_WORKS_PER_CATEGORY };
-  const folders = await Promise.all(items.map((value) => expandGroup(async () => {
+  const folders: DouyinFavoriteFolder[] = [];
+  for (const value of items) {
     const item = readRecord(value);
     const info = readRecord(item.collects_info);
     const id = readCollectsId(item);
     if (!id) {
-      return null;
+      continue;
     }
 
     const works = budget.remaining > 0
@@ -148,7 +144,7 @@ async function collectFolders(
       works.length,
     );
 
-    return {
+    folders.push({
       id,
       isPrivate: item.is_private === undefined && info.is_private === undefined
         ? true
@@ -173,24 +169,23 @@ async function collectFolders(
         ),
       ),
       works: normalizedWorks,
-    } satisfies DouyinFavoriteFolder;
-  })));
-
-  return folders.filter((folder): folder is DouyinFavoriteFolder => folder !== null);
+    });
+  }
+  return folders;
 }
 
 async function collectMixes(
   items: unknown[],
   client: DouyinWebClient,
   authors: Map<string, DouyinFavoriteAuthor>,
-  expandGroup: AsyncLimiter,
 ): Promise<DouyinFavoriteMix[]> {
   const budget = { remaining: MAX_WORKS_PER_CATEGORY };
-  const mixes = await Promise.all(items.map((value) => expandGroup(async () => {
+  const mixes: DouyinFavoriteMix[] = [];
+  for (const value of items) {
     const item = unwrapMix(value);
     const id = readIdentifier(item.mix_id_str, item.mix_id, item.mixId, item.id);
     if (!id) {
-      return null;
+      continue;
     }
 
     const works = budget.remaining > 0
@@ -210,7 +205,7 @@ async function collectMixes(
     );
 
     const statistics = readRecord(item.statistics ?? item.stats ?? item.statis);
-    return {
+    mixes.push({
       coverUrl: readMixCoverUrl(item) || normalizedWorks[0]?.coverUrl || "",
       id,
       name: cleanText(
@@ -232,10 +227,9 @@ async function collectMixes(
       ),
       url: new URL(`/collection/${encodeURIComponent(id)}`, DOUYIN_BASE_URL).toString(),
       works: normalizedWorks,
-    } satisfies DouyinFavoriteMix;
-  })));
-
-  return mixes.filter((mix): mix is DouyinFavoriteMix => mix !== null);
+    });
+  }
+  return mixes;
 }
 
 async function collectAllPages(
@@ -271,29 +265,6 @@ async function collectAllPages(
   return collected;
 }
 
-function createConcurrencyLimiter(concurrency: number): AsyncLimiter {
-  let active = 0;
-  const waiters: Array<() => void> = [];
-
-  return async <T>(task: () => Promise<T>): Promise<T> => {
-    if (active >= concurrency) {
-      await new Promise<void>((resolve) => waiters.push(resolve));
-    } else {
-      active += 1;
-    }
-    try {
-      return await task();
-    } finally {
-      const next = waiters.shift();
-      if (next) {
-        next();
-      } else {
-        active -= 1;
-      }
-    }
-  };
-}
-
 async function requestCollectFolders(
   cursor: number,
   client: DouyinWebClient,
@@ -306,18 +277,22 @@ async function requestCollectFolders(
 }
 
 async function requestFavoriteVideos(
-  secUid: string,
   maxCursor: number,
   client: DouyinWebClient,
 ): Promise<PagedResponse> {
   const payload = await client.request(
-    "/aweme/v1/web/aweme/favorite/",
+    "/aweme/v1/web/aweme/listcollection/",
     {
       ...client.query(),
-      count: PAGE_SIZE,
-      locate_query: "false",
-      max_cursor: maxCursor,
-      sec_user_id: secUid,
+      publish_video_strategy_type: "2",
+      version_code: "170400",
+      version_name: "17.4.0",
+    },
+    3,
+    {
+      body: { count: PAGE_SIZE, cursor: maxCursor },
+      method: "POST",
+      referer: "https://www.douyin.com/user/self?showTab=favorite_collection",
     },
   );
   return normalizePagedResponse(payload, ["aweme_list"]);

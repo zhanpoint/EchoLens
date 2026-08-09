@@ -1,0 +1,13 @@
+{
+  "name": "echolens-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "echolens-mcp": "./bin/echolens-mcp.mjs"
+  },
+  "dependencies": {
+    "@echolens/agent-client": "file:../echolens-agent-client",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  }
+}

@@ -18,6 +18,24 @@ export class DouyinCredentialRequiredError extends Error {
   }
 }
 
+const inFlightRequests = new Map<string, Promise<unknown>>();
+const currentUserCache: { expiresAt: number; value: CurrentUser | null } = { expiresAt: 0, value: null };
+const CURRENT_USER_CACHE_TTL = 30_000;
+
+export function requestOnce<T>(key: string, request: () => Promise<T>): Promise<T> {
+  const existing = inFlightRequests.get(key);
+  if (existing) {
+    return existing as Promise<T>;
+  }
+  const pending = request().finally(() => {
+    if (inFlightRequests.get(key) === pending) {
+      inFlightRequests.delete(key);
+    }
+  });
+  inFlightRequests.set(key, pending);
+  return pending;
+}
+
 export function getApiError(payload: unknown): ApiError | undefined {
   if (!payload || typeof payload !== "object" || !("error" in payload)) {
     return undefined;
@@ -41,16 +59,23 @@ export async function readJsonPayload(response: Response, fallback: string): Pro
   }
 }
 
-export async function requestCurrentUser(): Promise<CurrentUser> {
-  const response = await fetch("/api/auth/me", { cache: "no-store" });
-  const payload = await readJsonPayload(response, "登录状态读取失败。") as { user?: unknown };
-  if (response.status === 401) {
-    throw new Error("UNAUTHENTICATED");
+export function requestCurrentUser(): Promise<CurrentUser> {
+  if (currentUserCache.value && currentUserCache.expiresAt > Date.now()) {
+    return Promise.resolve(currentUserCache.value);
   }
-  if (!response.ok || !isCurrentUser(payload.user)) {
-    throw new Error("登录状态读取失败。");
-  }
-  return payload.user;
+  return requestOnce("auth:current-user", async () => {
+    const response = await fetch("/api/auth/me", { cache: "no-store" });
+    const payload = await readJsonPayload(response, "登录状态读取失败。") as { user?: unknown };
+    if (response.status === 401) {
+      throw new Error("UNAUTHENTICATED");
+    }
+    if (!response.ok || !isCurrentUser(payload.user)) {
+      throw new Error("登录状态读取失败。");
+    }
+    currentUserCache.value = payload.user;
+    currentUserCache.expiresAt = Date.now() + CURRENT_USER_CACHE_TTL;
+    return payload.user;
+  });
 }
 
 export async function requireValidDouyinCredential(): Promise<void> {

@@ -12,9 +12,15 @@ const REQUEST_TIMEOUT_MS = 15_000;
 export class DouyinApiError extends Error {
   constructor(
     message: string,
-    readonly code: "INVALID_COOKIE" | "LOGIN_REQUIRED" | "UPSTREAM_ERROR",
+    readonly code: "INVALID_COOKIE" | "LOGIN_REQUIRED" | "ACCESS_BLOCKED" | "UPSTREAM_ERROR",
+    readonly details?: {
+      endpoint?: string;
+      status?: number;
+      upstreamCode?: number;
+    },
   ) {
     super(message);
+    this.name = "DouyinApiError";
   }
 }
 
@@ -25,6 +31,11 @@ export type DouyinWebClient = {
     path: string,
     params: Record<string, string | number>,
     attempts?: number,
+    options?: {
+      body?: Record<string, string | number>;
+      method?: "GET" | "POST";
+      referer?: string;
+    },
   ): Promise<Record<string, unknown>>;
 };
 
@@ -55,6 +66,11 @@ function createWebClient(
     path: string,
     params: Record<string, string | number>,
     attempts = 3,
+    options?: {
+      body?: Record<string, string | number>;
+      method?: "GET" | "POST";
+      referer?: string;
+    },
   ): Promise<Record<string, unknown>> {
     const url = new URL(path, DOUYIN_BASE_URL);
     for (const [key, value] of Object.entries(params)) {
@@ -62,26 +78,62 @@ function createWebClient(
     }
 
     const signed = signDouyinUrl(url.toString(), DEFAULT_USER_AGENT);
+    const requestHeaders = {
+      ...headers,
+      ...(options?.referer ? { referer: options.referer } : {}),
+      ...(options?.body ? { "content-type": "application/x-www-form-urlencoded" } : {}),
+      "user-agent": signed.userAgent,
+    };
     const response = await fetchWithRetry(signed.url, {
+      body: options?.body ? new URLSearchParams(stringifyParams(options.body)).toString() : undefined,
       cache: "no-store",
-      headers: { ...headers, "user-agent": signed.userAgent },
-      retry: { attempts, timeoutMs: REQUEST_TIMEOUT_MS },
+      headers: requestHeaders,
+      method: options?.method ?? "GET",
+      retry: { attempts, retryHttpStatuses: [403], timeoutMs: REQUEST_TIMEOUT_MS },
     });
     const text = await response.text();
+    const payload = parseJson(text);
 
     if (!response.ok) {
-      throw new DouyinApiError("抖音接口暂时不可用，请稍后重试。", "UPSTREAM_ERROR");
+      const upstreamCode = payload ? readNumber(payload.status_code) : undefined;
+      if (isLoginRequired(payload)) {
+        throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED", {
+          endpoint: path,
+          status: response.status,
+          upstreamCode,
+        });
+      }
+      throw new DouyinApiError(
+        response.status === 403
+          ? "抖音拒绝了当前收藏接口请求，通常是收藏接口路径、请求方法或短时 WAF 限速触发。请稍后重试。"
+          : "抖音接口暂时不可用，请稍后重试。",
+        response.status === 403 ? "ACCESS_BLOCKED" : "UPSTREAM_ERROR",
+        {
+          endpoint: path,
+          status: response.status,
+          upstreamCode,
+        },
+      );
     }
     if (!text.trim()) {
-      throw new DouyinApiError("访问凭证无效或已触发抖音验证，请重新获取。", "LOGIN_REQUIRED");
+      throw new DouyinApiError("访问凭证无效或已触发抖音验证，请重新获取。", "LOGIN_REQUIRED", {
+        endpoint: path,
+        status: response.status,
+      });
     }
 
-    const payload = parseJson(text);
     if (!payload) {
-      throw new DouyinApiError("抖音响应格式异常。", "UPSTREAM_ERROR");
+      throw new DouyinApiError("抖音响应格式异常。", "UPSTREAM_ERROR", {
+        endpoint: path,
+        status: response.status,
+      });
     }
     if (isLoginRequired(payload)) {
-      throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED");
+      throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED", {
+        endpoint: path,
+        status: response.status,
+        upstreamCode: readNumber(payload.status_code),
+      });
     }
     return payload;
   }
@@ -136,6 +188,10 @@ export function normalizeCookie(value: string): string {
     .join("; ");
 }
 
+function stringifyParams(params: Record<string, string | number>): Record<string, string> {
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)]));
+}
+
 function parseCookie(cookie: string): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const part of cookie.split(";")) {
@@ -156,7 +212,15 @@ function hasLoginCookie(cookies: Record<string, string>): boolean {
   return Boolean(cookies.sessionid || cookies.sessionid_ss || cookies.sid_guard || cookies.sid_tt);
 }
 
-function isLoginRequired(payload: Record<string, unknown>): boolean {
+function readNumber(value: unknown): number | undefined {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function isLoginRequired(payload: Record<string, unknown> | null): boolean {
+  if (!payload) {
+    return false;
+  }
   const statusCode = Number(payload.status_code ?? 0);
   const message = String(payload.status_msg ?? "");
   const loginTip = payload.not_login_module;

@@ -215,7 +215,6 @@ describe("user settings route", () => {
   it("persists video quality with lowest quality as the supported default", async () => {
     const value = {
       bilibiliAudioQuality: "hiRes",
-      bilibiliStreamFormat: "dashFull",
       bilibiliVideoCodec: "av1",
       bilibiliVideoQuality: "2160p",
       directoryPath: "Downloads",
@@ -240,7 +239,6 @@ describe("user settings route", () => {
       settings: {
         download: {
           bilibiliAudioQuality: "lowest",
-          bilibiliStreamFormat: "dashFull",
           bilibiliVideoQuality: "lowest",
           videoQuality: "lowest",
         },

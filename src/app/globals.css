@@ -187,6 +187,18 @@ body::-webkit-scrollbar-button {
   mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.85), transparent 82%);
 }
 
+.api-token-name-input:autofill,
+.api-token-name-input:-webkit-autofill,
+.api-token-name-input:-webkit-autofill:hover,
+.api-token-name-input:-webkit-autofill:focus,
+.api-token-name-input:-webkit-autofill:active {
+  background-color: var(--surface) !important;
+  -webkit-text-fill-color: var(--foreground) !important;
+  caret-color: var(--foreground);
+  -webkit-box-shadow: 0 0 0 1000px var(--surface) inset !important;
+  box-shadow: 0 0 0 1000px var(--surface) inset !important;
+}
+
 .glass-panel {
   background:
     linear-gradient(180deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.035)),

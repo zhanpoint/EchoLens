@@ -224,6 +224,89 @@ export async function transcribeDashScopeAsr(
   return await submitDashScopeAsrJob(userId, workKey, audio, options, runtimeOptions);
 }
 
+export async function transcribeDashScopeAsrOnce(
+  userId: string,
+  fileUrl: string,
+  options: DashScopeAsrOptions,
+  runtimeOptions: DashScopeAsrRuntimeOptions & { title?: string } = {},
+): Promise<{ fallbackEligible?: boolean; result: ProviderResult }> {
+  const config = await readDashScopeConfig(
+    userId,
+    runtimeOptions.apiKey,
+    runtimeOptions.apiKey === undefined,
+  );
+  const normalizedOptions = normalizeDashScopeAsrOptions(options);
+  let taskId: string | undefined;
+  try {
+    taskId = await submitDashScopeAsrTask(config, fileUrl, normalizedOptions, runtimeOptions.signal);
+    for (;;) {
+      await waitForNextAsrPoll(runtimeOptions.signal);
+      const payload = await queryDashScopeAsrTask(config, taskId, runtimeOptions.signal);
+      const status = readTaskStatus(payload);
+      if (status === "PENDING" || status === "RUNNING") continue;
+      if (status === "FAILED") return { result: readDashScopeTaskFailure(payload) };
+      if (status === "CANCELED") {
+        return { result: { ok: false, code: "error", detail: formatDashScopeTaskFailure(status, payload) } };
+      }
+      if (status !== "SUCCEEDED") {
+        return {
+          result: {
+            ok: false,
+            code: "invalid_response",
+            detail: `DashScope ASR 返回未知任务状态：${status || "空状态"}`,
+          },
+        };
+      }
+
+      const transcript = await readDashScopeTranscript(payload, runtimeOptions.signal);
+      if (!transcript) {
+        return { result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL } };
+      }
+      return {
+        result: await postprocessTranscript({
+          apiKey: config.apiKey,
+          model: normalizedOptions.model,
+          runtimeOptions,
+          title: runtimeOptions.title,
+          transcript: {
+            asrModel: normalizedOptions.model,
+            ok: true,
+            content: transcript.content,
+            emotions: transcript.emotions,
+            transcriptSegments: transcript.transcriptSegments,
+          },
+        }),
+      };
+    }
+  } catch (error) {
+    if (runtimeOptions.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      if (taskId) await cancelDashScopeAsrTask(config, taskId).catch(() => undefined);
+      throw error;
+    }
+    return {
+      ...(!taskId && isFallbackEligibleRequestError(error) ? { fallbackEligible: true } : {}),
+      result: toProviderFailure(error),
+    };
+  }
+}
+
+function waitForNextAsrPoll(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(Object.assign(new Error("转录任务已取消。"), { name: "AbortError" }));
+    };
+    const timeout = setTimeout(finish, 1_500);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
 export function parseDashScopeTranscriptPayload(payload: unknown): TranscriptPayload | null {
   if (!payload || typeof payload !== "object") {
     throw new Error("DashScope 转录结果格式无效：结果文件不是 JSON 对象。");

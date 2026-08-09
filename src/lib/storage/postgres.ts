@@ -15,7 +15,10 @@ type PooledQueryable = Queryable & {
 type GlobalWithPostgres = typeof globalThis & {
   __echolensPostgresPool?: PooledQueryable;
   __echolensPostgresSchemaReady?: Promise<void>;
+  __echolensPostgresSchemaVersion?: number;
 };
+
+const POSTGRES_SCHEMA_VERSION = 2;
 
 const globalForPostgres = globalThis as GlobalWithPostgres;
 types.setTypeParser(20, (value) => Number(value));
@@ -100,9 +103,14 @@ export async function withTransaction<T>(run: (client: PoolClient) => Promise<T>
 }
 
 export async function ensurePostgresSchema(): Promise<void> {
-  if (!globalForPostgres.__echolensPostgresSchemaReady) {
+  if (
+    !globalForPostgres.__echolensPostgresSchemaReady
+    || globalForPostgres.__echolensPostgresSchemaVersion !== POSTGRES_SCHEMA_VERSION
+  ) {
+    globalForPostgres.__echolensPostgresSchemaVersion = POSTGRES_SCHEMA_VERSION;
     globalForPostgres.__echolensPostgresSchemaReady = migrateSchema(getPostgresPool()).catch((error) => {
       delete globalForPostgres.__echolensPostgresSchemaReady;
+      delete globalForPostgres.__echolensPostgresSchemaVersion;
       throw error;
     });
   }
@@ -113,6 +121,7 @@ export async function closePostgresPool(): Promise<void> {
   await globalForPostgres.__echolensPostgresPool?.end();
   delete globalForPostgres.__echolensPostgresPool;
   delete globalForPostgres.__echolensPostgresSchemaReady;
+  delete globalForPostgres.__echolensPostgresSchemaVersion;
 }
 
 export const closePostgresPoolForTest = closePostgresPool;
@@ -120,6 +129,7 @@ export const closePostgresPoolForTest = closePostgresPool;
 export function setPostgresPoolForTest(pool: PooledQueryable): void {
   globalForPostgres.__echolensPostgresPool = pool;
   delete globalForPostgres.__echolensPostgresSchemaReady;
+  delete globalForPostgres.__echolensPostgresSchemaVersion;
 }
 
 async function getReadyPostgresPool(): Promise<PooledQueryable> {
@@ -173,6 +183,7 @@ async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
 const RESET_TRANSCRIPT_SCHEMA_STATEMENTS = [
   "DROP TABLE IF EXISTS transcript_history_summaries",
   "DROP TABLE IF EXISTS transcript_history_assets",
+  "DROP TABLE IF EXISTS transcript_open_api_quota_usage",
   "DROP TABLE IF EXISTS transcript_asr_tasks",
   "DROP TABLE IF EXISTS transcript_custom_prompts",
   "DROP TABLE IF EXISTS transcript_history_records",
@@ -261,6 +272,17 @@ const CORE_SCHEMA_STATEMENTS = [
   "ALTER TABLE account_service_invitations DROP CONSTRAINT IF EXISTS account_service_invitations_environment_check",
   "ALTER TABLE account_service_invitations ADD CONSTRAINT account_service_invitations_environment_check CHECK (environment IN ('development', 'production'))",
   "CREATE INDEX IF NOT EXISTS account_service_invitations_environment_status_idx ON account_service_invitations(environment, redeemed_at, created_at)",
+  `CREATE TABLE IF NOT EXISTS user_feedback (
+      id text PRIMARY KEY,
+      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content text NOT NULL CHECK (char_length(content) BETWEEN 1 AND 4000),
+      type text CHECK (type IN ('bug', 'feature', 'other')),
+      status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+      created_at timestamptz(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      resolved_at timestamptz(3)
+    )`,
+  "CREATE INDEX IF NOT EXISTS user_feedback_status_created_idx ON user_feedback(status, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS user_feedback_user_created_idx ON user_feedback(user_id, created_at DESC)",
   `CREATE TABLE IF NOT EXISTS sessions (
       token_hash text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -298,9 +320,30 @@ const CORE_SCHEMA_STATEMENTS = [
       updated_at bigint NOT NULL,
       PRIMARY KEY (user_id, category)
     )`,
+  `CREATE TABLE IF NOT EXISTS api_access_tokens (
+      id text PRIMARY KEY,
+      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name text NOT NULL,
+      token_hash text NOT NULL UNIQUE,
+      token_encrypted jsonb,
+      token_prefix text NOT NULL,
+      expires_at timestamptz(3),
+      last_used_at timestamptz(3),
+      revoked_at timestamptz(3),
+      created_at timestamptz(3) NOT NULL,
+      updated_at timestamptz(3) NOT NULL
+    )`,
+  "ALTER TABLE api_access_tokens ADD COLUMN IF NOT EXISTS token_encrypted jsonb",
+  "CREATE INDEX IF NOT EXISTS api_access_tokens_user_status_idx ON api_access_tokens(user_id, revoked_at, expires_at)",
+  "CREATE INDEX IF NOT EXISTS api_access_tokens_prefix_idx ON api_access_tokens(token_prefix)",
 ];
 
 const TRANSCRIPT_SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS transcript_open_api_quota_usage (
+      user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      used_seconds double precision NOT NULL DEFAULT 0 CHECK (used_seconds >= 0),
+      updated_at bigint NOT NULL
+    )`,
   `CREATE TABLE IF NOT EXISTS transcript_asr_tasks (
       id text PRIMARY KEY,
       user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,

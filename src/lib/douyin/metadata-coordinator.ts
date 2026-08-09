@@ -7,6 +7,7 @@ import {
   DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   type DownloadVideoQuality,
 } from "@/lib/download-settings";
+import type { OpenApiPlatformRequestPolicy } from "@/lib/open-api/platform-request-policy";
 import type { DouyinWorkIdentity } from "@/types/douyin";
 
 type MetadataWork = Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">;
@@ -28,11 +29,15 @@ const METADATA_HANDOFF_TTL_MS = 30_000;
 export async function acquireWorkMetadata(
   work: MetadataWork,
   videoQuality: DownloadVideoQuality = DEFAULT_DOWNLOAD_VIDEO_QUALITY,
+  requestPolicy?: OpenApiPlatformRequestPolicy,
 ): Promise<WorkMetadataLease> {
-  const key = `${work.kind}:${work.id}:${videoQuality}`;
+  const key = `${work.kind}:${work.id}:${videoQuality}:${requestPolicy ? "open-api" : "internal"}`;
   let entry = entries.get(key);
   if (!entry) {
-    entry = { references: 0, result: collectWorkMetadata(work, { videoQuality }) };
+    entry = {
+      references: 0,
+      result: collectWorkMetadata(work, { requestPolicy, videoQuality }),
+    };
     entries.set(key, entry);
     void entry.result.catch(() => {
       if (entries.get(key) === entry) entries.delete(key);

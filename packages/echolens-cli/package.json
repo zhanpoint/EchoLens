@@ -1,0 +1,11 @@
+{
+  "name": "echolens",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "echolens": "./bin/echolens.mjs"
+  },
+  "dependencies": {
+    "@echolens/agent-client": "file:../echolens-agent-client"
+  }
+}

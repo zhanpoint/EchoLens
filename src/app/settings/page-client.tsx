@@ -3,14 +3,21 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import {
+import { format } from "date-fns";
+import { zhCN } from "date-fns/locale";
+import * as Popover from "@radix-ui/react-popover";
+import { CalendarDays,
   ArrowLeft,
   Bot,
   BrainCircuit,
   Cable,
+  Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleHelp,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -20,16 +27,21 @@ import {
   Loader2,
   Maximize2,
   MonitorDown,
+  Pencil,
   RotateCcw,
   ShieldCheck,
   SquareTerminal,
   TestTube2,
+  Trash2,
   UserRound,
   X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type Ref } from "react";
+import {
+  Calendar,
+} from "@/components/ui/calendar";
 import {
   Select,
   SelectContent,
@@ -50,19 +62,16 @@ import {
 } from "@/lib/browser-download-directory";
 import {
   DEFAULT_BILIBILI_AUDIO_QUALITY,
-  DEFAULT_BILIBILI_STREAM_FORMAT,
   DEFAULT_BILIBILI_VIDEO_CODEC,
   DEFAULT_BILIBILI_VIDEO_QUALITY,
   DEFAULT_DOWNLOAD_ORGANIZATION,
   DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   isBilibiliAudioQuality,
-  isBilibiliStreamFormat,
   isBilibiliVideoCodec,
   isBilibiliVideoQuality,
   isDownloadOrganization,
   isDownloadVideoQuality,
   type BilibiliAudioQuality,
-  type BilibiliStreamFormat,
   type BilibiliVideoCodec,
   type BilibiliVideoQuality,
   type DownloadOrganization,
@@ -100,16 +109,32 @@ type UserSettingsPayload = {
   };
 };
 
+type ApiAccessTokenRecord = {
+  createdAt: number;
+  expiresAt?: number;
+  id: string;
+  isExpired: boolean;
+  lastUsedAt?: number;
+  name: string;
+  prefix: string;
+  updatedAt: number;
+};
+
+type ApiAccessTokensPayload = {
+  record?: ApiAccessTokenRecord;
+  token?: string;
+  tokens?: ApiAccessTokenRecord[];
+};
+
 type AiCredentialPayload = {
   apiKey?: string;
 };
 
-type SettingsSection = "aiCredential" | "douyin" | "download";
+type SettingsSection = "aiCredential" | "apiTokens" | "douyin" | "download";
 type CredentialMethod = "automatic" | "manual";
 
 type DownloadSettings = {
   bilibiliAudioQuality: BilibiliAudioQuality;
-  bilibiliStreamFormat: BilibiliStreamFormat;
   bilibiliVideoCodec: BilibiliVideoCodec;
   bilibiliVideoQuality: BilibiliVideoQuality;
   directoryPath: string;
@@ -265,9 +290,6 @@ function normalizeDownloadSettings(value: Partial<DownloadSettings> | undefined)
     bilibiliAudioQuality: isBilibiliAudioQuality(value?.bilibiliAudioQuality)
       ? value.bilibiliAudioQuality
       : DEFAULT_BILIBILI_AUDIO_QUALITY,
-    bilibiliStreamFormat: isBilibiliStreamFormat(value?.bilibiliStreamFormat)
-      ? value.bilibiliStreamFormat
-      : DEFAULT_BILIBILI_STREAM_FORMAT,
     bilibiliVideoCodec: isBilibiliVideoCodec(value?.bilibiliVideoCodec)
       ? value.bilibiliVideoCodec
       : DEFAULT_BILIBILI_VIDEO_CODEC,
@@ -363,15 +385,6 @@ const BILIBILI_AUDIO_QUALITY_OPTIONS: Array<{
   { value: "highest", label: "最高可用音质", description: "自动选择当前可用的最佳音质。" },
 ];
 
-const BILIBILI_STREAM_FORMAT_OPTIONS: Array<{
-  description: string;
-  label: string;
-  value: BilibiliStreamFormat;
-}> = [
-  { value: "dashFull", label: "高清模式（DASH，默认）", description: "优先获取更清晰、更高音质的可用版本。" },
-  { value: "dashBasic", label: "兼容模式（基础 DASH）", description: "优先保证下载和播放兼容性。" },
-];
-
 const BILIBILI_VIDEO_CODEC_OPTIONS: Array<{
   description: string;
   label: string;
@@ -404,8 +417,6 @@ function DownloadSettingsPanel({
     ?? BILIBILI_VIDEO_QUALITY_OPTIONS[0];
   const selectedBilibiliAudioQuality = BILIBILI_AUDIO_QUALITY_OPTIONS.find((option) => option.value === settings.bilibiliAudioQuality)
     ?? BILIBILI_AUDIO_QUALITY_OPTIONS[0];
-  const selectedBilibiliStreamFormat = BILIBILI_STREAM_FORMAT_OPTIONS.find((option) => option.value === settings.bilibiliStreamFormat)
-    ?? BILIBILI_STREAM_FORMAT_OPTIONS[0];
   const selectedBilibiliCodec = BILIBILI_VIDEO_CODEC_OPTIONS.find((option) => option.value === settings.bilibiliVideoCodec)
     ?? BILIBILI_VIDEO_CODEC_OPTIONS[0];
 
@@ -607,7 +618,7 @@ function DownloadSettingsPanel({
 
       {downloadPlatform === "bilibili" ? (
         <div className="mt-3">
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
           <div className="grid gap-1.5">
             <span className="text-xs font-semibold text-foreground">视频清晰度</span>
             <Select
@@ -684,35 +695,6 @@ function DownloadSettingsPanel({
               </SelectTrigger>
               <SelectContent align="start" sideOffset={6} className="w-[min(26rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
                 {BILIBILI_AUDIO_QUALITY_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
-                    <span className="grid gap-1 text-left">
-                      <span className="text-xs font-semibold text-foreground">{option.label}</span>
-                      <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid gap-1.5">
-            <span className="text-xs font-semibold text-foreground">下载模式</span>
-            <Select
-              value={settings.bilibiliStreamFormat}
-              onValueChange={(value) => {
-                if (!isBilibiliStreamFormat(value)) return;
-                void persistDownloadSettings({ ...settings, bilibiliStreamFormat: value });
-              }}
-              disabled={!isLoaded || isSaving}
-            >
-              <SelectTrigger
-                aria-label="Bilibili 下载模式"
-                className="h-11 w-full min-w-0 justify-between border-0 bg-white/[0.045] px-3 hover:bg-white/[0.075] focus-visible:border-0 focus-visible:ring-2 focus-visible:ring-cyan/25 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <span className="truncate text-xs font-semibold text-foreground">{selectedBilibiliStreamFormat.label}</span>
-              </SelectTrigger>
-              <SelectContent align="start" sideOffset={6} className="w-[min(27rem,calc(100vw-2rem))] border-white/10 bg-surface-strong p-1">
-                {BILIBILI_STREAM_FORMAT_OPTIONS.map((option) => (
                   <SelectItem key={option.value} value={option.value} textValue={option.label} className="items-start py-2 pl-9 pr-3 focus:bg-cyan/[0.1]">
                     <span className="grid gap-1 text-left">
                       <span className="text-xs font-semibold text-foreground">{option.label}</span>
@@ -1229,6 +1211,436 @@ function GuideLink({ children, href }: { children: React.ReactNode; href: string
   );
 }
 
+function ApiTokensPanel({ isLoaded }: { isLoaded: boolean }) {
+  const [tokens, setTokens] = useState<ApiAccessTokenRecord[]>([]);
+  const [name, setName] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date());
+  const [isWithoutExpiry, setIsWithoutExpiry] = useState(true);
+  const [editingToken, setEditingToken] = useState<ApiAccessTokenRecord>();
+  const [revealedToken, setRevealedToken] = useState<{ id: string; value: string }>();
+  const [copiedTokenId, setCopiedTokenId] = useState<string>();
+  const [tokenPendingDeletion, setTokenPendingDeletion] = useState<ApiAccessTokenRecord>();
+  const [feedback, setFeedback] = useState<Feedback>();
+  const [isBusy, setIsBusy] = useState(false);
+
+  useEffect(() => {
+    if (!copiedTokenId) return;
+    const timeout = window.setTimeout(() => setCopiedTokenId(undefined), 1_500);
+    return () => window.clearTimeout(timeout);
+  }, [copiedTokenId]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    let isActive = true;
+    void (async () => {
+      setIsBusy(true);
+      setFeedback(undefined);
+      try {
+        const response = await fetch("/api/user/api-tokens", { cache: "no-store" });
+        const payload = await readJsonPayload(response, "API 访问令牌加载失败。") as ApiAccessTokensPayload;
+        if (!response.ok) throw new Error(getApiError(payload)?.error || "API 访问令牌加载失败。");
+        if (isActive) setTokens(payload.tokens ?? []);
+      } catch (error) {
+        if (isActive) setFeedback({ message: readUserFacingError(error, "API 访问令牌加载失败。"), tone: "error" });
+      } finally {
+        if (isActive) setIsBusy(false);
+      }
+    })();
+    return () => {
+      isActive = false;
+    };
+  }, [isLoaded]);
+
+  async function createToken() {
+    if (isBusy) return;
+    setIsBusy(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch("/api/user/api-tokens", {
+        body: JSON.stringify({ name, expiresAt: isWithoutExpiry ? null : parseDateInput(expiresAt) }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const payload = await readJsonPayload(response, "API 访问令牌创建失败。") as ApiAccessTokensPayload;
+      if (!response.ok || !payload.record || !payload.token) {
+        throw new Error(getApiError(payload)?.error || "API 访问令牌创建失败。");
+      }
+      setTokens((current) => [payload.record!, ...current]);
+      setIsCreateDialogOpen(false);
+      setName("");
+      setExpiresAt("");
+      setIsWithoutExpiry(true);
+      setFeedback({ message: "令牌已创建。", tone: "success" });
+    } catch (error) {
+      setFeedback({ message: readUserFacingError(error, "API 访问令牌创建失败。"), tone: "error" });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function updateToken() {
+    if (!editingToken || isBusy || !name.trim()) return;
+    setIsBusy(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch(`/api/user/api-tokens/${encodeURIComponent(editingToken.id)}`, {
+        body: JSON.stringify({ name, expiresAt: isWithoutExpiry ? null : parseDateInput(expiresAt) }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      });
+      const payload = await readJsonPayload(response, "API 访问令牌更新失败。") as { token?: ApiAccessTokenRecord };
+      if (!response.ok || !payload.token) {
+        throw new Error(getApiError(payload)?.error || "API 访问令牌更新失败。");
+      }
+      setTokens((current) => current.map((item) => item.id === payload.token!.id ? payload.token! : item));
+      setEditingToken(undefined);
+      setFeedback({ message: "令牌信息已更新。", tone: "success" });
+    } catch (error) {
+      setFeedback({ message: readUserFacingError(error, "API 访问令牌更新失败。"), tone: "error" });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function openCreateDialog() {
+    setEditingToken(undefined);
+    setName("");
+    setExpiresAt("");
+    setCalendarMonth(new Date());
+    setIsWithoutExpiry(true);
+    setIsCreateDialogOpen(true);
+  }
+
+  function openEditDialog(token: ApiAccessTokenRecord) {
+    setIsCreateDialogOpen(false);
+    setEditingToken(token);
+    setName(token.name);
+    setExpiresAt(token.expiresAt ? toDateInputValue(token.expiresAt) : "");
+    setCalendarMonth(token.expiresAt ? new Date(token.expiresAt) : new Date());
+    setIsWithoutExpiry(!token.expiresAt);
+  }
+
+  async function resetToken(token: ApiAccessTokenRecord) {
+    if (isBusy) return;
+    setIsBusy(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch(`/api/user/api-tokens/${encodeURIComponent(token.id)}`, {
+        body: JSON.stringify({ reset: true }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      });
+      const payload = await readJsonPayload(response, "API 访问令牌重置失败。") as ApiAccessTokensPayload;
+      if (!response.ok || !payload.record || !payload.token) {
+        throw new Error(getApiError(payload)?.error || "API 访问令牌重置失败。");
+      }
+      setTokens((current) => current.map((item) => item.id === payload.record!.id ? payload.record! : item));
+      setFeedback({ message: "令牌已重置，旧令牌立即失效。", tone: "success" });
+    } catch (error) {
+      setFeedback({ message: readUserFacingError(error, "API 访问令牌重置失败。"), tone: "error" });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function deleteToken() {
+    if (isBusy || !tokenPendingDeletion) return;
+    const token = tokenPendingDeletion;
+    setIsBusy(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch(`/api/user/api-tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
+      const payload = await readJsonPayload(response, "API 访问令牌删除失败。") as { deleted?: boolean };
+      if (!response.ok || !payload.deleted) {
+        throw new Error(getApiError(payload)?.error || "API 访问令牌删除失败。");
+      }
+      setTokens((current) => current.filter((item) => item.id !== token.id));
+      setTokenPendingDeletion(undefined);
+      setFeedback({ message: `「${token.name}」已删除。`, tone: "success" });
+    } catch (error) {
+      setFeedback({ message: readUserFacingError(error, "API 访问令牌删除失败。"), tone: "error" });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function readPlainToken(token: ApiAccessTokenRecord): Promise<string | undefined> {
+    setIsBusy(true);
+    setFeedback(undefined);
+    try {
+      const response = await fetch(`/api/user/api-tokens/${encodeURIComponent(token.id)}`, { cache: "no-store" });
+      const payload = await readJsonPayload(response, "API 访问令牌读取失败。") as { token?: string };
+      if (!response.ok || !payload.token) {
+        throw new Error(getApiError(payload)?.error || "API 访问令牌读取失败。");
+      }
+      return payload.token;
+    } catch (error) {
+      setFeedback({ message: readUserFacingError(error, "API 访问令牌读取失败。"), tone: "error" });
+      return undefined;
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function revealToken(token: ApiAccessTokenRecord) {
+    const plain = await readPlainToken(token);
+    if (plain) setRevealedToken({ id: token.id, value: plain });
+  }
+
+  async function copyToken(token: ApiAccessTokenRecord) {
+    const plain = await readPlainToken(token);
+    if (!plain) return;
+    await navigator.clipboard.writeText(plain);
+    setCopiedTokenId(token.id);
+  }
+
+  const dialogOpen = isCreateDialogOpen || editingToken !== undefined;
+  const dialogTitle = editingToken ? "编辑 API 访问令牌" : "新建 API 访问令牌";
+
+  return (
+    <div className="w-full max-w-5xl">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-5">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">API 访问令牌</h2>
+          <p className="mt-3 max-w-3xl text-xs leading-5 text-muted-foreground">
+            生成个人 API 访问令牌（access token）可用于调用 <Link href="/docs?section=api-tokens" className="font-semibold text-cyan hover:text-cyan/80 hover:underline hover:underline-offset-4">EchoLens Open API</Link>。个人 API 访问令牌对当前账号下可访问的数据进行匹配授权。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={openCreateDialog}
+          disabled={!isLoaded}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-cyan px-3 text-xs font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <KeyRound className="size-3.5" aria-hidden="true" />
+          新建
+        </button>
+      </div>
+
+      {feedback ? (
+        <p className={`mt-3 text-xs font-medium leading-5 ${feedback.tone === "success" ? "text-emerald-400" : feedback.tone === "error" ? "text-rose-400" : "text-amber"}`} role={feedback.tone === "error" ? "alert" : "status"}>
+          {feedback.message}
+        </p>
+      ) : null}
+
+      <div className="mt-5 border-y border-white/10">
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(7rem,0.75fr)_4.5rem] gap-3 bg-white/[0.025] px-3 py-2.5 text-xs font-semibold text-muted-foreground sm:px-4 lg:grid-cols-[minmax(6rem,0.65fr)_8.5rem_8.5rem_8.5rem_minmax(9rem,1fr)_4.5rem] lg:gap-3">
+          <span>名称</span>
+          <span className="hidden lg:block">创建时间</span>
+          <span className="hidden lg:block">最后更新</span>
+          <span className="hidden lg:block">上次使用</span>
+          <span>API Key</span>
+          <span className="sr-only">操作</span>
+        </div>
+        {tokens.length === 0 ? (
+          <div className="px-4 py-10 text-center text-sm text-muted-foreground">暂无 API 访问令牌。</div>
+        ) : tokens.map((token) => (
+          <div key={token.id} className="grid grid-cols-[minmax(0,1fr)_minmax(7rem,0.75fr)_4.5rem] items-center gap-3 border-t border-white/10 px-3 py-3.5 sm:px-4 lg:grid-cols-[minmax(6rem,0.65fr)_8.5rem_8.5rem_8.5rem_minmax(9rem,1fr)_4.5rem]">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-sm font-semibold text-foreground">{token.name}</span>
+                <TokenStatus token={token} />
+              </div>
+            </div>
+            <span className="hidden text-xs text-muted-foreground lg:block">{formatTokenDate(token.createdAt)}</span>
+            <span className="hidden text-xs text-muted-foreground lg:block">{formatTokenDate(token.updatedAt)}</span>
+            <span className="hidden text-xs text-muted-foreground lg:block">{token.lastUsedAt ? formatTokenDate(token.lastUsedAt) : "从未使用"}</span>
+            <div className="flex min-w-0 items-center gap-1">
+              <code className="min-w-0 flex-1 break-all text-xs text-foreground">{revealedToken?.id === token.id ? revealedToken.value : `${token.prefix}…`}</code>
+              <button type="button" onClick={() => void revealToken(token)} disabled={isBusy} className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan disabled:opacity-35" aria-label={`查看 ${token.name} 明文`} title="查看明文">
+                <Eye className="size-3.5" aria-hidden="true" />
+              </button>
+              <button type="button" onClick={() => void copyToken(token)} disabled={isBusy} className={`inline-flex size-7 shrink-0 items-center justify-center rounded-md transition hover:bg-white/[0.06] disabled:opacity-35 ${copiedTokenId === token.id ? "text-emerald-400" : "text-muted-foreground hover:text-cyan"}`} aria-label={copiedTokenId === token.id ? `${token.name} 已复制` : `复制 ${token.name}`} title={copiedTokenId === token.id ? "已复制" : "复制令牌"}>
+                {copiedTokenId === token.id ? <Check className="size-3.5" aria-hidden="true" /> : <Copy className="size-3.5" aria-hidden="true" />}
+              </button>
+            </div>
+            <div className="flex items-center justify-end gap-1">
+              <button type="button" onClick={() => openEditDialog(token)} disabled={isBusy} className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan disabled:opacity-35" aria-label={`编辑 ${token.name}`} title="编辑">
+                <Pencil className="size-3.5" aria-hidden="true" />
+              </button>
+              <button type="button" onClick={() => setTokenPendingDeletion(token)} disabled={isBusy} className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-rose-500/10 hover:text-rose-300 disabled:opacity-35" aria-label={`删除 ${token.name}`} title="删除">
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {tokenPendingDeletion ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4" role="alertdialog" aria-modal="true" aria-labelledby="delete-api-token-title" aria-describedby="delete-api-token-description">
+          <div className="w-full max-w-md rounded-lg border border-white/10 bg-surface-strong p-5 shadow-2xl shadow-black/50 sm:p-6">
+            <h3 id="delete-api-token-title" className="text-base font-semibold text-foreground">删除 API 访问令牌？</h3>
+            <p id="delete-api-token-description" className="mt-2 text-sm leading-6 text-muted-foreground">
+              删除「{tokenPendingDeletion.name}」后，使用该令牌的客户端将立即失去访问权限。此操作无法撤销。
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" onClick={() => setTokenPendingDeletion(undefined)} disabled={isBusy} className="h-9 rounded-md px-3 text-xs font-semibold text-muted-foreground hover:bg-white/[0.06] hover:text-foreground disabled:opacity-50">取消</button>
+              <button type="button" onClick={() => void deleteToken()} disabled={isBusy} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-rose-500 px-4 text-xs font-semibold text-white transition hover:bg-rose-400 disabled:opacity-50">
+                {isBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="size-3.5" aria-hidden="true" />}
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {dialogOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-labelledby="api-token-dialog-title">
+          <div className="w-full max-w-[32.5rem] rounded-lg border border-white/10 bg-surface-strong p-5 shadow-2xl shadow-black/50 sm:p-6">
+            <div className="flex items-center justify-between gap-4">
+              <h3 id="api-token-dialog-title" className="text-base font-semibold text-foreground">{dialogTitle}</h3>
+              <button type="button" onClick={() => { setIsCreateDialogOpen(false); setEditingToken(undefined); }} className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.06] hover:text-foreground" aria-label="关闭">
+                <X className="size-4" aria-hidden="true" />
+              </button>
+            </div>
+            <label className="mt-6 block text-sm font-semibold text-foreground" htmlFor="api-token-name">名称 <span className="text-rose-400">*</span></label>
+            <input id="api-token-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="给令牌一个名称，记录该令牌的用途" className="api-token-name-input mt-2 h-10 w-full rounded-md border border-white/10 bg-black/20 px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/65 focus:border-cyan/60 focus:ring-2 focus:ring-cyan/15" autoComplete="off" spellCheck={false} autoFocus />
+            <fieldset className="mt-5">
+              <legend className="text-sm font-semibold text-foreground">有效期 <span className="text-rose-400">*</span></legend>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <Popover.Root open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+                  <Popover.Trigger asChild>
+                    <button
+                      type="button"
+                      disabled={isWithoutExpiry}
+                      className="inline-flex h-10 min-w-36 items-center justify-between gap-3 rounded-md border border-white/10 bg-black/20 px-3 text-left text-sm text-foreground outline-none transition hover:border-white/20 focus-visible:border-cyan/60 focus-visible:ring-2 focus-visible:ring-cyan/15 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      <span className={expiresAt ? "text-foreground" : "text-muted-foreground"}>{expiresAt ? format(new Date(`${expiresAt}T00:00:00`), "yyyy 年 M 月 d 日", { locale: zhCN }) : "选择日期"}</span>
+                      <CalendarDays className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    </button>
+                  </Popover.Trigger>
+                  <Popover.Portal>
+                    <Popover.Content align="start" sideOffset={8} className="z-50 w-[19rem] rounded-md border border-white/10 bg-surface-strong p-0 shadow-xl shadow-black/35 outline-none">
+                      <div className="flex h-12 items-center justify-between border-b border-white/10 px-3">
+                        <div className="flex items-center gap-1">
+                          <Select
+                            value={String(calendarMonth.getFullYear())}
+                            onValueChange={(value) => setCalendarMonth((current) => new Date(Number(value), current.getMonth(), 1))}
+                          >
+                            <SelectTrigger aria-label="选择年份" className="h-8 min-w-[5.75rem] justify-between bg-white/[0.04] px-2 text-xs font-semibold hover:bg-white/[0.075] focus-visible:ring-cyan/20">
+                              <span>{calendarMonth.getFullYear()} 年</span>
+                            </SelectTrigger>
+                            <SelectContent align="start" sideOffset={6} className="z-[60] max-h-56 min-w-[var(--radix-select-trigger-width)] border-white/10 bg-surface-strong p-1 shadow-xl shadow-black/40">
+                              {Array.from({ length: 11 }, (_, index) => new Date().getFullYear() + index).map((year) => (
+                                <SelectItem key={year} value={String(year)} className="py-2 pl-8 pr-3 text-xs font-semibold focus:bg-cyan/[0.12]">
+                                  {year} 年
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Select
+                            value={String(calendarMonth.getMonth())}
+                            onValueChange={(value) => setCalendarMonth((current) => new Date(current.getFullYear(), Number(value), 1))}
+                          >
+                            <SelectTrigger aria-label="选择月份" className="h-8 min-w-[4.5rem] justify-between bg-white/[0.04] px-2 text-xs font-semibold hover:bg-white/[0.075] focus-visible:ring-cyan/20">
+                              <span>{calendarMonth.getMonth() + 1} 月</span>
+                            </SelectTrigger>
+                            <SelectContent align="start" sideOffset={6} className="z-[60] max-h-56 min-w-[var(--radix-select-trigger-width)] border-white/10 bg-surface-strong p-1 shadow-xl shadow-black/40">
+                              {Array.from({ length: 12 }, (_, index) => (
+                                <SelectItem key={index} value={String(index)} className="py-2 pl-8 pr-3 text-xs font-semibold focus:bg-cyan/[0.12]">
+                                  {index + 1} 月
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button type="button" aria-label="上个月" disabled={calendarMonth.getFullYear() === new Date().getFullYear() && calendarMonth.getMonth() === new Date().getMonth()} onClick={() => setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() - 1, 1))} className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan disabled:cursor-not-allowed disabled:opacity-30">
+                            <ChevronLeft className="size-4" aria-hidden="true" />
+                          </button>
+                          <button type="button" aria-label="下个月" onClick={() => setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() + 1, 1))} className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan">
+                            <ChevronRight className="size-4" aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+                      <Calendar
+                        mode="single"
+                        month={calendarMonth}
+                        onMonthChange={setCalendarMonth}
+                        selected={expiresAt ? new Date(`${expiresAt}T00:00:00`) : undefined}
+                        disabled={{ before: new Date() }}
+                        locale={zhCN}
+                        classNames={{ month_caption: "hidden", nav: "hidden" }}
+                        onSelect={(date) => {
+                          if (!date) return;
+                          setExpiresAt(toDateInputValue(date.getTime()));
+                          setCalendarMonth(date);
+                          setIsWithoutExpiry(false);
+                          setIsDatePickerOpen(false);
+                        }}
+                      />
+                      <div className="border-t border-white/10 px-3 py-2 text-center">
+                        <button type="button" onClick={() => { setExpiresAt(toDateInputValue(Date.now())); setIsWithoutExpiry(false); setIsDatePickerOpen(false); }} className="text-xs font-semibold text-cyan transition hover:text-amber">今天</button>
+                      </div>
+                    </Popover.Content>
+                  </Popover.Portal>
+                </Popover.Root>
+                <label className="inline-flex h-10 cursor-pointer items-center gap-2 text-sm font-semibold text-foreground">
+                  <span className="relative shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={isWithoutExpiry}
+                      onChange={(event) => setIsWithoutExpiry(event.target.checked)}
+                      className="peer absolute inset-0 z-10 size-[1.05rem] cursor-pointer opacity-0"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className="flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border border-white/28 bg-white/[0.03] shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06),0_0_0_1px_rgb(0_0_0_/_0.2)] transition peer-hover:border-cyan/55 peer-focus-visible:border-cyan/70 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:bg-white/[0.02] peer-checked:shadow-[inset_0_1px_0_rgb(255_255_255_/_0.08),0_0_0_1px_rgb(0_0_0_/_0.18),0_0_16px_rgb(34_211_238_/_0.12)] peer-checked:[&>svg]:opacity-100"
+                    >
+                      <Check className="size-[0.82rem] text-cyan opacity-0 drop-shadow-[0_0_6px_rgba(34,211,238,0.45)] transition duration-150 ease-out" strokeWidth={3.4} />
+                    </span>
+                  </span>
+                  无期限
+                </label>
+              </div>
+            </fieldset>
+            <div className="mt-7 flex items-center justify-between gap-3">
+              {editingToken ? <button type="button" onClick={() => void resetToken(editingToken)} disabled={isBusy} className="text-xs font-semibold text-cyan hover:text-cyan/80 disabled:opacity-50">重置令牌</button> : <span />}
+              <div className="flex gap-2">
+                <button type="button" onClick={() => { setIsCreateDialogOpen(false); setEditingToken(undefined); }} className="h-9 rounded-md px-3 text-xs font-semibold text-muted-foreground hover:bg-white/[0.06] hover:text-foreground">取消</button>
+                <button type="button" onClick={() => void (editingToken ? updateToken() : createToken())} disabled={isBusy || !name.trim()} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-cyan px-4 text-xs font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50">
+                  {isBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+                  {editingToken ? "保存" : "创建"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TokenStatus({ token }: { token: ApiAccessTokenRecord }) {
+  if (token.isExpired) return <StatusIndicator color="bg-amber" label="已过期" />;
+  return <StatusIndicator color="bg-emerald-400" label="可用" />;
+}
+
+function parseDateInput(value: string): number | null {
+  if (!value) return null;
+  const parsed = new Date(`${value}T23:59:59`).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toDateInputValue(value: number): string {
+  const date = new Date(value);
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return offsetDate.toISOString().slice(0, 10);
+}
+
+function formatTokenDate(value: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
 function GuideImageModal({
   alt,
   ariaLabel,
@@ -1351,7 +1763,6 @@ export function SettingsPage({
   const [bilibiliSettings, setBilibiliSettings] = useState<BilibiliSettings>({ cookie: "" });
   const [downloadSettings, setDownloadSettings] = useState<DownloadSettings>({
     bilibiliAudioQuality: DEFAULT_BILIBILI_AUDIO_QUALITY,
-    bilibiliStreamFormat: DEFAULT_BILIBILI_STREAM_FORMAT,
     bilibiliVideoCodec: DEFAULT_BILIBILI_VIDEO_CODEC,
     bilibiliVideoQuality: DEFAULT_BILIBILI_VIDEO_QUALITY,
     directoryPath: "",
@@ -1700,6 +2111,15 @@ export function SettingsPage({
               </button>
               <button
                 type="button"
+                onClick={() => setActiveSection("apiTokens")}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "apiTokens" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                aria-current={activeSection === "apiTokens" ? "page" : undefined}
+              >
+                <ShieldCheck className="size-4" aria-hidden="true" />
+                API 访问令牌
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveSection("douyin")}
                 className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
                 aria-current={activeSection === "douyin" ? "page" : undefined}
@@ -1734,6 +2154,8 @@ export function SettingsPage({
                  onConfiguredChange={setAiCredentialConfigured}
                  onModelsChange={setAiModels}
                />
+            ) : activeSection === "apiTokens" ? (
+              <ApiTokensPanel isLoaded={isLoaded} />
             ) : activeSection === "douyin" ? (
               <div className="w-full max-w-2xl">
               <div className="mb-4 border-b border-white/10 pb-3">

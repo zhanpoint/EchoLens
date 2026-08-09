@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { readCurrentUserFromCookies, isAdminUser } from "@/lib/auth/service";
 import { listAccountServiceInvitations } from "@/lib/invitations/service";
+import { listUserFeedback } from "@/lib/feedback/service";
 import { InvitationConsole } from "./page-client";
 
 export const dynamic = "force-dynamic";
@@ -14,5 +15,8 @@ export default async function Page() {
   const user = await readCurrentUserFromCookies();
   if (!isAdminUser(user)) notFound();
 
-  return <InvitationConsole invitations={await listAccountServiceInvitations()} />;
+  return <InvitationConsole
+    feedback={await listUserFeedback()}
+    invitations={await listAccountServiceInvitations()}
+  />;
 }

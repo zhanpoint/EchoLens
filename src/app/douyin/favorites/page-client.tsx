@@ -28,6 +28,7 @@ import {
   readJsonPayload,
   readUserFacingError,
   requestCurrentUser,
+  requestOnce,
   requireValidDouyinCredential,
 } from "../_client-api";
 import { DouyinSectionNav } from "../_section-nav";
@@ -149,7 +150,7 @@ function parseFavoritesSnapshot(value: unknown): Omit<FavoritesPayload, "refresh
   };
 }
 
-async function requestFavorites(platform: FavoritesPlatform): Promise<FavoritesPayload> {
+async function fetchFavorites(platform: FavoritesPlatform): Promise<FavoritesPayload> {
   const endpoint = platform === "bilibili" ? "/api/bilibili/favorites" : "/api/douyin/favorites";
   const platformLabel = platform === "bilibili" ? "Bilibili" : "抖音";
   const response = await fetch(endpoint, {
@@ -180,6 +181,10 @@ async function requestFavorites(platform: FavoritesPlatform): Promise<FavoritesP
     refreshedAt: typeof payload.refreshedAt === "number" ? payload.refreshedAt : Date.now(),
     videos: Array.isArray(payload.videos) ? payload.videos.filter(isDouyinFavoriteVideo) : [],
   };
+}
+
+function requestFavorites(platform: FavoritesPlatform): Promise<FavoritesPayload> {
+  return requestOnce(`favorites:${platform}`, () => fetchFavorites(platform));
 }
 
 export function DouyinFavoritesPage() {
@@ -224,7 +229,12 @@ export function DouyinFavoritesPage() {
         if (isActive) {
           setUserId(user.id);
         }
-        const cache = await readDouyinClientSnapshot(user.id, cacheKind, parseFavoritesSnapshot);
+        let cache = null;
+        try {
+          cache = await readDouyinClientSnapshot(user.id, cacheKind, parseFavoritesSnapshot);
+        } catch {
+          // IndexedDB is an optional optimization; the network remains authoritative.
+        }
         if (!isActive) {
           return;
         }
@@ -235,30 +245,40 @@ export function DouyinFavoritesPage() {
           setVideos(cache.data.videos);
           setRefreshedAt(cache.refreshedAt);
           setDataVersion((current) => current + 1);
-          return;
         }
-        if (platform === "douyin") {
-          await requireValidDouyinCredential();
-        }
-        const payload = await requestFavorites(platform);
-        await writeDouyinClientSnapshot(
-          user.id,
-          cacheKind,
-          {
-            authors: payload.authors,
-            folders: payload.folders,
-            mixes: payload.mixes,
-            videos: payload.videos,
-          },
-          payload.refreshedAt,
-        );
-        if (isActive) {
-          setAuthors(payload.authors);
-          setFolders(payload.folders);
-          setMixes(payload.mixes);
-          setVideos(payload.videos);
-          setRefreshedAt(payload.refreshedAt);
-          setDataVersion((current) => current + 1);
+        setIsLoading(!cache);
+        setIsRefreshing(true);
+        try {
+          if (platform === "douyin") {
+            await requireValidDouyinCredential();
+          }
+          if (!isActive) {
+            return;
+          }
+          const payload = await requestFavorites(platform);
+          if (isActive) {
+            setAuthors(payload.authors);
+            setFolders(payload.folders);
+            setMixes(payload.mixes);
+            setVideos(payload.videos);
+            setRefreshedAt(payload.refreshedAt);
+            setDataVersion((current) => current + 1);
+          }
+          void writeDouyinClientSnapshot(
+            user.id,
+            cacheKind,
+            {
+              authors: payload.authors,
+              folders: payload.folders,
+              mixes: payload.mixes,
+              videos: payload.videos,
+            },
+            payload.refreshedAt,
+          ).catch(() => undefined);
+        } finally {
+          if (isActive) {
+            setIsRefreshing(false);
+          }
         }
       })
       .catch((loadError) => {
@@ -288,7 +308,13 @@ export function DouyinFavoritesPage() {
         await requireValidDouyinCredential();
       }
       const payload = await requestFavorites(platform);
-      await writeDouyinClientSnapshot(
+      setAuthors(payload.authors);
+      setFolders(payload.folders);
+      setMixes(payload.mixes);
+      setVideos(payload.videos);
+      setRefreshedAt(payload.refreshedAt);
+      setDataVersion((current) => current + 1);
+      void writeDouyinClientSnapshot(
         userId,
         platform === "bilibili" ? "bilibili-favorites-v5" : "favorites",
         {
@@ -298,13 +324,7 @@ export function DouyinFavoritesPage() {
           videos: payload.videos,
         },
         payload.refreshedAt,
-      );
-      setAuthors(payload.authors);
-      setFolders(payload.folders);
-      setMixes(payload.mixes);
-      setVideos(payload.videos);
-      setRefreshedAt(payload.refreshedAt);
-      setDataVersion((current) => current + 1);
+      ).catch(() => undefined);
     } catch (loadError) {
       handleRequestError(loadError);
     } finally {
@@ -396,7 +416,7 @@ export function DouyinFavoritesPage() {
             <button
               type="button"
               onClick={() => void refreshFavorites()}
-              disabled={isLoading || isRefreshing}
+              disabled={isLoading || isRefreshing || !userId}
               className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/[0.1] active:bg-cyan/[0.16] disabled:cursor-not-allowed disabled:text-muted-foreground"
             >
               {isRefreshing ? (
@@ -523,7 +543,7 @@ export function DouyinFavoritesPage() {
             ) : null}
 
             <div className="min-h-[22rem] flex-1 overflow-hidden lg:min-h-0">
-              {isLoading || isRefreshing ? (
+              {isLoading ? (
                 showsVideoControls ? <FavoritesSkeleton /> : <GroupsSkeleton />
               ) : activeCategory === "folders" ? (
                 <FavoriteGroups
