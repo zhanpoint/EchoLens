@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { OPEN_API_BASE_PATH, OPEN_API_ENDPOINTS } from "@/lib/open-api/spec";
 
-type JsonRecord = Record<string, any>;
+type JsonRecord = Record<string, unknown>;
+type MediaExample = JsonRecord & { downloads?: { audioUrl?: unknown; videoUrl?: unknown } };
+type TranscriptExample = JsonRecord & { segments?: unknown; text?: unknown };
 
 describe("Open API documentation contract", () => {
   it("documents every catalog endpoint with request and response examples", () => {
@@ -45,7 +47,7 @@ describe("Open API documentation contract", () => {
       source: "bilibili",
       downloads: { audioUrl: expect.any(String), videoUrl: expect.any(String) },
     }]);
-    const bilibiliMedia = media?.variants[1].response.media as JsonRecord[] | undefined;
+    const bilibiliMedia = media?.variants[1].response.media as MediaExample[] | undefined;
     const bilibiliAudioUrl = String(bilibiliMedia?.[0]?.downloads?.audioUrl ?? "");
     expect(bilibiliAudioUrl).toContain("/echolens/open-api/audio/bilibili/");
     expect(bilibiliAudioUrl).not.toContain("bilivideo.com");
@@ -54,8 +56,8 @@ describe("Open API documentation contract", () => {
   it("documents complete one-shot transcription response shape", () => {
     const transcript = OPEN_API_ENDPOINTS.find((endpoint) => endpoint.path === "/transcripts/transcribe");
     expect(transcript?.variants.every((variant) => {
-      const media = variant.response.media as JsonRecord | undefined;
-      const transcript = variant.response.transcript as JsonRecord | undefined;
+      const media = variant.response.media as MediaExample | undefined;
+      const transcript = variant.response.transcript as TranscriptExample | undefined;
       return Boolean(
         media &&
         !Array.isArray(media) &&
@@ -65,7 +67,7 @@ describe("Open API documentation contract", () => {
         Array.isArray(transcript.segments),
       );
     })).toBe(true);
-    const bilibiliMedia = transcript?.variants[1].response.media as JsonRecord | undefined;
+    const bilibiliMedia = transcript?.variants[1].response.media as MediaExample | undefined;
     const bilibiliAudioUrl = String(bilibiliMedia?.downloads?.audioUrl ?? "");
     expect(bilibiliAudioUrl).toContain("/echolens/open-api/audio/bilibili/");
     expect(bilibiliAudioUrl).not.toContain("bilivideo.com");

@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { NextResponse } from "next/server";
 
 vi.mock("@/app/api/auth/_shared", () => ({ requireUser: vi.fn() }));
 vi.mock("@/lib/feedback/service", () => ({

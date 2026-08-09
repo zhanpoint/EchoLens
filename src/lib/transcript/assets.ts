@@ -147,7 +147,7 @@ async function resolveBilibiliHistoryAsset(input: {
   return dashAsset({
     ...base,
     assetKind: "video",
-    contentType: contentTypeForVideo(selection.video),
+    contentType: contentTypeForVideo(),
     objectKey: `bilibili:${work.id}:video:${selection.video.id}:${selection.video.codecId ?? "unknown"}`,
     stream: selection.video,
   });
@@ -156,8 +156,18 @@ async function resolveBilibiliHistoryAsset(input: {
 function dashAsset(input: Omit<AvailableHistoryAsset, "url"> & { stream: BilibiliMediaStream }): AvailableHistoryAsset | null {
   const url = input.stream.urls[0];
   if (!url) return null;
-  const { stream: _stream, ...asset } = input;
-  return { ...asset, url };
+  return {
+    assetKind: input.assetKind,
+    contentType: input.contentType,
+    durationSeconds: input.durationSeconds,
+    historyRecordId: input.historyRecordId,
+    objectKey: input.objectKey,
+    sizeBytes: input.sizeBytes,
+    updatedAt: input.updatedAt,
+    url,
+    urlExpiresAt: input.urlExpiresAt,
+    verifiedAt: input.verifiedAt,
+  };
 }
 
 function contentTypeForAudio(stream: BilibiliMediaStream): string {
@@ -166,7 +176,7 @@ function contentTypeForAudio(stream: BilibiliMediaStream): string {
   return "audio/mp4";
 }
 
-function contentTypeForVideo(_stream: BilibiliMediaStream): string {
+function contentTypeForVideo(): string {
   return "video/mp4";
 }
 

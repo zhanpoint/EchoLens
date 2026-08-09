@@ -142,8 +142,16 @@ export async function POST(request: Request) {
           send({ asset: input.asset, error: "Bilibili DASH 地址不可用。", type: "asset-error" });
           return;
         }
-        const { stream: _stream, ...asset } = input;
-        send({ asset: { ...asset, sizeBytes: 0, url }, type: "asset" });
+        const asset: SerializedAsset = {
+          asset: input.asset,
+          contentType: input.contentType,
+          durationSeconds: input.durationSeconds,
+          objectKey: input.objectKey,
+          sizeBytes: 0,
+          url,
+          verified: input.verified,
+        };
+        send({ asset, type: "asset" });
       }
     },
     cancel() { closed = true; },
