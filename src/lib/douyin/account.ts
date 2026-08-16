@@ -34,10 +34,7 @@ export async function readDouyinCredentialState(userId: string): Promise<DouyinC
 }
 
 export async function validateDouyinCredential(cookie: string): Promise<void> {
-  const self = await createDouyinWebClient(cookie).getSelfProfile(1);
-  if (typeof (self.sec_uid ?? self.secUid) !== "string" || !(self.sec_uid ?? self.secUid)) {
-    throw new DouyinApiError("访问凭证无效或已过期，请重新获取。", "LOGIN_REQUIRED");
-  }
+  await createDouyinWebClient(cookie).verifyAuthenticatedSession(1);
 }
 
 export async function validateAndStoreDouyinCredential(userId: string, cookie: string): Promise<DouyinCredentialState> {

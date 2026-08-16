@@ -63,6 +63,14 @@ export async function listUserFeedback(): Promise<UserFeedback[]> {
   return rows.map(toUserFeedback);
 }
 
+export async function deleteUserFeedback(id: string): Promise<boolean> {
+  const row = await queryRow<{ id: string }>(
+    "DELETE FROM user_feedback WHERE id = $1 RETURNING id",
+    [id],
+  );
+  return row !== null;
+}
+
 export async function updateUserFeedbackStatus(
   id: string,
   status: FeedbackStatus,

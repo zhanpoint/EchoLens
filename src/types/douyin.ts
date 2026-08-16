@@ -1,7 +1,7 @@
 import type { MediaSource } from "@/lib/media/source";
 
 export const DOUYIN_KINDS = ["video"] as const;
-export const MEDIA_ASSET_KINDS = ["cover", "video", "originalAudio"] as const;
+export const MEDIA_ASSET_KINDS = ["cover", "video", "originalAudio", "dubbing"] as const;
 export const TRANSCRIPT_FEATURE = "audioTranscript" as const;
 
 export type DouyinKind = (typeof DOUYIN_KINDS)[number];

@@ -1,5 +1,7 @@
-import type { DouyinCommentsPayload } from "@/lib/douyin/comments";
+import type { CommentsPayload } from "@/lib/comment-model";
 import { execute, queryRow } from "@/lib/storage/postgres";
+
+export type StoredCommentsPayload = CommentsPayload & ({ aid: number } | { awemeId: string });
 
 export type TranscriptHistoryCommentsMetadata = {
   collectedAt: number;
@@ -7,7 +9,7 @@ export type TranscriptHistoryCommentsMetadata = {
 };
 
 type CommentsPayloadRow = {
-  payload: DouyinCommentsPayload;
+  payload: StoredCommentsPayload;
 };
 
 type CommentsMetadataRow = {
@@ -18,7 +20,7 @@ type CommentsMetadataRow = {
 export async function readTranscriptHistoryComments(input: {
   historyRecordId: string;
   userId: string;
-}): Promise<DouyinCommentsPayload | null> {
+}): Promise<StoredCommentsPayload | null> {
   const row = await queryRow<CommentsPayloadRow>(
     `SELECT comments.payload
      FROM transcript_history_comments comments
@@ -47,7 +49,7 @@ export async function readTranscriptHistoryCommentsMetadata(input: {
 
 export async function upsertTranscriptHistoryComments(input: {
   historyRecordId: string;
-  payload: DouyinCommentsPayload;
+  payload: StoredCommentsPayload;
   userId: string;
 }): Promise<boolean> {
   const affected = await execute(

@@ -21,33 +21,31 @@ type StoredAsrTaskRow = {
 type TranscriptHistoryRecordRow = {
   author_name: string | null;
   author_url: string | null;
+  avatar_url: string | null;
   caption: string | null;
+  cover_url: string | null;
   created_at: number;
-  session_name: string;
+  dubbing_url: string | null;
   duration_seconds: number | null;
   final_url: string;
   id: string;
   input_url: string;
+  media_quality: string | null;
+  original_audio: string | null;
   pinned_at: number | null;
+  source_metadata_refreshed_at: number | null;
+  source_urls_expires_at: number | null;
+  session_name: string;
   transcript_content: string;
   transcript_segments: unknown;
   updated_at: number;
   user_id: string;
+  video_url: string | null;
+  dash_video_url: string | null;
   work_id: string;
   work_key: string;
   work_kind: string;
 };
-type TranscriptHistoryAssetRow = {
-  asset_kind: TranscriptHistoryAssetKind;
-  content_type: string;
-  duration_seconds: number | null;
-  history_record_id: string;
-  object_key: string;
-  size_bytes: number;
-  updated_at: number;
-  verified_at: number | null;
-};
-
 type TranscriptHistorySummaryRow = {
   content: string;
   created_at: number;
@@ -83,32 +81,30 @@ export type StoredAsrTask = {
   workKey: string;
 };
 export type StoredAsrHistoryContext = TranscribeHistoryContext;
-export type TranscriptHistoryAssetKind = "avatar" | "cover" | "video" | "originalAudio";
-export type TranscriptHistoryAsset = {
-  assetKind: TranscriptHistoryAssetKind;
-  contentType: string;
-  durationSeconds?: number;
-  historyRecordId: string;
-  objectKey: string;
-  sizeBytes: number;
-  updatedAt: number;
-  verifiedAt?: number;
-};
 export type TranscriptHistoryRecord = {
   authorName?: string;
   authorUrl?: string;
+  avatarUrl?: string;
   caption: string;
+  coverUrl?: string;
   createdAt: number;
+  dubbingUrl?: string;
   sessionName: string;
   durationSeconds?: number;
   finalUrl: string;
   id: string;
   inputUrl: string;
+  mediaQuality?: string;
+  originalAudio?: string;
   pinnedAt?: number;
+  sourceMetadataRefreshedAt?: number;
+  sourceUrlsExpiresAt?: number;
+  dashVideoUrl?: string;
   transcriptContent: string;
   transcriptSegments?: unknown;
   updatedAt: number;
   userId: string;
+  videoUrl?: string;
   workId: string;
   workKey: string;
   workKind: string;
@@ -132,13 +128,10 @@ export type TranscriptCustomPrompt = {
 
 const HISTORY_RECORD_COLUMNS = `
   id, user_id, work_key, work_id, work_kind, input_url, final_url,
-  author_name, author_url, caption, session_name, duration_seconds,
+  author_name, author_url, avatar_url, caption, cover_url, session_name,
+  duration_seconds, dubbing_url, video_url, dash_video_url, media_quality,
+  original_audio, source_metadata_refreshed_at, source_urls_expires_at,
   transcript_content, transcript_segments, created_at, updated_at, pinned_at
-`;
-
-const HISTORY_ASSET_COLUMNS = `
-  history_record_id, asset_kind, object_key, content_type, size_bytes,
-  duration_seconds, verified_at, updated_at
 `;
 
 const ASR_TASK_COLUMNS = `
@@ -146,79 +139,6 @@ const ASR_TASK_COLUMNS = `
   audio_duration_seconds, history_record_id, history_work,
   status, error_detail, updated_at
 `;
-
-export async function upsertTranscriptHistoryAsset(input: {
-  assetKind: TranscriptHistoryAssetKind;
-  contentType: string;
-  durationSeconds?: number;
-  historyRecordId: string;
-  objectKey: string;
-  sizeBytes: number;
-  userId: string;
-  verifiedAt?: number;
-}): Promise<TranscriptHistoryAsset | null> {
-  const row = await queryRow<TranscriptHistoryAssetRow>(
-    `INSERT INTO transcript_history_assets (
-       history_record_id, asset_kind, object_key, content_type, size_bytes, duration_seconds, verified_at, updated_at
-     )
-     SELECT id, $3, $4, $5, $6, $7, $8, $9
-     FROM transcript_history_records
-     WHERE id = $1 AND user_id = $2
-     ON CONFLICT(history_record_id, asset_kind) DO UPDATE SET
-       object_key = excluded.object_key,
-       content_type = excluded.content_type,
-       size_bytes = excluded.size_bytes,
-       duration_seconds = excluded.duration_seconds,
-       verified_at = excluded.verified_at,
-       updated_at = excluded.updated_at
-     RETURNING ${HISTORY_ASSET_COLUMNS}`,
-    [
-      input.historyRecordId,
-      input.userId,
-      input.assetKind,
-      input.objectKey,
-      input.contentType,
-      input.sizeBytes,
-      input.durationSeconds ?? null,
-      input.verifiedAt ?? null,
-      Date.now(),
-    ],
-  );
-  return row ? mapTranscriptHistoryAsset(row) : null;
-}
-
-export async function readTranscriptHistoryAsset(input: {
-  assetKind: TranscriptHistoryAssetKind;
-  historyRecordId: string;
-  userId: string;
-}): Promise<TranscriptHistoryAsset | null> {
-  const row = await queryRow<TranscriptHistoryAssetRow>(
-    `SELECT asset.history_record_id, asset.asset_kind, asset.object_key, asset.content_type,
-            asset.size_bytes, asset.duration_seconds, asset.verified_at, asset.updated_at
-     FROM transcript_history_assets asset
-     JOIN transcript_history_records history ON history.id = asset.history_record_id
-     WHERE history.user_id = $1 AND asset.history_record_id = $2 AND asset.asset_kind = $3
-     LIMIT 1`,
-    [input.userId, input.historyRecordId, input.assetKind],
-  );
-  return row ? mapTranscriptHistoryAsset(row) : null;
-}
-
-export async function listTranscriptHistoryAssets(input: {
-  historyRecordId: string;
-  userId: string;
-}): Promise<TranscriptHistoryAsset[]> {
-  const rows = await queryRows<TranscriptHistoryAssetRow>(
-    `SELECT asset.history_record_id, asset.asset_kind, asset.object_key, asset.content_type,
-            asset.size_bytes, asset.duration_seconds, asset.verified_at, asset.updated_at
-     FROM transcript_history_assets asset
-     JOIN transcript_history_records history ON history.id = asset.history_record_id
-     WHERE history.user_id = $1 AND asset.history_record_id = $2
-     ORDER BY asset.updated_at DESC`,
-    [input.userId, input.historyRecordId],
-  );
-  return rows.map(mapTranscriptHistoryAsset);
-}
 
 export async function insertAsrTask(input: {
   audioDurationSeconds: number;
@@ -462,15 +382,24 @@ export async function readPlatformAsrQuotaUsageSeconds(input: {
 export type TranscriptHistoryRecordInput = {
   authorName?: string;
   authorUrl?: string;
+  avatarUrl?: string;
   caption: string;
+  coverUrl?: string;
   sessionName?: string;
   durationSeconds?: number;
+  dubbingUrl?: string;
   finalUrl: string;
   id: string;
   inputUrl: string;
+  mediaQuality?: string;
+  originalAudio?: string;
+  sourceMetadataRefreshedAt?: number;
+  sourceUrlsExpiresAt?: number;
+  dashVideoUrl?: string;
   transcriptContent: string;
   transcriptSegments?: unknown;
   userId: string;
+  videoUrl?: string;
   workId: string;
   workKey: string;
   workKind: string;
@@ -479,45 +408,7 @@ export type TranscriptHistoryRecordInput = {
 export async function findOrCreateTranscriptHistoryRecord(
   input: TranscriptHistoryRecordInput,
 ): Promise<{ created: boolean; record: TranscriptHistoryRecord }> {
-  const now = Date.now();
-  const title = requireHistoryCaption(input.caption);
-  const row = await queryRow<TranscriptHistoryRecordRow>(
-    `INSERT INTO transcript_history_records (
-       id, user_id, work_key, work_id, work_kind, input_url, final_url,
-       author_name, author_url, caption, session_name, duration_seconds,
-       transcript_content, transcript_segments, created_at, updated_at
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $15)
-     ON CONFLICT(user_id, work_key) DO UPDATE SET
-       input_url = excluded.input_url,
-       final_url = excluded.final_url,
-       author_name = excluded.author_name,
-       author_url = excluded.author_url,
-       caption = excluded.caption,
-       duration_seconds = excluded.duration_seconds,
-       updated_at = excluded.updated_at
-     RETURNING ${HISTORY_RECORD_COLUMNS}`,
-    [
-      input.id,
-      input.userId,
-      input.workKey,
-      input.workId,
-      input.workKind,
-      input.inputUrl,
-      input.finalUrl,
-      input.authorName ?? null,
-      input.authorUrl ?? null,
-      title,
-      input.sessionName?.trim() || title,
-      input.durationSeconds ?? null,
-      input.transcriptContent,
-      stringifyJson(input.transcriptSegments),
-      now,
-    ],
-  );
-  if (!row || row.user_id !== input.userId) {
-    throw new Error("转录历史创建失败。");
-  }
+  const row = await writeTranscriptHistoryRecord(input, "work");
   return {
     created: row.id === input.id,
     record: mapTranscriptHistoryRecord(row),
@@ -527,26 +418,49 @@ export async function findOrCreateTranscriptHistoryRecord(
 export async function upsertTranscriptHistoryRecord(
   input: TranscriptHistoryRecordInput,
 ): Promise<TranscriptHistoryRecord> {
+  return mapTranscriptHistoryRecord(await writeTranscriptHistoryRecord(input, "id"));
+}
+
+async function writeTranscriptHistoryRecord(
+  input: TranscriptHistoryRecordInput,
+  conflictKey: "id" | "work",
+): Promise<TranscriptHistoryRecordRow> {
   const now = Date.now();
   const title = requireHistoryCaption(input.caption);
+  const commonUpdates = `
+         input_url = excluded.input_url,
+         final_url = excluded.final_url,
+         author_name = excluded.author_name,
+         author_url = excluded.author_url,
+         avatar_url = COALESCE(excluded.avatar_url, transcript_history_records.avatar_url),
+         caption = excluded.caption,
+         cover_url = COALESCE(excluded.cover_url, transcript_history_records.cover_url),
+         duration_seconds = excluded.duration_seconds,
+         dubbing_url = COALESCE(excluded.dubbing_url, transcript_history_records.dubbing_url),
+         video_url = COALESCE(excluded.video_url, transcript_history_records.video_url),
+         dash_video_url = COALESCE(excluded.dash_video_url, transcript_history_records.dash_video_url),
+         media_quality = COALESCE(excluded.media_quality, transcript_history_records.media_quality),
+         original_audio = COALESCE(excluded.original_audio, transcript_history_records.original_audio),
+         source_metadata_refreshed_at = excluded.source_metadata_refreshed_at,
+         source_urls_expires_at = excluded.source_urls_expires_at`;
+  const conflictClause = conflictKey === "work"
+    ? `ON CONFLICT(user_id, work_key) DO UPDATE SET${commonUpdates},
+         updated_at = excluded.updated_at`
+    : `ON CONFLICT(id) DO UPDATE SET${commonUpdates},
+         transcript_content = excluded.transcript_content,
+         transcript_segments = excluded.transcript_segments,
+         updated_at = excluded.updated_at
+       WHERE transcript_history_records.user_id = excluded.user_id`;
   const row = await queryRow<TranscriptHistoryRecordRow>(
     `INSERT INTO transcript_history_records (
        id, user_id, work_key, work_id, work_kind, input_url, final_url,
-       author_name, author_url, caption, session_name, duration_seconds,
+       author_name, author_url, avatar_url, caption, cover_url, session_name,
+       duration_seconds, dubbing_url, video_url, dash_video_url, media_quality,
+       original_audio, source_metadata_refreshed_at, source_urls_expires_at,
        transcript_content, transcript_segments, created_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $15)
-     ON CONFLICT(id) DO UPDATE SET
-       input_url = excluded.input_url,
-       final_url = excluded.final_url,
-       author_name = excluded.author_name,
-       author_url = excluded.author_url,
-       caption = excluded.caption,
-       duration_seconds = excluded.duration_seconds,
-       transcript_content = excluded.transcript_content,
-       transcript_segments = excluded.transcript_segments,
-       updated_at = excluded.updated_at
-     WHERE transcript_history_records.user_id = excluded.user_id
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23::jsonb, $24, $24)
+     ${conflictClause}
      RETURNING ${HISTORY_RECORD_COLUMNS}`,
     [
       input.id,
@@ -558,43 +472,80 @@ export async function upsertTranscriptHistoryRecord(
       input.finalUrl,
       input.authorName ?? null,
       input.authorUrl ?? null,
+      input.avatarUrl ?? null,
       title,
+      input.coverUrl ?? null,
       input.sessionName?.trim() || title,
       input.durationSeconds ?? null,
+      input.dubbingUrl ?? null,
+      input.videoUrl ?? null,
+      input.dashVideoUrl ?? null,
+      input.mediaQuality ?? null,
+      input.originalAudio ?? null,
+      input.sourceMetadataRefreshedAt ?? now,
+      input.sourceUrlsExpiresAt ?? null,
       input.transcriptContent,
       stringifyJson(input.transcriptSegments),
       now,
     ],
   );
   if (!row || row.user_id !== input.userId) {
-    throw new Error("转录历史保存失败。");
+    throw new Error(conflictKey === "work" ? "转录历史创建失败。" : "转录历史保存失败。");
   }
-  return mapTranscriptHistoryRecord(row);
+  return row;
 }
 
 export async function updateTranscriptHistoryRecordMetadata(input: {
   authorName?: string;
   authorUrl?: string;
+  avatarUrl?: string;
   caption: string;
+  coverUrl?: string;
+  dashVideoUrl?: string;
+  dubbingUrl?: string;
   durationSeconds?: number;
   historyRecordId: string;
+  mediaQuality?: string;
+  originalAudio?: string;
+  sourceMetadataRefreshedAt?: number;
+  sourceUrlsExpiresAt?: number;
   userId: string;
+  videoUrl?: string;
 }): Promise<TranscriptHistoryRecord | null> {
   const caption = requireHistoryCaption(input.caption);
+  const refreshedAt = input.sourceMetadataRefreshedAt ?? Date.now();
   const row = await queryRow<TranscriptHistoryRecordRow>(
     `UPDATE transcript_history_records
      SET author_name = COALESCE($1::text, author_name),
          author_url = COALESCE($2::text, author_url),
-         caption = $3::text,
-         duration_seconds = COALESCE($4::double precision, duration_seconds),
-         updated_at = $5::bigint
-     WHERE id = $6::text AND user_id = $7::text
+         avatar_url = $3::text,
+         caption = $4::text,
+         cover_url = $5::text,
+         dash_video_url = $6::text,
+         dubbing_url = $7::text,
+         duration_seconds = COALESCE($8::double precision, duration_seconds),
+         media_quality = $9::text,
+         original_audio = COALESCE($10::text, original_audio),
+         source_metadata_refreshed_at = $11::bigint,
+         source_urls_expires_at = $12::bigint,
+         video_url = $13::text,
+         updated_at = $14::bigint
+     WHERE id = $15::text AND user_id = $16::text
      RETURNING ${HISTORY_RECORD_COLUMNS}`,
     [
       input.authorName ?? null,
       input.authorUrl ?? null,
+      input.avatarUrl ?? null,
       caption,
+      input.coverUrl ?? null,
+      input.dashVideoUrl ?? null,
+      input.dubbingUrl ?? null,
       input.durationSeconds ?? null,
+      input.mediaQuality ?? null,
+      input.originalAudio ?? null,
+      refreshedAt,
+      input.sourceUrlsExpiresAt ?? null,
+      input.videoUrl ?? null,
       Date.now(),
       input.historyRecordId,
       input.userId,
@@ -902,34 +853,30 @@ function mapTranscriptHistoryRecord(row: TranscriptHistoryRecordRow): Transcript
   return {
     authorName: row.author_name ?? undefined,
     authorUrl: row.author_url ?? undefined,
+    avatarUrl: row.avatar_url ?? undefined,
     caption: requireStoredHistoryCaption(row.caption),
+    coverUrl: row.cover_url ?? undefined,
     createdAt: row.created_at,
+    dubbingUrl: row.dubbing_url ?? undefined,
     sessionName: row.session_name,
     durationSeconds: row.duration_seconds ?? undefined,
     finalUrl: row.final_url,
     id: row.id,
     inputUrl: row.input_url,
+    mediaQuality: row.media_quality ?? undefined,
+    originalAudio: row.original_audio ?? undefined,
     pinnedAt: row.pinned_at ?? undefined,
+    sourceMetadataRefreshedAt: row.source_metadata_refreshed_at ?? undefined,
+    sourceUrlsExpiresAt: row.source_urls_expires_at ?? undefined,
+    dashVideoUrl: row.dash_video_url ?? undefined,
     transcriptContent: row.transcript_content,
     transcriptSegments: parseJsonValue(row.transcript_segments) ?? undefined,
     updatedAt: row.updated_at,
     userId: row.user_id,
+    videoUrl: row.video_url ?? undefined,
     workId: row.work_id,
     workKey: row.work_key,
     workKind: row.work_kind,
-  };
-}
-
-function mapTranscriptHistoryAsset(row: TranscriptHistoryAssetRow): TranscriptHistoryAsset {
-  return {
-    assetKind: row.asset_kind,
-    contentType: row.content_type,
-    durationSeconds: row.duration_seconds ?? undefined,
-    historyRecordId: row.history_record_id,
-    objectKey: row.object_key,
-    sizeBytes: row.size_bytes,
-    updatedAt: row.updated_at,
-    verifiedAt: row.verified_at ?? undefined,
   };
 }
 

@@ -29,7 +29,6 @@ import {
   LogOut,
   Loader2,
   MessageCircle,
-  Pause,
   PencilLine,
   Pin,
   Play,
@@ -47,7 +46,6 @@ import {
   Trash2,
   Undo2,
   UserRound,
-  Volume2,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -80,7 +78,7 @@ import {
   type ResolvedDouyinWork,
   type TranscriptSegment,
 } from "@/types/douyin";
-import type { DouyinCommentsPayload } from "@/lib/douyin/comments";
+import type { CommentsPayload } from "@/lib/comment-model";
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
 import { DEFAULT_DASHSCOPE_ASR_PROFILE } from "@/lib/dashscope/model-config";
 import { clearProgressStartedAt, estimateMediaProcessingDurationSeconds, readProgressStartedAt } from "@/lib/douyin/cache-estimate";
@@ -94,6 +92,19 @@ import {
   writeClientSessionCache,
 } from "@/lib/transcript/client-session-cache";
 import {
+  type CachedMediaAsset,
+  type MediaPreparationApi,
+  useWorkPreparation,
+} from "@/lib/transcript/client-media-preparation";
+import {
+  compactHistoryListRecords,
+  HISTORY_LIST_CACHE_KEY,
+  TRANSCRIPT_HISTORY_CACHE_TTL_MS,
+  type TranscriptHistoryCache,
+  updateTranscriptHistoryCache,
+  WORKFLOW_CACHE_KEY,
+} from "@/lib/transcript/history-client-cache";
+import {
   cacheDownloadOrganization,
   saveToDownloadDirectory,
 } from "@/lib/browser-download-directory";
@@ -106,6 +117,7 @@ import {
 } from "@/lib/media/source";
 import { cn } from "@/lib/utils";
 import { AsrQuotaIndicator, type AsrQuota } from "@/components/asr-quota-indicator";
+import { AssetPreviewDialog } from "@/components/asset-preview-dialog";
 import { InvitationDialog } from "@/components/invitation-dialog";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { NetworkRetryButton } from "@/components/network-retry-button";
@@ -114,6 +126,7 @@ import {
   NETWORK_RETRY_ERROR_MESSAGE,
 } from "@/lib/http/retry";
 import { applyStreamTextEvent } from "@/lib/http/retry-ui";
+import { readSseJsonStream } from "@/lib/http/sse";
 
 type ApiError = {
   error: string;
@@ -266,19 +279,6 @@ type CurrentUser = {
   role?: "admin" | "user";
   username: string;
 };
-type ClientCacheAsset = "avatar" | MediaAssetKind;
-type CachedMediaAsset = {
-  downloadName: string;
-  error?: string;
-  errorCode?: string;
-  isLoading: boolean;
-  objectKey?: string;
-  url?: string;
-  verified?: boolean;
-  workKey: string;
-};
-const assetCacheMemory = new Map<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>();
-
 type TranscriptHistoryRecord = {
   authorName?: string;
   authorUrl?: string;
@@ -289,7 +289,16 @@ type TranscriptHistoryRecord = {
   finalUrl: string;
   id: string;
   inputUrl: string;
+  originalAudio?: string;
+  originalAudioUrl?: string;
+  originalAudioUrlExpiresAt?: number;
   pinnedAt?: number;
+  sourceMetadataRefreshedAt?: number;
+  sourceUrlsExpiresAt?: number;
+  avatarUrl?: string;
+  coverUrl?: string;
+  videoUrl?: string;
+  dubbingUrl?: string;
   transcriptContent: string;
   transcriptSegments?: TranscriptSegment[];
   updatedAt: number;
@@ -630,7 +639,7 @@ async function streamTranslationContent(input: {
     throwApiError(getApiError(payload), "翻译失败。");
   }
 
-  for await (const event of readJsonEventStream<TranslationStreamEvent>(response.body)) {
+  for await (const event of readSseJsonStream<TranslationStreamEvent>(response.body)) {
     if (event.type === "delta") {
       input.onDelta(event.key, event.value);
     } else if (event.type === "replace") {
@@ -677,7 +686,7 @@ async function streamSummaryContent(input: {
     throwApiError(getApiError(payload), "AI处理失败。");
   }
 
-  for await (const event of readJsonEventStream<SummaryStreamEvent>(response.body)) {
+  for await (const event of readSseJsonStream<SummaryStreamEvent>(response.body)) {
     if (event.type === "delta") {
       input.onDelta(event.value);
     } else if (event.type === "replace") {
@@ -776,29 +785,6 @@ async function fetchTranscriptHistoryList(query = ""): Promise<TranscriptHistory
   return "records" in payload ? payload.records : [];
 }
 
-const TRANSCRIPT_HISTORY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-const HISTORY_LIST_CACHE_KEY = "history-list";
-const WORKFLOW_CACHE_KEY = "current-workflow";
-
-type TranscriptHistoryCache = {
-  records: TranscriptHistoryRecord[];
-  refreshedAt: number;
-};
-
-function updateTranscriptHistoryCache(
-  userId: string,
-  update: (records: TranscriptHistoryRecord[]) => TranscriptHistoryRecord[],
-): void {
-  void readClientSessionCache<TranscriptHistoryCache>(userId, HISTORY_LIST_CACHE_KEY)
-    .then((cached) => cached
-      ? writeClientSessionCache(userId, HISTORY_LIST_CACHE_KEY, {
-          records: update(cached.records),
-          refreshedAt: Date.now(),
-        } satisfies TranscriptHistoryCache)
-      : undefined)
-    .catch(() => undefined);
-}
-
 async function fetchTranscriptHistoryDetail(id: string): Promise<TranscriptHistoryDetail> {
   const response = await fetch(`/api/transcript-history/${encodeURIComponent(id)}`, { cache: "no-store" });
   const payload = await readApiPayload(response, "转录历史加载失败。") as ApiError | TranscriptHistoryDetail;
@@ -892,57 +878,6 @@ async function cancelTranscribeJob(jobId: string): Promise<void> {
   }).catch(() => undefined);
 }
 
-async function* readJsonEventStream<T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split(/\r?\n\r?\n/u);
-      buffer = events.pop() ?? "";
-      for (const event of events) {
-        const parsed = parseJsonEvent<T>(event);
-        if (parsed) {
-          yield parsed;
-        }
-      }
-    }
-
-    buffer += decoder.decode();
-    const parsed = parseJsonEvent<T>(buffer);
-    if (parsed) {
-      yield parsed;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-function parseJsonEvent<T>(event: string): T | null {
-  const data = event
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart())
-    .join("\n")
-    .trim();
-  if (!data) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(data) as T;
-  } catch {
-    return null;
-  }
-}
-
 async function readClipboardMediaInput(): Promise<ClipboardMediaInput | null> {
   if (typeof window === "undefined" || !window.isSecureContext || !navigator.clipboard?.readText) {
     return null;
@@ -1013,6 +948,7 @@ const DOWNLOAD_ACTIONS: Array<{
   { asset: "cover", icon: ImageIcon, label: "下载封面", previewLabel: "预览封面" },
   { asset: "video", icon: Play, label: "下载视频", previewLabel: "观看视频" },
   { asset: "originalAudio", icon: AudioLines, label: "下载原声", previewLabel: "试听原声" },
+  { asset: "dubbing", icon: AudioLines, label: "下载配音", previewLabel: "试听配音" },
 ];
 
 const CLIPBOARD_PRIVACY_HINT = "自动粘贴功能：检测到剪贴板最新记录包含 HTTP/HTTPS 视频分享链接会自动填入输入框，但不会读取粘贴板历史记录，保护您的隐私。";
@@ -1505,6 +1441,17 @@ export default function HomePage() {
   }, []);
   const displayedWork = historyWork ?? work;
   const cachedAssetWorkKey = displayedWork ? getWorkKey(displayedWork) : "";
+  const mediaPreparationApi = useMemo<MediaPreparationApi>(() => ({
+    codedError,
+    createAuthRequiredError: () => new AuthRequiredError(),
+    getApiError,
+    isAuthRequiredError,
+    isUnauthenticatedApiResponse,
+    readApiPayload,
+    readUserFacingError,
+    readUserFacingErrorCode,
+    throwApiError,
+  }), []);
   const {
     avatar: cachedAvatar,
     avatarUrl: cachedAuthorAvatarUrl,
@@ -1512,13 +1459,15 @@ export default function HomePage() {
     loadingWorkKeys,
     retryAsset,
     retryWork,
-  } = useWorkPreparation(
-    workflowWorks,
-    cachedAssetWorkKey,
-    historyDetail?.record.id ?? activeSession.historyRecordId,
-    applyWorkMetadata,
-    redirectToLogin,
-  );
+  } = useWorkPreparation({
+    activeHistoryRecordId: historyDetail?.record.id ?? activeSession.historyRecordId,
+    activeWorkKey: cachedAssetWorkKey,
+    api: mediaPreparationApi,
+    onAuthRequired: redirectToLogin,
+    onMetadata: applyWorkMetadata,
+    userId: currentUser?.id ?? "",
+    works: workflowWorks,
+  });
   const isHistoryMode = Boolean(historyDetail);
 
   const normalizedInput = input.trim();
@@ -1719,7 +1668,7 @@ export default function HomePage() {
 
     const normalizedQuery = query.trim();
     const cachedHistory = !normalizedQuery
-      ? await readClientSessionCache<TranscriptHistoryCache>(currentUser.id, HISTORY_LIST_CACHE_KEY).catch(() => null)
+      ? await readClientSessionCache<TranscriptHistoryCache<TranscriptHistoryRecord>>(currentUser.id, HISTORY_LIST_CACHE_KEY).catch(() => null)
       : null;
     if (cachedHistory) {
       setHistoryList(cachedHistory.records);
@@ -1736,9 +1685,9 @@ export default function HomePage() {
       const records = await fetchTranscriptHistoryList(normalizedQuery);
       if (!normalizedQuery) {
         void writeClientSessionCache(currentUser.id, HISTORY_LIST_CACHE_KEY, {
-          records,
+          records: compactHistoryListRecords(records),
           refreshedAt: Date.now(),
-        } satisfies TranscriptHistoryCache).catch(() => undefined);
+        } satisfies TranscriptHistoryCache<TranscriptHistoryRecord>).catch(() => undefined);
       }
       if (requestId !== historyListRequestIdRef.current) {
         return;
@@ -1918,7 +1867,7 @@ export default function HomePage() {
       await deleteTranscriptHistory(id);
       setHistoryList((current) => current.filter((record) => record.id !== id));
       if (currentUser) {
-        updateTranscriptHistoryCache(currentUser.id, (records) => records.filter((record) => record.id !== id));
+        updateTranscriptHistoryCache<TranscriptHistoryRecord>(currentUser.id, (records) => records.filter((record) => record.id !== id));
         void deleteClientSessionCache(currentUser.id, `history-detail:${id}`).catch(() => undefined);
       }
       if (historyDetail?.record.id === id) {
@@ -1934,7 +1883,7 @@ export default function HomePage() {
       records.map((record) => record.id === nextRecord.id ? nextRecord : record);
     setHistoryList(replace);
     if (currentUser) {
-      updateTranscriptHistoryCache(currentUser.id, replace);
+      updateTranscriptHistoryCache<TranscriptHistoryRecord>(currentUser.id, replace);
     }
   }
 
@@ -2040,7 +1989,7 @@ export default function HomePage() {
     ].sort((first, second) => second.updatedAt - first.updatedAt);
     setHistoryList(upsert);
     if (currentUser) {
-      updateTranscriptHistoryCache(currentUser.id, upsert);
+      updateTranscriptHistoryCache<TranscriptHistoryRecord>(currentUser.id, upsert);
     }
   }, [currentUser]);
 
@@ -2506,7 +2455,7 @@ export default function HomePage() {
       throwApiError(getApiError(payload), fallback);
     }
 
-    for await (const event of readJsonEventStream<TranscribeStreamEvent>(response.body)) {
+    for await (const event of readSseJsonStream<TranscribeStreamEvent>(response.body)) {
       if (event.type === "postprocess_start") {
         setLiveTranscribeSessions((current) => {
           const session = current[sessionContext.sessionId];
@@ -2888,7 +2837,7 @@ export default function HomePage() {
         >
           {activeKind ? (
             <div className="relative z-10 px-4 pt-4 sm:px-5 sm:pt-5">
-              <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-2 gap-y-4 text-left text-sm xl:flex-nowrap">
+              <div className="flex min-h-[3.25rem] flex-wrap items-start gap-x-3 gap-y-4 text-left text-sm">
                 <dl className="contents">
                   <InfoRow
                     className="w-24 shrink-0"
@@ -2920,6 +2869,7 @@ export default function HomePage() {
                         width={24}
                         height={24}
                         unoptimized
+                        onError={() => retryAsset(activeWorkKey, "avatar")}
                         className="size-6 shrink-0 rounded-full object-cover"
                       />
                     ) : null}
@@ -2936,7 +2886,7 @@ export default function HomePage() {
                   <WorkDownloadActions
                     key={`${historyDetail?.record.id ?? activeSession.historyRecordId}:${activeWorkKey}`}
                     cachedAssets={cachedAssets}
-                    commentsEnabled={douyinAccountServicesEnabled && displayWork.source !== "bilibili"}
+                    commentsEnabled={displayWork.source === "bilibili" || douyinAccountServicesEnabled}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
                     onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
@@ -4633,272 +4583,6 @@ function SourceIcon({ className, source }: { className?: string; source: MediaSo
   );
 }
 
-type PreparationAssetPayload = AssetPayload & {
-  asset: ClientCacheAsset;
-  durationSeconds?: number;
-  verified?: boolean;
-};
-
-type PreparationEvent =
-  | { metadata: WorkMetadataPatch; type: "metadata" }
-  | { asset: PreparationAssetPayload; type: "asset" }
-  | { asset: ClientCacheAsset; error: string; code?: string; type: "asset-error" }
-  | { type: "done" }
-  | { error: string; code?: string; type: "error" };
-
-function useWorkPreparation(
-  works: ResolvedDouyinWork[],
-  activeWorkKey: string,
-  activeHistoryRecordId: string,
-  onMetadata: (workKey: string, metadata: WorkMetadataPatch) => void,
-  onAuthRequired: () => void,
-): {
-  avatar?: CachedMediaAsset;
-  avatarUrl?: string;
-  cachedAssets: Partial<Record<MediaAssetKind, CachedMediaAsset>>;
-  loadingWorkKeys: ReadonlySet<string>;
-  retryAsset: (workKey: string, asset: ClientCacheAsset) => void;
-  retryWork: (workKey: string) => void;
-} {
-  const [cachedAssetsByWorkKey, setCachedAssetsByWorkKey] = useState<
-    Record<string, Partial<Record<ClientCacheAsset, CachedMediaAsset>>>
-  >(() => Object.fromEntries(assetCacheMemory));
-  const startedWorkKeysRef = useRef(new Set<string>());
-  const controllersRef = useRef(new Map<string, AbortController>());
-  const activeWork = useMemo(
-    () => works.find((candidate) => getWorkKey(candidate) === activeWorkKey),
-    [activeWorkKey, works],
-  );
-  const preparationKey = `${activeHistoryRecordId}:${activeWorkKey}`;
-  const retryAsset = useCallback((workKey: string, assetKind: ClientCacheAsset) => {
-    const existing = cachedAssetsByWorkKey[workKey]?.[assetKind];
-    const work = works.find((candidate) => getWorkKey(candidate) === workKey);
-    if (!activeHistoryRecordId || !work || !existing?.error || existing.url || existing.isLoading) return;
-
-    setCachedAssetsByWorkKey((current) => ({
-      ...current,
-      [workKey]: {
-        ...current[workKey],
-        [assetKind]: {
-          downloadName: assetKind === "avatar" ? "" : buildCachedAssetFilename(work, assetKind),
-          error: existing.error,
-          errorCode: existing.errorCode,
-          isLoading: true,
-          workKey,
-        },
-      },
-    }));
-
-    void fetch(
-      `/api/transcript-history/${encodeURIComponent(activeHistoryRecordId)}/assets/${encodeURIComponent(assetKind)}`,
-      { cache: "no-store" },
-    ).then(async (response) => {
-      const payload = await readApiPayload(response, "网络连接失败，请检查网络后重试。") as
-        | ApiError
-        | { asset: { contentType: string; objectKey: string; url: string; verified?: boolean } };
-      if (isUnauthenticatedApiResponse(response, payload)) throw new AuthRequiredError();
-      if (!response.ok || !("asset" in payload)) {
-        throwApiError(getApiError(payload), "网络连接失败，请检查网络后重试。");
-      }
-      setCachedAssetsByWorkKey((current) => ({
-        ...current,
-        [workKey]: {
-          ...current[workKey],
-          [assetKind]: {
-            downloadName: assetKind === "avatar"
-              ? ""
-              : buildCachedAssetFilename(work, assetKind, payload.asset.contentType),
-            isLoading: false,
-            objectKey: payload.asset.objectKey,
-            url: payload.asset.url,
-            verified: assetKind === "originalAudio" ? payload.asset.verified === true : undefined,
-            workKey,
-          },
-        },
-      }));
-    }).catch((error: unknown) => {
-      if (isAuthRequiredError(error)) {
-        onAuthRequired();
-        return;
-      }
-      setCachedAssetsByWorkKey((current) => ({
-        ...current,
-        [workKey]: {
-          ...current[workKey],
-          [assetKind]: {
-            downloadName: assetKind === "avatar" ? "" : buildCachedAssetFilename(work, assetKind),
-            error: readUserFacingError(error, "网络连接失败，请检查网络后重试。"),
-            errorCode: readUserFacingErrorCode(error),
-            isLoading: false,
-            workKey,
-          },
-        },
-      }));
-    });
-  }, [activeHistoryRecordId, cachedAssetsByWorkKey, onAuthRequired, works]);
-  const retryWork = useCallback((workKey: string) => {
-    for (const [assetKind, asset] of Object.entries(cachedAssetsByWorkKey[workKey] ?? {})) {
-      if (asset?.error && !asset.url) retryAsset(workKey, assetKind as ClientCacheAsset);
-    }
-  }, [cachedAssetsByWorkKey, retryAsset]);
-
-  useEffect(() => {
-    for (const [key, assets] of Object.entries(cachedAssetsByWorkKey)) assetCacheMemory.set(key, assets);
-  }, [cachedAssetsByWorkKey]);
-
-  useEffect(() => {
-    const controllers = controllersRef.current;
-    const startedWorkKeys = startedWorkKeysRef.current;
-    return () => {
-      controllers.forEach((controller) => controller.abort());
-      controllers.clear();
-      startedWorkKeys.clear();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!activeWork || startedWorkKeysRef.current.has(preparationKey)) return;
-    startedWorkKeysRef.current.add(preparationKey);
-    const controller = new AbortController();
-    controllersRef.current.set(preparationKey, controller);
-    const isBilibili = activeWork.source === "bilibili";
-    const assetKinds: ClientCacheAsset[] = isBilibili
-      ? ["avatar", "cover", "originalAudio"]
-      : ["avatar", "cover", "video", "originalAudio"];
-
-    queueMicrotask(() => {
-      if (controller.signal.aborted) return;
-      setCachedAssetsByWorkKey((current) => ({
-        ...current,
-        [activeWorkKey]: Object.fromEntries(assetKinds.map((asset) => {
-          const existing = current[activeWorkKey]?.[asset];
-          return [asset, existing?.url && !existing.error
-            ? existing
-            : {
-                downloadName: asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, asset),
-                isLoading: true,
-                workKey: activeWorkKey,
-              }];
-        })),
-      }));
-    });
-
-    void fetch(`/api/${activeWork.source ?? "douyin"}/prepare`, {
-      body: JSON.stringify({
-        finalUrl: activeWork.finalUrl,
-        historyRecordId: activeHistoryRecordId,
-        id: activeWork.id,
-        kind: activeWork.kind,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok || !response.body) {
-        const payload = await readApiPayload(response, "作品资源准备失败。");
-        if (isUnauthenticatedApiResponse(response, payload)) throw new AuthRequiredError();
-        throwApiError(getApiError(payload), "作品资源准备失败。");
-      }
-
-      for await (const event of readJsonEventStream<PreparationEvent>(response.body)) {
-        if (event.type === "metadata") {
-          onMetadata(activeWorkKey, event.metadata);
-          continue;
-        }
-        if (event.type === "asset") {
-          const asset = event.asset;
-          setCachedAssetsByWorkKey((current) => ({
-            ...current,
-            [activeWorkKey]: {
-              ...current[activeWorkKey],
-              [asset.asset]: {
-                downloadName: asset.asset === "avatar"
-                  ? ""
-                  : buildCachedAssetFilename(activeWork, asset.asset, asset.contentType),
-                isLoading: false,
-                objectKey: asset.objectKey,
-                url: asset.url,
-                verified: asset.asset === "originalAudio" ? asset.verified === true : undefined,
-                workKey: activeWorkKey,
-              },
-            },
-          }));
-          continue;
-        }
-        if (event.type === "asset-error") {
-          setCachedAssetsByWorkKey((current) => ({
-            ...current,
-            [activeWorkKey]: {
-              ...current[activeWorkKey],
-              [event.asset]: {
-                downloadName: event.asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, event.asset),
-                error: event.error,
-                errorCode: event.code,
-                isLoading: false,
-                workKey: activeWorkKey,
-              },
-            },
-          }));
-          continue;
-        }
-        if (event.type === "error") throw codedError(event.error, event.code);
-      }
-    }).catch((error: unknown) => {
-      if (controller.signal.aborted) return;
-      if (isAuthRequiredError(error)) {
-        onAuthRequired();
-        return;
-      }
-      const message = readUserFacingError(error, "作品资源准备失败。");
-      setCachedAssetsByWorkKey((current) => ({
-        ...current,
-        [activeWorkKey]: Object.fromEntries(assetKinds.map((asset) => {
-          const existing = current[activeWorkKey]?.[asset];
-          return [asset, existing?.url
-            ? existing
-            : {
-                downloadName: asset === "avatar" ? "" : buildCachedAssetFilename(activeWork, asset),
-                error: message,
-                errorCode: readUserFacingErrorCode(error),
-                isLoading: false,
-                workKey: activeWorkKey,
-              }];
-        })),
-      }));
-    }).finally(() => {
-      if (controllersRef.current.get(preparationKey) === controller) {
-        controllersRef.current.delete(preparationKey);
-      }
-    });
-  }, [activeHistoryRecordId, activeWork, activeWorkKey, onAuthRequired, onMetadata, preparationKey]);
-
-  const loadingWorkKeys = useMemo(() => new Set(
-    Object.entries(cachedAssetsByWorkKey)
-      .filter(([, assets]) => Object.values(assets).some((asset) => asset?.isLoading))
-      .map(([key]) => key),
-  ), [cachedAssetsByWorkKey]);
-
-  return {
-    avatar: cachedAssetsByWorkKey[activeWorkKey]?.avatar,
-    avatarUrl: cachedAssetsByWorkKey[activeWorkKey]?.avatar?.url,
-    cachedAssets: {
-      cover: cachedAssetsByWorkKey[activeWorkKey]?.cover,
-      originalAudio: cachedAssetsByWorkKey[activeWorkKey]?.originalAudio,
-      video: cachedAssetsByWorkKey[activeWorkKey]?.video,
-    },
-    loadingWorkKeys,
-    retryAsset,
-    retryWork,
-  };
-}
-
-type AssetPayload = {
-  contentType: string;
-  objectKey: string;
-  sizeBytes: number;
-  url: string;
-};
-
 function WorkDownloadActions({
   cachedAssets,
   commentsEnabled,
@@ -4913,18 +4597,20 @@ function WorkDownloadActions({
   work: ResolvedDouyinWork;
 }) {
   const workKey = getWorkKey(work);
-  const actions = DOWNLOAD_ACTIONS;
+  const actions = work.source === "douyin"
+    ? DOWNLOAD_ACTIONS
+    : DOWNLOAD_ACTIONS.filter((action) => action.asset !== "dubbing");
   const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
   const [downloadError, setDownloadError] = useState("");
   const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
   const [loadingAssets, setLoadingAssets] = useState<ReadonlySet<MediaAssetKind>>(() => new Set());
 
-  async function ensureAssetUrl(asset: MediaAssetKind, method: "GET" | "POST" = "GET"): Promise<string> {
+  async function ensureAssetUrl(asset: MediaAssetKind): Promise<string> {
     setLoadingAssets((current) => new Set(current).add(asset));
     try {
       const response = await fetch(
         `/api/transcript-history/${encodeURIComponent(historyRecordId)}/assets/${encodeURIComponent(asset)}`,
-        { cache: "no-store", method },
+        { cache: "no-store" },
       );
       const payload = await readApiPayload(response, "资源准备失败。") as ApiError | { asset: { url: string } };
       if (!response.ok || !("asset" in payload)) {
@@ -4948,8 +4634,12 @@ function WorkDownloadActions({
   return (
     <>
       {actions.map((action) => {
-        const assetLabel = action.asset === "originalAudio" ? "音频" : action.label.replace("下载", "");
-        const previewActionLabel = action.asset === "originalAudio" ? "试听" : "预览";
+        const assetLabel = action.asset === "originalAudio"
+          ? "音频"
+          : action.asset === "dubbing"
+            ? "配音"
+            : action.label.replace("下载", "");
+        const previewActionLabel = action.asset === "originalAudio" || action.asset === "dubbing" ? "试听" : "预览";
         const maybeCached = cachedAssets[action.asset];
         const cached = maybeCached?.workKey === workKey ? maybeCached : undefined;
         const availableUrl = freshAssetUrls[action.asset] ?? cached?.url;
@@ -4963,9 +4653,11 @@ function WorkDownloadActions({
         return (
           <div
             key={action.asset}
-            className="w-[calc(50%_-_0.625rem)] min-w-32 shrink-0 text-left sm:w-32"
+            className="w-fit min-w-0 shrink-0 text-left"
           >
-            <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">{assetLabel}</div>
+            <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
+              <span>{assetLabel}</span>
+            </div>
             <div className="flex min-h-8 min-w-0 items-center gap-1.5">
               <button
                 type="button"
@@ -5003,38 +4695,7 @@ function WorkDownloadActions({
                   isRetrying={isCaching}
                   onRetry={() => onRetryAsset(action.asset)}
                 />
-              ) : isCaching || !availableUrl ? (
-                <button
-                  type="button"
-                  disabled
-                  className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-muted-foreground opacity-60"
-                  title="正在准备资源"
-                >
-                  <Download className="size-3.5" aria-hidden="true" />
-                  下载
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDownloadError("");
-                    void ensureAssetUrl(action.asset)
-                      .then((url) => downloadCachedAsset(
-                        url,
-                        cached?.downloadName ?? buildCachedAssetFilename(work, action.asset),
-                        work,
-                      ))
-                      .catch((error) => {
-                        setDownloadError(readUserFacingError(error, "文件保存失败。"));
-                      });
-                  }}
-                  className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96]"
-                  title={downloadError || action.label}
-                >
-                  <Download className="size-3.5" aria-hidden="true" />
-                  下载
-                </button>
-              )}
+              ) : null}
             </div>
           </div>
         );
@@ -5052,10 +4713,17 @@ function WorkDownloadActions({
             <AssetPreviewDialog
               action={preview}
               previewUrl={previewUrl}
-              downloadName={previewCached?.downloadName}
               downloadUrl={previewUrl}
-              work={work}
+              onDownload={() => downloadCachedAsset(
+                previewUrl,
+                previewCached?.downloadName ?? `echolens-${work.id}-${preview.asset}`,
+                work,
+              )}
               onClose={() => setPreview(null)}
+              onResourceError={() => {
+                setPreview(null);
+                onRetryAsset(preview.asset);
+              }}
             />,
             document.body,
           )
@@ -5069,7 +4737,7 @@ type CommentCollectionEvent =
   | { type: "done" }
   | { code: string; error: string; type: "error" };
 
-const DOUYIN_CREDENTIAL_ERROR_CODES = new Set([
+const CREDENTIAL_ERROR_CODES = new Set([
   "CREDENTIAL_INVALID",
   "CREDENTIAL_MISSING",
   "CREDENTIAL_UNVERIFIED",
@@ -5088,7 +4756,7 @@ function CommentActions({
   work: ResolvedDouyinWork;
 }) {
   const [metadata, setMetadata] = useState<CommentMetadata | null>(null);
-  const [payload, setPayload] = useState<DouyinCommentsPayload | null>(null);
+  const [payload, setPayload] = useState<CommentsPayload | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [isCollecting, setIsCollecting] = useState(false);
   const [progress, setProgress] = useState({ commentCount: 0, page: 0 });
@@ -5115,7 +4783,7 @@ function CommentActions({
     }
     const result = await readApiPayload(response, "评论加载失败。") as
       | ApiError
-      | { payload: DouyinCommentsPayload };
+      | { payload: CommentsPayload };
     if (!response.ok || !("payload" in result)) {
       throw new Error(getApiError(result)?.error || "评论加载失败。");
     }
@@ -5150,7 +4818,7 @@ function CommentActions({
         const apiError = getApiError(result);
         throw codedError(apiError?.error || "评论采集失败。", apiError?.code);
       }
-      for await (const event of readJsonEventStream<CommentCollectionEvent>(response.body)) {
+      for await (const event of readSseJsonStream<CommentCollectionEvent>(response.body)) {
         if (event.type === "progress") {
           setProgress({ commentCount: event.commentCount, page: event.page });
         } else if (event.type === "done") {
@@ -5160,8 +4828,8 @@ function CommentActions({
         }
       }
     } catch (collectionError) {
-      if (DOUYIN_CREDENTIAL_ERROR_CODES.has(readUserFacingErrorCode(collectionError) ?? "")) {
-        window.location.assign("/settings?section=douyin");
+      if (CREDENTIAL_ERROR_CODES.has(readUserFacingErrorCode(collectionError) ?? "")) {
+        window.location.assign(`/settings?section=${work.source === "bilibili" ? "bilibili" : "douyin"}`);
         return;
       }
       setError(readUserFacingError(collectionError, "评论采集失败。"));
@@ -5185,7 +4853,7 @@ function CommentActions({
 
   return (
     <>
-      <div className="w-[calc(50%_-_0.625rem)] min-w-32 shrink-0 text-left sm:w-32">
+      <div className="w-fit min-w-0 shrink-0 text-left">
         <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground">评论</div>
         <div className="flex min-h-8 min-w-0 items-center gap-1.5">
           <button
@@ -5199,16 +4867,6 @@ function CommentActions({
               ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
               : <MessageCircle className="size-4" aria-hidden="true" />}
             <span>预览</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => void downloadComments()}
-            disabled={!metadata || isCollecting}
-            className="inline-flex h-7 w-14 shrink-0 items-center justify-center gap-1 rounded-md text-xs font-semibold text-cyan transition hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:text-muted-foreground disabled:opacity-60"
-            title={metadata ? "下载评论 JSON" : "请先采集评论"}
-          >
-            <Download className="size-3.5" aria-hidden="true" />
-            下载
           </button>
         </div>
       </div>
@@ -5259,7 +4917,7 @@ function CommentPreviewDialog({
   onClose: () => void;
   onCollect: () => void;
   onDownload: () => void;
-  payload: DouyinCommentsPayload | null;
+  payload: CommentsPayload | null;
   progress: { commentCount: number; page: number };
 }) {
   useEffect(() => {
@@ -5286,7 +4944,8 @@ function CommentPreviewDialog({
               <button
                 type="button"
                 onClick={onDownload}
-                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
+                disabled={isCollecting}
+                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber disabled:cursor-not-allowed disabled:text-muted-foreground disabled:opacity-60"
                 aria-label="下载评论 JSON"
                 title="下载评论 JSON"
               >
@@ -5382,366 +5041,6 @@ function CommentPreviewDialog({
       </div>
     </div>
   );
-}
-
-function buildCachedAssetFilename(
-  work: { id: string },
-  asset: MediaAssetKind,
-  contentType = "",
-): string {
-  return `echolens-${work.id}-${asset}.${readCachedAssetExtension(asset, contentType)}`;
-}
-
-function readCachedAssetExtension(asset: MediaAssetKind, contentType: string): string {
-  if (contentType.includes("webp")) {
-    return "webp";
-  }
-  if (contentType.includes("png")) {
-    return "png";
-  }
-  if (contentType.includes("jpeg") || contentType.includes("jpg")) {
-    return "jpg";
-  }
-  if (contentType.includes("wav")) {
-    return "wav";
-  }
-  if (contentType.includes("mpeg")) {
-    return "mp3";
-  }
-  if (contentType.includes("mp4") && asset === "originalAudio") {
-    return "m4a";
-  }
-  if (contentType.includes("mp4")) {
-    return "mp4";
-  }
-
-  return asset === "cover" ? "jpg" : asset === "originalAudio" ? "m4a" : "mp4";
-}
-
-function AssetPreviewDialog({
-  action,
-  downloadName,
-  previewUrl,
-  downloadUrl,
-  work,
-  onClose,
-}: {
-  action: (typeof DOWNLOAD_ACTIONS)[number];
-  downloadName?: string;
-  previewUrl: string;
-  downloadUrl: string;
-  work: ResolvedDouyinWork;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [downloadError, setDownloadError] = useState("");
-  const canCopyCover = action.asset === "cover";
-
-  useEffect(() => {
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
-
-  async function copyCover() {
-    const absoluteDownloadUrl = new URL(downloadUrl, window.location.origin).toString();
-    try {
-      const response = await fetch(previewUrl);
-      const blob = await response.blob();
-      if (blob.type.startsWith("image/") && "ClipboardItem" in window) {
-        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      } else {
-        await navigator.clipboard.writeText(absoluteDownloadUrl);
-      }
-    } catch {
-      await navigator.clipboard.writeText(absoluteDownloadUrl);
-    }
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-[140] flex items-end justify-center overflow-hidden bg-[#020409] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:items-center sm:px-4 sm:py-6"
-      role="dialog"
-      aria-modal="true"
-      aria-label={action.previewLabel}
-    >
-      <div className="max-h-[calc(100dvh_-_1.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] w-full max-w-3xl overflow-hidden rounded-lg border border-white/20 bg-background shadow-2xl shadow-black/40 sm:max-h-[calc(100dvh_-_3rem)]">
-        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-          <div className="flex min-w-0 items-center gap-2 font-semibold">
-            <action.icon className="size-4 shrink-0 text-cyan" aria-hidden="true" />
-            <span className="truncate">{action.previewLabel}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            {canCopyCover ? (
-              <button
-                type="button"
-                onClick={() => void copyCover()}
-                className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
-                aria-label={copied ? "已复制封面" : "复制封面"}
-                title={copied ? "已复制" : "复制封面"}
-              >
-                {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => {
-                setDownloadError("");
-                void downloadCachedAsset(downloadUrl, downloadName ?? `echolens-${work.id}-${action.asset}`, work)
-                  .catch((error) => setDownloadError(readUserFacingError(error, "文件保存失败。")));
-              }}
-              className="inline-flex size-8 items-center justify-center rounded-md text-cyan transition hover:bg-cyan/[0.08] hover:text-amber"
-              aria-label={action.label}
-              title={downloadError || action.label}
-            >
-              <Download className="size-4" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-              aria-label="关闭预览"
-              title="关闭"
-            >
-              <X className="size-4" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-        {downloadError ? (
-          <p className="border-b border-white/10 px-4 py-2 text-xs font-medium text-rose-400" role="alert">
-            {downloadError}
-          </p>
-        ) : null}
-        <div className="max-h-[calc(100dvh_-_5.5rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] overflow-auto bg-black/25 p-3 sm:max-h-[calc(100dvh_-_7rem)] sm:p-4">
-          <AssetPreviewContent asset={action.asset} url={previewUrl} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AssetPreviewContent({ asset, url }: { asset: MediaAssetKind; url: string }) {
-  if (asset === "cover") {
-    return <CoverPreview key={url} url={url} />;
-  }
-
-  if (asset === "video") {
-    return <VideoPreview key={url} url={url} />;
-  }
-
-  return <AudioPreview key={url} url={url} />;
-}
-
-function CoverPreview({ url }: { url: string }) {
-  const [loaded, setLoaded] = useState(false);
-
-  return (
-    <div className="relative mx-auto max-w-2xl overflow-hidden rounded-md bg-black/40">
-      {!loaded ? (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 backdrop-blur-[2px]">
-          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin text-cyan" />
-            <LoadingText>资源加载中</LoadingText>
-          </div>
-        </div>
-      ) : null}
-      <Image
-        src={url}
-        alt="封面预览"
-        width={1200}
-        height={675}
-        unoptimized
-        onLoad={() => setLoaded(true)}
-        className={cn("h-auto max-h-[68dvh] w-full object-contain transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
-      />
-    </div>
-  );
-}
-
-function VideoPreview({ url }: { url: string }) {
-  const [loaded, setLoaded] = useState(false);
-
-  return (
-    <div className="relative overflow-hidden rounded-md bg-black/40">
-      {!loaded ? (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 backdrop-blur-[2px]">
-          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin text-cyan" />
-            <LoadingText>视频加载中</LoadingText>
-          </div>
-        </div>
-      ) : null}
-      <video
-        src={url}
-        controls
-        preload="metadata"
-        playsInline
-        onLoadedMetadata={() => setLoaded(true)}
-        onCanPlay={() => setLoaded(true)}
-        className={cn("max-h-[68dvh] w-full rounded-md bg-black transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
-      />
-    </div>
-  );
-}
-
-function AudioPreview({ url }: { url: string }) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [playing, setPlaying] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [gain, setGain] = useState(1);
-
-  function syncMetadata() {
-    const audio = audioRef.current;
-    if (!audio) {
-      return;
-    }
-    setError(null);
-    setLoaded(true);
-    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
-  }
-
-  function syncTime() {
-    setCurrentTime(audioRef.current?.currentTime ?? 0);
-  }
-
-  function syncGain() {
-    const audio = audioRef.current;
-    if (audio?.muted) setGain(0);
-  }
-
-  async function togglePlayback() {
-    const audio = audioRef.current;
-    if (!audio) {
-      return;
-    }
-
-    if (audio.paused) {
-      try {
-        await audio.play();
-      } catch {
-        setError("音频播放失败，请重新打开预览后再试。");
-      }
-    } else {
-      audio.pause();
-    }
-  }
-
-  function seek(value: string) {
-    const audio = audioRef.current;
-    if (!audio || !duration) {
-      return;
-    }
-    const nextTime = Number(value);
-    audio.currentTime = nextTime;
-    setCurrentTime(nextTime);
-  }
-
-  function changeGain(value: string) {
-    const audio = audioRef.current;
-    const nextGain = Math.min(1, Math.max(0, Number(value)));
-    setGain(nextGain);
-    if (!audio) {
-      return;
-    }
-    audio.volume = nextGain;
-    audio.muted = nextGain === 0;
-  }
-
-  return (
-    <div className="relative rounded-md bg-[linear-gradient(180deg,rgb(255_255_255_/_0.045),rgb(255_255_255_/_0.018))] p-3 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.04)] sm:p-4">
-      {error || !loaded ? (
-        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-black/45 backdrop-blur-[2px]">
-          <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-background/70 px-3 py-2 text-sm text-muted-foreground">
-            {error ? <AlertCircle className="size-4 text-amber" /> : <Loader2 className="size-4 animate-spin text-cyan" />}
-            {error ?? <LoadingText>音频加载中</LoadingText>}
-          </div>
-        </div>
-      ) : null}
-      <audio
-        ref={audioRef}
-        crossOrigin="anonymous"
-        src={url}
-        preload="metadata"
-        onLoadedMetadata={syncMetadata}
-        onCanPlay={syncMetadata}
-        onTimeUpdate={syncTime}
-        onVolumeChange={syncGain}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
-        onError={() => {
-          setPlaying(false);
-          setLoaded(false);
-          setError("音频资源加载失败。");
-        }}
-      />
-      <div className={cn("grid min-h-14 gap-3 transition-opacity duration-200 md:grid-cols-[minmax(0,1fr)_12rem] md:items-center", loaded && !error ? "opacity-100" : "opacity-0")}>
-        <div className="grid min-w-0 grid-cols-[auto_auto_minmax(8rem,1fr)_auto] items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void togglePlayback()}
-            disabled={!loaded || Boolean(error)}
-            className="inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-cyan/10 text-cyan transition hover:bg-cyan/15 hover:text-amber active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
-            aria-label={playing ? "暂停音频" : "播放音频"}
-            title={playing ? "暂停" : "播放"}
-          >
-            {playing ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}
-          </button>
-          <span className="shrink-0 text-sm font-medium tabular-nums text-foreground/90">{formatMediaTime(currentTime)}</span>
-          <input
-            type="range"
-            min="0"
-            max={duration || 0}
-            step="0.01"
-            value={duration ? Math.min(currentTime, duration) : 0}
-            onChange={(event) => seek(event.currentTarget.value)}
-            disabled={!loaded || !duration}
-            className="audio-progress h-2 min-w-0 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-            aria-label="音频播放进度"
-          />
-          <span className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">{formatMediaTime(duration)}</span>
-        </div>
-        <div className="grid min-w-0 grid-cols-[auto_minmax(5rem,1fr)_2.5rem] items-center gap-2 md:min-w-48">
-          <Volume2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={gain}
-            onChange={(event) => changeGain(event.currentTarget.value)}
-            disabled={!loaded || Boolean(error)}
-            className="audio-progress h-2 min-w-0 cursor-pointer appearance-none rounded-full bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-            aria-label="音频音量"
-          />
-          <span className="shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-            {Math.round(gain * 100)}%
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function formatMediaTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return "0:00";
-  }
-
-  const totalSeconds = Math.floor(seconds);
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = totalSeconds % 60;
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 function orderResults(

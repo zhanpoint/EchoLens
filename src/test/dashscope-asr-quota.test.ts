@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/dashscope/user-credential", () => ({
+  readDashScopeApiKeyForUser: vi.fn(async () => process.env.DASHSCOPE_API_KEY),
+}));
+
 vi.mock("@/lib/transcript/db", () => ({
   attachAsrTaskProviderTask: vi.fn(async () => true),
   markAsrTaskFailed: vi.fn(async () => true),

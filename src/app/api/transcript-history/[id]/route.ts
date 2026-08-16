@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
+import { createOssSignedUrlWithExpiration } from "@/lib/oss/object-store";
 import {
-  listTranscriptHistoryAssets,
   listTranscriptHistorySummaries,
   readTranscriptHistoryRecord,
   renameTranscriptHistoryRecord,
@@ -51,12 +51,17 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "转录历史不存在。" }, { status: 404 });
   }
 
+  const originalAudio = record.originalAudio
+    ? createOssSignedUrlWithExpiration(record.originalAudio)
+    : undefined;
   return NextResponse.json({
-    assets: await listTranscriptHistoryAssets({
-      historyRecordId: id,
-      userId: user.id,
-    }),
-    record,
+    record: {
+      ...record,
+      ...(originalAudio ? {
+        originalAudioUrl: originalAudio.url,
+        originalAudioUrlExpiresAt: originalAudio.expiresAt,
+      } : {}),
+    },
     summaries: await listTranscriptHistorySummaries({
       historyRecordId: id,
       userId: user.id,

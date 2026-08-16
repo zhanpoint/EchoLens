@@ -13,6 +13,8 @@ import {
   DouyinResolveError,
   resolveDouyinUrl,
 } from "@/lib/douyin/url";
+import { markDouyinCredentialInvalid, readDouyinCredentialState } from "@/lib/douyin/account";
+import { DouyinMetadataError } from "@/lib/douyin/detail";
 import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
 import {
   MediaRedirectError,
@@ -71,7 +73,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ sameAsCurrent: true });
       }
 
-      const work = await enrichDouyinWork(resolvedWork);
+      const work = await enrichDouyinWork(resolvedWork, user.id);
       return await persistWork({
         historyRecordId: parsed.data.historyRecordId,
         userId: user.id,
@@ -98,6 +100,15 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { code: error.code, error: error.message },
         { status: error.code === "network_error" ? 503 : 400 },
+      );
+    }
+    if (error instanceof DouyinMetadataError) {
+      if (error.code === "credential_invalid") {
+        await markDouyinCredentialInvalid(user.id);
+      }
+      return NextResponse.json(
+        { code: error.code, error: error.message },
+        { status: 409 },
       );
     }
     if (
@@ -139,12 +150,14 @@ async function resolveAndPersistBilibili(input: {
   });
 }
 
-async function enrichDouyinWork(work: DouyinWorkIdentity): Promise<ResolvedDouyinWork> {
+async function enrichDouyinWork(work: DouyinWorkIdentity, userId: string): Promise<ResolvedDouyinWork> {
+  const credentialState = await readDouyinCredentialState(userId);
+  const credentialCookie = credentialState.status === "valid" ? credentialState.cookie : "";
   let metadataLease: Awaited<ReturnType<typeof acquireWorkMetadata>>;
   try {
-    metadataLease = await acquireWorkMetadata(work);
+    metadataLease = await acquireWorkMetadata(work, undefined, undefined, credentialCookie);
   } catch (error) {
-    if (error instanceof NetworkRetryExhaustedError) throw error;
+    if (error instanceof NetworkRetryExhaustedError || error instanceof DouyinMetadataError) throw error;
     throw new InvalidMediaLinkError(INVALID_MEDIA_LINK_MESSAGE);
   }
 

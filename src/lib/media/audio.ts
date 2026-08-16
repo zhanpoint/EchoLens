@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 
@@ -84,47 +85,14 @@ export async function createTranscribableAudioFileFromNode(
   limits: AudioTranscriptionLimits = {},
 ): Promise<TranscribableAudioFile> {
   const directory = await mkdtemp(join(tmpdir(), "echolens-audio-"));
+  const inputPath = join(directory, "source.mp4");
   const filePath = join(directory, "audio.m4a");
   const maxBytes = limits.maxBytes ?? MAX_TRANSCRIBE_AUDIO_BYTES;
   const maxDurationSeconds = limits.maxDurationSeconds ?? MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS;
-  let stderr = "";
-  let durationSeconds = 0;
-  const child = spawn(resolveFfmpegPath(), [
-    "-hide_banner", "-loglevel", "error", "-nostdin", "-i", "pipe:0",
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
-    "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:2", "-nostats", "-y", filePath,
-  ], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
-
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
-    durationSeconds = Math.max(durationSeconds, parseFfmpegProgressDurationSeconds(stderr));
-  });
-
-  const processCompleted = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("ffmpeg 抽取音频超时。"));
-    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg 抽取音频失败：${stderr.slice(-600)}`));
-    });
-  });
 
   try {
-    await Promise.all([
-      pipeline(source, child.stdin).catch((error) => {
-        child.kill("SIGTERM");
-        throw error;
-      }),
-      processCompleted,
-    ]);
+    await pipeline(source, createWriteStream(inputPath));
+    const durationSeconds = await extractAudioFile(inputPath, filePath);
     const sizeBytes = (await stat(filePath)).size;
     if (!sizeBytes) throw new Error("ffmpeg 抽取的音频为空。");
     if (sizeBytes > maxBytes) {
@@ -144,6 +112,131 @@ export async function createTranscribableAudioFileFromNode(
     await rm(directory, { force: true, recursive: true });
     throw error;
   }
+}
+
+async function extractAudioFile(inputPath: string, outputPath: string): Promise<number> {
+  const child = spawn(resolveFfmpegPath(), [
+    "-hide_banner", "-loglevel", "error", "-nostdin", "-i", inputPath,
+    "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
+    "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:2", "-nostats", "-y", outputPath,
+  ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  let durationSeconds = 0;
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
+    durationSeconds = Math.max(durationSeconds, parseFfmpegProgressDurationSeconds(stderr));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("ffmpeg 抽取音频超时。"));
+    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg 抽取音频失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`));
+    });
+  });
+  return durationSeconds;
+}
+
+export type MuxedVideoFile = {
+  cleanup: () => Promise<void>;
+  contentType: "video/mp4";
+  filePath: string;
+  sizeBytes: number;
+};
+
+export async function muxVideoAndAudioToFile(
+  video: Readable,
+  audio: Readable,
+  limits: { maxAudioBytes?: number; maxVideoBytes?: number } = {},
+): Promise<MuxedVideoFile> {
+  const directory = await mkdtemp(join(tmpdir(), "echolens-mux-"));
+  const videoPath = join(directory, "video.mp4");
+  const audioPath = join(directory, "audio.m4a");
+  const outputPath = join(directory, "output.mp4");
+  try {
+    await Promise.all([
+      pipeline(video, byteLimitStream(limits.maxVideoBytes, "DASH 视频"), createWriteStream(videoPath)),
+      pipeline(audio, byteLimitStream(limits.maxAudioBytes, "DASH 音频"), createWriteStream(audioPath)),
+    ]);
+    await runFfmpeg([
+      "-hide_banner", "-loglevel", "error", "-nostdin",
+      "-i", videoPath, "-i", audioPath,
+      "-map", "0:v:0", "-map", "1:a:0",
+      "-c:v", "copy", "-c:a", "copy", "-shortest",
+      "-movflags", "+faststart", "-y", outputPath,
+    ], "ffmpeg 合流音视频");
+    return {
+      cleanup: () => rm(directory, { force: true, recursive: true }),
+      contentType: "video/mp4",
+      filePath: outputPath,
+      sizeBytes: (await stat(outputPath)).size,
+    };
+  } catch (error) {
+    await rm(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+export async function muxVideoAndAudioFromNode(
+  video: Readable,
+  audio: Readable,
+): Promise<Uint8Array> {
+  const file = await muxVideoAndAudioToFile(video, audio);
+  try {
+    return new Uint8Array(await readFile(file.filePath));
+  } finally {
+    await file.cleanup();
+  }
+}
+
+function byteLimitStream(maxBytes: number | undefined, label: string): Transform {
+  let received = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.byteLength;
+      if (maxBytes !== undefined && received > maxBytes) {
+        callback(new Error(`${label}超过临时缓存上限。`));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+async function runFfmpeg(args: string[], operation: string): Promise<void> {
+  const child = spawn(resolveFfmpegPath(), args, {
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`${operation}超时。`));
+    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(`${operation}失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`));
+    });
+  });
 }
 
 export function resolveFfmpegPath(): string {

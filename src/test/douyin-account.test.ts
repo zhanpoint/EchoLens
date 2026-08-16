@@ -36,17 +36,17 @@ describe("douyin credential state", () => {
     })));
     const valid = await validateAndStoreDouyinCredential(
       "credential-user",
-      " sessionid=abc ; ttwid=token ",
+      " sessionid=abc ; ttwid=token ; msToken=stored-token ",
     );
     expect(valid).toMatchObject({
-      cookie: "sessionid=abc; ttwid=token",
+      cookie: "sessionid=abc; ttwid=token; msToken=stored-token",
       status: "valid",
     });
     await expect(readDouyinCredentialState("credential-user")).resolves.toEqual(valid);
 
     await markDouyinCredentialInvalid("credential-user");
     await expect(readDouyinCredentialState("credential-user")).resolves.toMatchObject({
-      cookie: "sessionid=abc; ttwid=token",
+      cookie: "sessionid=abc; ttwid=token; msToken=stored-token",
       status: "invalid",
     });
 
@@ -55,10 +55,10 @@ describe("douyin credential state", () => {
       user: {},
     })));
     await expect(
-      validateAndStoreDouyinCredential("credential-user", "sessionid=expired"),
+      validateAndStoreDouyinCredential("credential-user", "sessionid=expired; msToken=expired-token"),
     ).rejects.toMatchObject({ code: "LOGIN_REQUIRED" });
     await expect(readDouyinCredentialState("credential-user")).resolves.toMatchObject({
-      cookie: "sessionid=expired",
+      cookie: "sessionid=expired; msToken=expired-token",
       status: "invalid",
     });
   });

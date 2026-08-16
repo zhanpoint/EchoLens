@@ -1,4 +1,5 @@
 import { cleanText, uniqueMediaReferences } from "./media";
+import { createDouyinWebClient, DouyinApiError } from "./web-client";
 import {
   DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   type DownloadVideoQuality,
@@ -11,7 +12,11 @@ import type { DouyinWorkIdentity } from "../../types/douyin";
 type DouyinDetailPayload = {
   aweme_detail?: {
     author?: {
+      avatar_larger?: unknown;
+      avatar_medium?: unknown;
       avatar_thumb?: unknown;
+      avatarLarger?: unknown;
+      avatarMedium?: unknown;
       avatarThumb?: unknown;
       nickname?: unknown;
       sec_uid?: unknown;
@@ -31,8 +36,24 @@ const SHARE_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 " +
   "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
 const METADATA_REQUEST_TIMEOUT_MS = 12_000;
+const DETAIL_AID_CANDIDATES = ["6383", "1128"] as const;
+
+export class DouyinMetadataError extends Error {
+  constructor(
+    message: string,
+    readonly code: "credential_invalid" | "credential_required" | "incomplete_metadata",
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "DouyinMetadataError";
+  }
+}
 
 export type DouyinWorkMetadata = {
+  audioUrls?: string[];
+  dashVideoUrls?: string[];
+  dubbingAudioUrls?: string[];
+  dubbingTitle?: string;
   authorName?: string;
   authorAvatarUrls?: string[];
   authorUrl?: string;
@@ -54,11 +75,82 @@ export type CompleteDouyinWorkMetadata = DouyinWorkMetadata & {
 export async function collectWorkMetadata(
   work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
   options: {
+    credentialCookie?: string;
     requestPolicy?: OpenApiPlatformRequestPolicy;
     signal?: AbortSignal;
     videoQuality?: DownloadVideoQuality;
   } = {},
 ): Promise<CompleteDouyinWorkMetadata> {
+  const videoQuality = options.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY;
+  let apiFailure: unknown;
+  const apiPayload = options.credentialCookie
+    ? await collectWebApiPayload(work, options.credentialCookie).catch((error: unknown) => {
+        if (error instanceof DouyinApiError &&
+            (error.code === "INVALID_COOKIE" || error.code === "LOGIN_REQUIRED")) {
+          throw new DouyinMetadataError(
+            "抖音账号访问凭证已失效，请前往设置更新 Cookie 后重试。",
+            "credential_invalid",
+            error,
+          );
+        }
+        apiFailure = error;
+        return null;
+      })
+    : null;
+  const apiMetadata = parseWorkMetadata(apiPayload, work.id, work.kind, videoQuality);
+  if (hasCompleteMetadata(apiMetadata)) return apiMetadata;
+
+  const sharePayload = await collectSharePagePayload(work, options);
+  const shareMetadata = parseWorkMetadata(sharePayload, work.id, work.kind, videoQuality);
+  const metadata = mergeWorkMetadata(apiMetadata, shareMetadata);
+  if (hasCompleteMetadata(metadata)) return metadata;
+
+  const missingFields = missingMetadataFields(metadata);
+  throw new DouyinMetadataError(
+    options.credentialCookie
+      ? `抖音作品核心信息不完整，缺少：${missingFields.join("、")}。`
+      : "抖音公开分享页未返回完整作品信息，请先在设置中配置有效的抖音 Cookie 后重试。",
+    options.credentialCookie ? "incomplete_metadata" : "credential_required",
+    apiFailure,
+  );
+}
+
+async function collectWebApiPayload(
+  work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
+  credentialCookie: string,
+): Promise<unknown> {
+  const client = createDouyinWebClient(credentialCookie);
+  let loginError: DouyinApiError | undefined;
+  let requestError: unknown;
+  for (const aid of DETAIL_AID_CANDIDATES) {
+    try {
+      const payload = await client.request(
+        "/aweme/v1/web/aweme/detail/",
+        { ...client.query(), aid, aweme_id: work.id },
+        3,
+        { referer: work.finalUrl },
+      );
+      if (payload.aweme_detail) return payload;
+    } catch (error) {
+      if (error instanceof DouyinApiError && error.code === "LOGIN_REQUIRED") {
+        loginError = error;
+      } else {
+        requestError = error;
+      }
+    }
+  }
+  if (loginError) await client.verifyAuthenticatedSession(1);
+  if (requestError) throw requestError;
+  return null;
+}
+
+async function collectSharePagePayload(
+  work: Pick<DouyinWorkIdentity, "id" | "kind">,
+  options: {
+    requestPolicy?: OpenApiPlatformRequestPolicy;
+    signal?: AbortSignal;
+  },
+): Promise<unknown> {
   await options.requestPolicy?.beforeRequest("douyin");
   const response = await fetchWithRetry(buildSharePageUrl(work), {
     cache: "no-store",
@@ -73,34 +165,67 @@ export async function collectWorkMetadata(
   });
   if (!response.ok) {
     await response.body?.cancel();
+    if (response.status === 403 || response.status === 429) {
+      throw new DouyinMetadataError(
+        "抖音公开分享页触发风控，请先在设置中配置有效的抖音 Cookie 后重试。",
+        "credential_required",
+      );
+    }
     throw new Error(`抖音作品信息请求失败：HTTP ${response.status}`);
   }
 
   const text = await response.text();
   options.requestPolicy?.observePayload("douyin", text);
-  const payload = parseSharePagePayload(text, work);
-  const metadata = parseWorkMetadata(
-    payload,
-    work.id,
-    work.kind,
-    options.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY,
-  );
-  if (!hasCompleteMetadata(metadata)) {
-    throw new Error("抖音作品信息不完整，请稍后重试。");
-  }
-  return metadata;
+  return parseSharePagePayload(text, work);
 }
 
 function hasCompleteMetadata(metadata: DouyinWorkMetadata): metadata is CompleteDouyinWorkMetadata {
-  return Boolean(
-    metadata.authorName &&
-    metadata.authorAvatarUrls?.length &&
-    metadata.caption &&
-    metadata.coverUrls?.length &&
-    metadata.videoUrls?.length &&
-    metadata.durationSeconds &&
-    metadata.durationSeconds > 0,
-  );
+  return missingMetadataFields(metadata).length === 0;
+}
+
+function missingMetadataFields(metadata: DouyinWorkMetadata): string[] {
+  const missing: string[] = [];
+  if (!metadata.authorName) missing.push("作者名");
+  if (!metadata.authorAvatarUrls?.length) missing.push("作者头像");
+  if (!metadata.caption) missing.push("作品标题");
+  if (!metadata.coverUrls?.length) missing.push("作品封面");
+  if (!metadata.videoUrls?.length) missing.push("视频地址");
+  if (!metadata.durationSeconds || metadata.durationSeconds <= 0) missing.push("视频时长");
+  return missing;
+}
+
+function mergeWorkMetadata(primary: DouyinWorkMetadata, fallback: DouyinWorkMetadata): DouyinWorkMetadata {
+  return {
+    audioUrls: uniqueMediaReferences([
+      ...(primary.audioUrls ?? []),
+      ...(fallback.audioUrls ?? []),
+    ]),
+    dashVideoUrls: uniqueMediaReferences([
+      ...(primary.dashVideoUrls ?? []),
+      ...(fallback.dashVideoUrls ?? []),
+    ]),
+    dubbingAudioUrls: uniqueMediaReferences([
+      ...(primary.dubbingAudioUrls ?? []),
+      ...(fallback.dubbingAudioUrls ?? []),
+    ]),
+    dubbingTitle: primary.dubbingTitle ?? fallback.dubbingTitle,
+    authorName: primary.authorName ?? fallback.authorName,
+    authorAvatarUrls: uniqueMediaReferences([
+      ...(primary.authorAvatarUrls ?? []),
+      ...(fallback.authorAvatarUrls ?? []),
+    ]),
+    authorUrl: primary.authorUrl ?? fallback.authorUrl,
+    caption: primary.caption ?? fallback.caption,
+    coverUrls: uniqueMediaReferences([
+      ...(primary.coverUrls ?? []),
+      ...(fallback.coverUrls ?? []),
+    ]),
+    durationSeconds: primary.durationSeconds ?? fallback.durationSeconds,
+    videoUrls: uniqueMediaReferences([
+      ...(primary.videoUrls ?? []),
+      ...(fallback.videoUrls ?? []),
+    ]),
+  };
 }
 
 export function parseWorkMetadata(
@@ -118,15 +243,27 @@ export function parseWorkMetadata(
     return {};
   }
 
+  const detailRecord = detail as Record<string, unknown>;
   const author = detail.author;
   const secUid = readString(author?.sec_uid) ?? readString(author?.secUid);
   const coverUrls = readCoverUrls(detail);
-  const videoUrls = kind === "video" ? readVideoUrls(detail.video, videoQuality) : [];
+  const audioUrls = kind === "video" ? readAudioUrls(detail.video) : [];
+  const dashVideoUrls = kind === "video" ? readDashVideoUrls(detail.video, videoQuality) : [];
+  const dubbing = readDubbing(detailRecord.music);
+  const videoUrls = kind === "video" ? readVideoUrls(detail.video) : [];
   const durationSeconds = kind === "video" ? readVideoDurationSeconds(detail) : undefined;
 
   return {
+    audioUrls,
+    dashVideoUrls,
+    dubbingAudioUrls: dubbing.urls,
+    dubbingTitle: dubbing.title,
     authorName: cleanText(readString(author?.nickname)),
-    authorAvatarUrls: readUrlList(author?.avatar_thumb ?? author?.avatarThumb),
+    authorAvatarUrls: uniqueMediaReferences([
+      ...readUrlList(author?.avatar_larger ?? author?.avatarLarger),
+      ...readUrlList(author?.avatar_medium ?? author?.avatarMedium),
+      ...readUrlList(author?.avatar_thumb ?? author?.avatarThumb),
+    ]),
     authorUrl: buildAuthorUrl(secUid, workId),
     caption: readCaption(detail),
     coverUrls,
@@ -279,22 +416,72 @@ const VIDEO_QUALITY_TARGET_WIDTH: Partial<Record<DownloadVideoQuality, number>> 
   "360p": 640,
 };
 
-type BitRateVideoSource = {
-  bitRate: number;
-  urls: string[];
-  width: number;
-};
+function readDashVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] {
+  if (!value || typeof value !== "object") return [];
+  const bitRates = (value as Record<string, unknown>).bit_rate ?? (value as Record<string, unknown>).bitRate;
+  if (!Array.isArray(bitRates)) return [];
+  const sources = bitRates.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const playAddr = record.play_addr ?? record.playAddr;
+    const urls = readUrlList(playAddr);
+    const width = readNestedNumber(playAddr, "width") ?? readNumber(record.width) ?? 0;
+    const bitRate = readNumber(record.bit_rate ?? record.bitRate) ?? 0;
+    return urls.length ? [{ bitRate, urls, width }] : [];
+  });
+  if (!sources.length) return [];
+  const target = VIDEO_QUALITY_TARGET_WIDTH[quality];
+  sources.sort((left, right) => quality === "lowest"
+    ? left.bitRate - right.bitRate || left.width - right.width
+    : quality === "highest"
+      ? right.width - left.width || right.bitRate - left.bitRate
+      : Math.abs(left.width - (target ?? 0)) - Math.abs(right.width - (target ?? 0)) || right.bitRate - left.bitRate);
+  return sources[0].urls;
+}
 
-function readVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] {
+function readDubbing(value: unknown): { title?: string; urls: string[] } {
+  if (!value || typeof value !== "object") return { urls: [] };
+  const music = value as Record<string, unknown>;
+  return {
+    title: cleanText(readString(music.title)),
+    urls: readUrlList(music.play_url ?? music.playUrl),
+  };
+}
+
+function readNestedNumber(value: unknown, key: string): number | undefined {
+  return value && typeof value === "object"
+    ? readNumber((value as Record<string, unknown>)[key])
+    : undefined;
+}
+
+function readAudioUrls(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const video = value as Record<string, unknown>;
+  const bitRateAudio = video.bit_rate_audio ?? video.bitRateAudio;
+  return uniqueMediaReferences([
+    ...readUrlList(video.audio),
+    ...(Array.isArray(bitRateAudio)
+      ? bitRateAudio.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const record = item as Record<string, unknown>;
+          const meta = record.audio_meta ?? record.audioMeta;
+          return [...readUrlList(meta), ...readUrlList(record.play_addr ?? record.playAddr)];
+        })
+      : []),
+  ]);
+}
+
+function readVideoUrls(value: unknown): string[] {
   if (!value || typeof value !== "object") {
     return [];
   }
 
   const video = value as Record<string, unknown>;
-  const selectedUrls = readBitRateVideoUrls(video.bit_rate ?? video.bitRate, quality);
-  if (selectedUrls.length) return uniqueMediaReferences(selectedUrls);
   return uniqueMediaReferences([
     ...readUrlList(video.play_addr ?? video.playAddr),
+    ...readUrlList(video.play_addr_h264 ?? video.playAddrH264),
+    ...readUrlList(video.play_addr_265 ?? video.playAddr265),
+    ...readUrlList(video.play_addr_256 ?? video.playAddr256),
     ...readUrlList(video.download_addr ?? video.downloadAddr),
   ]);
 }
@@ -313,46 +500,6 @@ function readVideoDurationSeconds(detail: NonNullable<DouyinDetailPayload["aweme
     readNumber(detailRecord.duration),
     readNumber(detailRecord.video_duration ?? detailRecord.videoDuration),
   ].find((duration): duration is number => Boolean(duration && duration > 0));
-}
-
-function readBitRateVideoUrls(value: unknown, quality: DownloadVideoQuality): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const sources = value.flatMap((item): BitRateVideoSource[] => {
-    if (!item || typeof item !== "object") return [];
-    const record = item as Record<string, unknown>;
-    const playAddr = record.play_addr ?? record.playAddr;
-    const urls = readUrlList(playAddr);
-    const width = readNestedNumber(playAddr, "width") ?? readNumber(record.width);
-    const bitRate = readNumber(record.bit_rate ?? record.bitRate);
-    return urls.length && width
-      ? [{ bitRate: bitRate ?? 0, urls, width }]
-      : [];
-  });
-  if (!sources.length) return [];
-
-  const targetWidth = VIDEO_QUALITY_TARGET_WIDTH[quality];
-  sources.sort((left, right) => {
-    if (quality === "lowest") {
-      return left.bitRate - right.bitRate || left.width - right.width;
-    }
-    if (quality === "highest") {
-      return right.bitRate - left.bitRate || right.width - left.width;
-    }
-    return Math.abs(left.width - (targetWidth ?? 0)) - Math.abs(right.width - (targetWidth ?? 0))
-      || right.bitRate - left.bitRate;
-  });
-  return sources.flatMap(({ urls }) => urls);
-}
-
-function readNestedNumber(value: unknown, key: string): number | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  return readNumber((value as Record<string, unknown>)[key]);
 }
 
 function readUrlList(value: unknown): string[] {

@@ -244,6 +244,154 @@ describe("douyin url utilities", () => {
     expect(headers).not.toHaveProperty("cookie");
   });
 
+  it("uses authenticated web detail before anonymous share metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      aweme_detail: {
+        aweme_id: "7652577724216692003",
+        author: {
+          avatar_thumb: { url_list: ["https://example.com/api-avatar.jpg"] },
+          nickname: "认证作者",
+          sec_uid: "MS4wLjABAAAA-api",
+        },
+        desc: "认证接口标题",
+        video: {
+          duration: 90_000,
+          cover: { url_list: ["https://example.com/api-cover.jpg"] },
+          play_addr: { url_list: ["https://example.com/api-video.mp4"] },
+        },
+      },
+      not_login_module: { guide_login_tip_exist: true },
+      status_code: 0,
+    })));
+
+    await expect(collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7652577724216692003",
+      id: "7652577724216692003",
+      kind: "video",
+    }, { credentialCookie: "sessionid=valid-session; msToken=test-token" })).resolves.toMatchObject({
+      authorName: "认证作者",
+      caption: "认证接口标题",
+      coverUrls: ["https://example.com/api-cover.jpg"],
+      videoUrls: ["https://example.com/api-video.mp4"],
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(String(url)).toContain("/aweme/v1/web/aweme/detail/");
+    expect(String(url)).toContain("aweme_id=7652577724216692003");
+    expect(init?.headers).toMatchObject({ cookie: "sessionid=valid-session; msToken=test-token" });
+  });
+
+  it("tries the alternate detail aid before invalidating a valid credential", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status_code: 2483,
+        status_msg: "请先登录",
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        aweme_detail: {
+          author: {
+            avatar_thumb: { url_list: ["https://example.com/avatar.jpg"] },
+            nickname: "认证作者",
+          },
+          desc: "候选接口标题",
+          video: {
+            duration: 90_000,
+            cover: { url_list: ["https://example.com/cover.jpg"] },
+            play_addr: { url_list: ["https://example.com/video.mp4"] },
+          },
+        },
+        status_code: 0,
+      })));
+
+    await expect(collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7652577724216692004",
+      id: "7652577724216692004",
+      kind: "video",
+    }, { credentialCookie: "sessionid=valid-session; msToken=test-token" })).resolves.toMatchObject({
+      authorName: "认证作者",
+      caption: "候选接口标题",
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toContain("aid=6383");
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
+  });
+
+  it("keeps the credential valid when the official self profile check succeeds", async () => {
+    const loginRequired = () => new Response(JSON.stringify({
+      status_code: 2483,
+      status_msg: "请先登录",
+    }));
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(loginRequired())
+      .mockResolvedValueOnce(loginRequired())
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status_code: 0,
+        user: { sec_uid: "MS4wLjABAAAA-self" },
+      })))
+      .mockResolvedValueOnce(new Response(sharePageHtml({
+        item_list: [{
+          author: {
+            avatar_thumb: { url_list: ["https://example.com/avatar.jpg"] },
+            nickname: "分享作者",
+          },
+          desc: "分享页标题",
+          video: {
+            duration: 90_000,
+            cover: { url_list: ["https://example.com/cover.jpg"] },
+            play_addr: { url_list: ["https://example.com/video.mp4"] },
+          },
+        }],
+      })));
+
+    await expect(collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7652577724216692005",
+      id: "7652577724216692005",
+      kind: "video",
+    }, { credentialCookie: "sessionid=valid-session; msToken=test-token" })).resolves.toMatchObject({
+      authorName: "分享作者",
+      caption: "分享页标题",
+    });
+
+    expect(String(vi.mocked(globalThis.fetch).mock.calls[2][0])).toContain("/user/profile/self/");
+  });
+
+  it("merges missing required fields from the share payload", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        aweme_detail: {
+          author: { nickname: "认证作者" },
+          desc: "认证标题",
+          video: {
+            duration: 90_000,
+            play_addr: { url_list: ["https://example.com/video.mp4"] },
+          },
+        },
+        status_code: 0,
+      })))
+      .mockResolvedValueOnce(new Response(sharePageHtml({
+        item_list: [{
+          author: { avatar_thumb: { url_list: ["https://example.com/avatar.jpg"] } },
+          desc: "分享标题",
+          video: { cover: { url_list: ["https://example.com/cover.jpg"] } },
+        }],
+      })));
+
+    await expect(collectWorkMetadata({
+      finalUrl: "https://www.douyin.com/video/7652577724216692006",
+      id: "7652577724216692006",
+      kind: "video",
+    }, { credentialCookie: "sessionid=valid-session; msToken=test-token" })).resolves.toMatchObject({
+      authorName: "认证作者",
+      caption: "认证标题",
+      authorAvatarUrls: ["https://example.com/avatar.jpg"],
+      coverUrls: ["https://example.com/cover.jpg"],
+      videoUrls: ["https://example.com/video.mp4"],
+      durationSeconds: 90,
+    });
+  });
+
   it("reads cover urls for all work types", () => {
     expect(
       parseWorkMetadata(
@@ -298,68 +446,44 @@ describe("douyin url utilities", () => {
     });
   });
 
-  it("keeps lowest-bitrate video urls first by default", () => {
-    expect(
-      parseWorkMetadata(
-        {
-          aweme_detail: {
-            video: {
-              play_addr: {
-                url_list: ["https://example.com/fallback-video.mp4"],
-              },
-              bit_rate: [
-                {
-                  bit_rate: 800,
-                  play_addr: {
-                    height: 720,
-                    width: 1280,
-                    url_list: ["https://example.com/720p-video.mp4"],
-                  },
-                },
-                {
-                  bit_rate: 1600,
-                  play_addr: {
-                    height: 1080,
-                    width: 1920,
-                    url_list: ["https://example.com/1080p-video.mp4"],
-                  },
-                },
-              ],
-            },
-          },
-        },
-        "7649250336875613449",
-        "video",
-      ),
-    ).toMatchObject({
-      videoUrls: [
-        "https://example.com/720p-video.mp4",
-        "https://example.com/1080p-video.mp4",
-      ],
-    });
-  });
-
-  it.each([
-    ["lowest", "https://example.com/360p.mp4"],
-    ["720p", "https://example.com/720p.mp4"],
-    ["1080p", "https://example.com/1080p.mp4"],
-    ["highest", "https://example.com/1080p.mp4"],
-  ] as const)("selects the %s direct video source from video.bit_rate", (quality, expectedUrl) => {
+  it("uses a muxed play address instead of a video-only bitrate track", () => {
     const metadata = parseWorkMetadata({
       aweme_detail: {
         video: {
+          play_addr: { url_list: ["https://example.com/muxed-video.mp4"] },
           bit_rate: [
-            { bit_rate: 300, play_addr: { width: 640, url_list: ["https://example.com/360p.mp4"] } },
-            { bit_rate: 900, play_addr: { width: 1280, url_list: ["https://example.com/720p.mp4"] } },
-            { bit_rate: 1800, play_addr: { width: 1920, url_list: ["https://example.com/1080p.mp4"] } },
+            { bit_rate: 1800, play_addr: { url_list: ["https://example.com/video-only.mp4"] } },
           ],
-          play_addr: { url_list: ["https://example.com/fallback.mp4"] },
         },
       },
-    }, "7649250336875613449", "video", quality);
+    }, "7649250336875613449", "video");
 
-    expect(metadata.videoUrls?.[0]).toBe(expectedUrl);
-    expect(metadata.videoUrls?.every((url) => !url.includes("/aweme/v1/play/"))).toBe(true);
+    expect(metadata.videoUrls).toEqual(["https://example.com/muxed-video.mp4"]);
+  });
+
+  it("reads the independent DASH audio track from video.bit_rate_audio", () => {
+    const metadata = parseWorkMetadata({
+      aweme_detail: {
+        video: {
+          bit_rate_audio: [{
+            audio_meta: {
+              format: "dash",
+              media_type: "audio",
+              url_list: {
+                main_url: "https://example.com/audio-main.m4a",
+                backup_url: "https://example.com/audio-backup.m4a",
+              },
+            },
+          }],
+          play_addr: { url_list: ["https://example.com/muxed-video.mp4"] },
+        },
+      },
+    }, "7649250336875613449", "video");
+
+    expect(metadata.audioUrls).toEqual([
+      "https://example.com/audio-main.m4a",
+      "https://example.com/audio-backup.m4a",
+    ]);
   });
 
   it("falls back to platform play_addr when bit_rate has no comparable dimensions", () => {

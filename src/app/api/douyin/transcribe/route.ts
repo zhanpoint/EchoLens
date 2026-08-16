@@ -116,9 +116,10 @@ export async function POST(request: Request) {
       historyRecordId: history.id,
       userId: user.id,
     });
-    if (!audio?.durationSeconds) {
+    if (!audio?.durationSeconds || !audio.objectKey) {
       return NextResponse.json({ error: "原声音频准备失败，请稍后重试。" }, { status: 502 });
     }
+    const audioObjectKey = audio.objectKey;
 
     const dashScope = await readDashScopeUserConfig(user.id);
     const preferredModels = dashScope.customApiKey ? dashScope.customModels : dashScope.platformModels;
@@ -135,7 +136,7 @@ export async function POST(request: Request) {
             buildWorkCacheKey(work),
             {
               durationSeconds: audio.durationSeconds,
-              objectKey: audio.objectKey,
+              objectKey: audioObjectKey,
               signedUrl: audio.url,
             },
             buildAsrOptions(parsed.data, models),

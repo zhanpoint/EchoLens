@@ -3,14 +3,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/app/api/auth/_shared", () => ({ requireUser: vi.fn() }));
 vi.mock("@/lib/feedback/service", () => ({
   FEEDBACK_STATUSES: ["open", "resolved"],
+  deleteUserFeedback: vi.fn(),
   listUserFeedback: vi.fn(),
   updateUserFeedbackStatus: vi.fn(),
 }));
 
-import { GET, PATCH } from "@/app/api/admin/feedback/route";
+import { DELETE, GET, PATCH } from "@/app/api/admin/feedback/route";
 import { requireUser } from "@/app/api/auth/_shared";
-import { listUserFeedback, updateUserFeedbackStatus } from "@/lib/feedback/service";
+import { deleteUserFeedback, listUserFeedback, updateUserFeedbackStatus } from "@/lib/feedback/service";
 
+const deleteFeedbackMock = vi.mocked(deleteUserFeedback);
 const listFeedbackMock = vi.mocked(listUserFeedback);
 const requireUserMock = vi.mocked(requireUser);
 const updateFeedbackMock = vi.mocked(updateUserFeedbackStatus);
@@ -60,5 +62,28 @@ describe("admin feedback route", () => {
 
     expect(response.status).toBe(200);
     expect(updateFeedbackMock).toHaveBeenCalledWith("123e4567-e89b-12d3-a456-426614174000", "resolved");
+  });
+
+  it("deletes feedback for administrators", async () => {
+    requireUserMock.mockResolvedValue(admin);
+    deleteFeedbackMock.mockResolvedValue(true);
+
+    const response = await DELETE(new Request("https://echolens.test/api/admin/feedback?id=123e4567-e89b-12d3-a456-426614174000", {
+      method: "DELETE",
+    }));
+
+    expect(response.status).toBe(204);
+    expect(deleteFeedbackMock).toHaveBeenCalledWith("123e4567-e89b-12d3-a456-426614174000");
+  });
+
+  it("rejects an invalid feedback ID when deleting", async () => {
+    requireUserMock.mockResolvedValue(admin);
+
+    const response = await DELETE(new Request("https://echolens.test/api/admin/feedback?id=invalid", {
+      method: "DELETE",
+    }));
+
+    expect(response.status).toBe(400);
+    expect(deleteFeedbackMock).not.toHaveBeenCalled();
   });
 });

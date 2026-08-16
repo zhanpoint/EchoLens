@@ -15,6 +15,10 @@ import {
   type StoredAsrTask,
 } from "@/lib/transcript/db";
 
+vi.mock("@/lib/dashscope/user-credential", () => ({
+  readDashScopeApiKeyForUser: vi.fn(async () => process.env.DASHSCOPE_API_KEY),
+}));
+
 vi.mock("@/lib/transcript/db", () => ({
   deleteAsrTask: vi.fn(async () => true),
   insertAsrTask: vi.fn(),

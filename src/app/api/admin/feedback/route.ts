@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { isAdminUser } from "@/lib/auth/service";
 import {
+  deleteUserFeedback,
   FEEDBACK_STATUSES,
   listUserFeedback,
   updateUserFeedbackStatus,
@@ -42,6 +43,24 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ code: "FEEDBACK_NOT_FOUND", error: "反馈不存在。" }, { status: 404 });
   }
   return NextResponse.json({ feedback });
+}
+
+export async function DELETE(request: Request) {
+  const user = await requireUser(request);
+  if (user instanceof NextResponse) return user;
+  if (!isAdminUser(user)) return forbidden();
+
+  const id = new URL(request.url).searchParams.get("id");
+  const parsedId = z.string().uuid().safeParse(id);
+  if (!parsedId.success) {
+    return NextResponse.json({ code: "INVALID_FEEDBACK_ID", error: "反馈 ID 无效。" }, { status: 400 });
+  }
+
+  const deleted = await deleteUserFeedback(parsedId.data);
+  if (!deleted) {
+    return NextResponse.json({ code: "FEEDBACK_NOT_FOUND", error: "反馈不存在。" }, { status: 404 });
+  }
+  return new NextResponse(null, { status: 204 });
 }
 
 function forbidden() {

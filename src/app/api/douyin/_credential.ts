@@ -36,9 +36,10 @@ export async function toDouyinApiErrorResponse(
     }, { status: 409 });
   }
 
-  const status = {
-    ACCESS_BLOCKED: 503,
-    UPSTREAM_ERROR: 502,
-  }[error.code] ?? 400;
+  const status = error.code === "RATE_LIMITED"
+    ? 429
+    : error.code === "UPSTREAM_ERROR"
+      ? 502
+      : 503;
   return NextResponse.json({ code: error.code, error: error.message }, { status });
 }

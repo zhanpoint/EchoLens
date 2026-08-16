@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 const mocks = vi.hoisted(() => ({
-  ensureBilibiliHistoryVideo: vi.fn(),
   ensureHistoryAsset: vi.fn(),
+  readHistoryUpstreamAssets: vi.fn(),
 }));
 
 vi.mock("@/app/api/auth/_shared", () => ({
@@ -11,8 +11,8 @@ vi.mock("@/app/api/auth/_shared", () => ({
   requireUser: vi.fn(async () => ({ email: "test@example.com", id: "user-1", username: "test" })),
 }));
 vi.mock("@/lib/transcript/assets", () => ({
-  ensureBilibiliHistoryVideo: mocks.ensureBilibiliHistoryVideo,
   ensureHistoryAsset: mocks.ensureHistoryAsset,
+  readHistoryUpstreamAssets: mocks.readHistoryUpstreamAssets,
 }));
 
 import { requireUser } from "@/app/api/auth/_shared";
@@ -21,7 +21,7 @@ import {
   NETWORK_RETRY_ERROR_MESSAGE,
   NetworkRetryExhaustedError,
 } from "@/lib/http/retry";
-import { GET, POST } from "../app/api/transcript-history/[id]/assets/[kind]/route";
+import { GET } from "../app/api/transcript-history/[id]/assets/[kind]/route";
 
 const asset = {
   assetKind: "cover",
@@ -38,14 +38,8 @@ describe("transcript history single asset route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(requireUser).mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
-    mocks.ensureBilibiliHistoryVideo.mockResolvedValue({
-      ...asset,
-      assetKind: "video",
-      contentType: "video/mp4",
-      objectKey: "bilibili:BV1xx411c7mD:100:video:32:7",
-      url: "https://cdn.example/32",
-    });
     mocks.ensureHistoryAsset.mockResolvedValue(asset);
+    mocks.readHistoryUpstreamAssets.mockResolvedValue(null);
   });
 
   it("requires authentication before accessing an asset", async () => {
@@ -57,7 +51,7 @@ describe("transcript history single asset route", () => {
     expect(mocks.ensureHistoryAsset).not.toHaveBeenCalled();
   });
 
-  it.each(["avatar", "cover", "video", "originalAudio"] as const)(
+  it.each(["avatar", "cover", "video", "originalAudio", "dubbing"] as const)(
     "requests only the selected %s resource",
     async (kind) => {
       const response = await GET(assetRequest(), routeContext(kind));
@@ -71,6 +65,39 @@ describe("transcript history single asset route", () => {
       });
     },
   );
+
+  it("returns every refreshed upstream locator after a force refresh", async () => {
+    mocks.readHistoryUpstreamAssets.mockResolvedValueOnce({
+      avatar: { ...asset, assetKind: "avatar", url: "https://origin/avatar-fresh" },
+      cover: { ...asset, assetKind: "cover", url: "https://origin/cover-fresh" },
+      dubbing: { ...asset, assetKind: "dubbing", contentType: "audio/mp4", url: "https://origin/dubbing-fresh" },
+      video: { ...asset, assetKind: "video", contentType: "video/mp4", url: "https://origin/video-fresh" },
+    });
+
+    const response = await GET(
+      new Request("https://echolens.example/api/transcript-history/history-1/assets/cover?forceRefresh=1"),
+      routeContext("cover"),
+    );
+
+    expect(mocks.ensureHistoryAsset).toHaveBeenCalledWith({
+      assetKind: "cover",
+      forceRefresh: true,
+      historyRecordId: "history-1",
+      userId: "user-1",
+    });
+    expect(mocks.readHistoryUpstreamAssets).toHaveBeenCalledWith({
+      historyRecordId: "history-1",
+      userId: "user-1",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      refreshedAssets: {
+        avatar: { url: "https://origin/avatar-fresh" },
+        cover: { url: "https://origin/cover-fresh" },
+        dubbing: { url: "https://origin/dubbing-fresh" },
+        video: { url: "https://origin/video-fresh" },
+      },
+    });
+  });
 
   it("marks only a validated original audio response as verified", async () => {
     const audioAsset = {
@@ -106,32 +133,6 @@ describe("transcript history single asset route", () => {
     await expect(response.json()).resolves.toEqual({
       error: "会话不存在或资源不可用。",
     });
-    expect(mocks.ensureBilibiliHistoryVideo).not.toHaveBeenCalled();
-  });
-
-  it("generates a Bilibili video resource only through POST", async () => {
-    const response = await POST(assetRequest(), routeContext("video"));
-
-    expect(response.status).toBe(200);
-    expect(mocks.ensureHistoryAsset).not.toHaveBeenCalled();
-    expect(mocks.ensureBilibiliHistoryVideo).toHaveBeenCalledWith({
-      historyRecordId: "history-1",
-      userId: "user-1",
-    });
-    await expect(response.json()).resolves.toMatchObject({
-      asset: {
-        assetKind: "video",
-        objectKey: "bilibili:BV1xx411c7mD:100:video:32:7",
-        url: "https://cdn.example/32",
-      },
-    });
-  });
-
-  it("rejects POST generation for non-video resources", async () => {
-    const response = await POST(assetRequest(), routeContext("cover"));
-
-    expect(response.status).toBe(400);
-    expect(mocks.ensureBilibiliHistoryVideo).not.toHaveBeenCalled();
   });
 
   it("returns the unified network message when OSS retries are exhausted", async () => {

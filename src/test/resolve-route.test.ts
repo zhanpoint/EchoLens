@@ -23,6 +23,11 @@ vi.mock("@/lib/douyin/metadata-coordinator", () => ({
   acquireWorkMetadata: vi.fn(),
 }));
 
+vi.mock("@/lib/douyin/account", () => ({
+  markDouyinCredentialInvalid: vi.fn(),
+  readDouyinCredentialState: vi.fn(async () => ({ checkedAt: null, cookie: "", status: "missing" })),
+}));
+
 vi.mock("@/lib/transcript/db", () => ({
   findOrCreateTranscriptHistoryRecord: vi.fn(async (input: Record<string, unknown>) => ({
     created: true,
@@ -40,14 +45,14 @@ import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
 import { resolveDouyinUrl } from "@/lib/douyin/url";
 import { NetworkRetryExhaustedError } from "@/lib/http/retry";
 import { findOrCreateTranscriptHistoryRecord } from "@/lib/transcript/db";
-import { POST } from "../app/api/douyin/resolve/route";
+import { POST } from "../app/api/media/resolve/route";
 
 const acquireWorkMetadataMock = vi.mocked(acquireWorkMetadata);
 const requireUserMock = vi.mocked(requireUser);
 const findOrCreateTranscriptHistoryRecordMock = vi.mocked(findOrCreateTranscriptHistoryRecord);
 const resolveDouyinUrlMock = vi.mocked(resolveDouyinUrl);
 
-describe("douyin resolve route", () => {
+describe("media resolve route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });

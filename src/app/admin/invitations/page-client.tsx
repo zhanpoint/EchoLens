@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Check, CheckCircle2, Clock3, Copy, KeyRound, LayoutDashboard, Search } from "lucide-react";
+import { ArrowLeft, Check, CheckCircle2, Clock3, Copy, KeyRound, LayoutDashboard, Search, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AccountServiceInvitation } from "@/lib/invitations/service";
 import type { UserFeedback } from "@/lib/feedback/service";
@@ -153,6 +153,7 @@ function FeedbackPanel({ initialFeedback }: { initialFeedback: UserFeedback[] })
   const resolvedFeedbackCount = feedback.length - openFeedbackCount;
   const [query, setQuery] = useState("");
   const [updateError, setUpdateError] = useState("");
+  const [deletingId, setDeletingId] = useState("");
   const [updatingId, setUpdatingId] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
   const visibleFeedback = feedback.filter((item) => !normalizedQuery
@@ -182,6 +183,26 @@ function FeedbackPanel({ initialFeedback }: { initialFeedback: UserFeedback[] })
     }
   }
 
+  async function deleteFeedback(id: string) {
+    if (!window.confirm("确定删除这条反馈吗？此操作无法撤销。")) return;
+
+    setDeletingId(id);
+    setUpdateError("");
+    try {
+      const response = await fetch(`/api/admin/feedback?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error("反馈删除失败。");
+      }
+      setFeedback((current) => current.filter((item) => item.id !== id));
+    } catch (error) {
+      setUpdateError(error instanceof Error ? error.message : "反馈删除失败。");
+    } finally {
+      setDeletingId("");
+    }
+  }
+
   return (
     <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/[0.025]">
       <div className="relative flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
@@ -201,22 +222,24 @@ function FeedbackPanel({ initialFeedback }: { initialFeedback: UserFeedback[] })
         </label>
       </div>
       {updateError ? <p className="shrink-0 px-3 py-2 text-xs font-medium text-destructive">{updateError}</p> : null}
-      <div className="hidden shrink-0 grid-cols-[minmax(14rem,1.5fr)_5.5rem_minmax(8rem,0.9fr)_9rem_5rem_7rem] gap-3 border-b border-white/[0.07] px-3 py-2 text-[11px] font-medium text-muted-foreground sm:grid">
+      <div className="hidden shrink-0 grid-cols-[minmax(14rem,1.5fr)_5.5rem_minmax(8rem,0.9fr)_9rem_5rem_9rem] gap-3 border-b border-white/[0.07] px-3 py-2 text-[11px] font-medium text-muted-foreground sm:grid">
         <span>反馈内容</span>
         <span>类型</span>
         <span>提交用户</span>
         <span>提交时间</span>
         <span>状态</span>
-        <span className="text-right">操作</span>
+        <span>操作</span>
       </div>
       <div className="min-h-0 flex-1 divide-y divide-white/[0.06] overflow-y-auto overscroll-contain">
         {visibleFeedback.map((item) => {
           const resolved = item.status === "resolved";
           const updating = updatingId === item.id;
+          const deleting = deletingId === item.id;
+          const mutating = updating || deleting;
           return (
             <article
               key={item.id}
-              className="grid gap-1.5 px-3 py-3 transition hover:bg-white/[0.025] sm:grid-cols-[minmax(14rem,1.5fr)_5.5rem_minmax(8rem,0.9fr)_9rem_5rem_7rem] sm:items-center sm:gap-3 sm:py-2.5"
+              className="grid gap-1.5 px-3 py-3 transition hover:bg-white/[0.025] sm:grid-cols-[minmax(14rem,1.5fr)_5.5rem_minmax(8rem,0.9fr)_9rem_5rem_9rem] sm:items-center sm:gap-3 sm:py-2.5"
             >
               <p className="min-w-0 whitespace-pre-wrap break-words text-sm leading-5 text-foreground sm:line-clamp-2">
                 {item.content}
@@ -233,15 +256,27 @@ function FeedbackPanel({ initialFeedback }: { initialFeedback: UserFeedback[] })
               <span className={resolved ? "text-xs text-muted-foreground" : "text-xs font-semibold text-amber"}>
                 {resolved ? "已处理" : "待处理"}
               </span>
-              <button
-                type="button"
-                disabled={updating}
-                onClick={() => void updateStatus(item.id, resolved ? "open" : "resolved")}
-                className={`inline-flex h-8 w-fit items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 sm:justify-self-end ${resolved ? "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground" : "bg-cyan/[0.12] text-cyan hover:bg-cyan/[0.2]"}`}
-              >
-                {updating ? <Clock3 className="size-3.5 animate-spin" aria-hidden="true" /> : <Check className="size-3.5" aria-hidden="true" />}
-                {resolved ? "恢复待处理" : "标记已处理"}
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={mutating}
+                  onClick={() => void updateStatus(item.id, resolved ? "open" : "resolved")}
+                  className={`inline-flex h-8 w-fit items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${resolved ? "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground" : "bg-cyan/[0.12] text-cyan hover:bg-cyan/[0.2]"}`}
+                >
+                  {updating ? <Clock3 className="size-3.5 animate-spin" aria-hidden="true" /> : <Check className="size-3.5" aria-hidden="true" />}
+                  {resolved ? "恢复待处理" : "标记已处理"}
+                </button>
+                <button
+                  type="button"
+                  disabled={mutating}
+                  onClick={() => void deleteFeedback(item.id)}
+                  className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-destructive/15 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="删除反馈"
+                  title="删除反馈"
+                >
+                  {deleting ? <Clock3 className="size-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="size-3.5" aria-hidden="true" />}
+                </button>
+              </div>
             </article>
           );
         })}

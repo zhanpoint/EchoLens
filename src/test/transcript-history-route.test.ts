@@ -22,15 +22,6 @@ vi.mock("@/lib/transcript/db", () => ({
     promptId: input.promptId,
     promptTitle: input.promptTitle,
   })),
-  listTranscriptHistoryAssets: vi.fn(async () => [{
-    assetKind: "originalAudio",
-    contentType: "audio/mp4",
-    durationSeconds: 12,
-    historyRecordId: "history-1",
-    objectKey: "echolens/media/video/1/audio.m4a",
-    sizeBytes: 100,
-    updatedAt: 1,
-  }]),
   listTranscriptHistoryRecords: vi.fn(async ({ query }: { query?: string }) =>
     [...records.values()].filter((record) =>
       record.transcriptContent && (!query || record.sessionName.includes(query))
@@ -120,7 +111,6 @@ describe("transcript history routes", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      assets: [{ assetKind: "originalAudio", objectKey: "echolens/media/video/1/audio.m4a" }],
       record: { id: "history-1" },
       summaries: [{ id: "summary-1" }],
     });

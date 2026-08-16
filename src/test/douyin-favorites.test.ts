@@ -6,6 +6,10 @@ import {
 } from "@/lib/douyin/favorites";
 import { validateDouyinCredential } from "@/lib/douyin/account";
 
+vi.mock("@/lib/douyin/ms-token", () => ({
+  resolveMsToken: vi.fn(async () => "mock-ms-token"),
+}));
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -20,7 +24,7 @@ describe("douyin favorites", () => {
       const url = new URL(String(input));
       const headers = init?.headers as Record<string, string>;
       expect(headers.cookie).toBe("sessionid=abc; msToken=token");
-      expect(url.searchParams.get("X-Bogus")).toBeTruthy();
+      expect(url.searchParams.get("a_bogus") ?? url.searchParams.get("X-Bogus")).toBeTruthy();
 
       if (url.pathname === "/aweme/v1/web/user/profile/self/") {
         return new Response(JSON.stringify({

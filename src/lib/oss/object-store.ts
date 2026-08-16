@@ -14,7 +14,7 @@ type OssConfig = {
 };
 
 const REQUEST_TIMEOUT_MS = 120_000;
-const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 6 * 60 * 60;
+const DEFAULT_SIGNED_URL_EXPIRES_SECONDS = 24 * 60 * 60;
 
 export type OssObjectInfo = {
   contentLength: number;

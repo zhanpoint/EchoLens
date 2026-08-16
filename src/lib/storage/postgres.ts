@@ -39,14 +39,18 @@ export function getPostgresPool(): PooledQueryable {
     return globalForPostgres.__echolensPostgresPool;
   }
 
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error("DATABASE_URL is required.");
+  const password = process.env.POSTGRES_PASSWORD;
+  if (!password) {
+    throw new Error("POSTGRES_PASSWORD is required.");
   }
 
   const config: PoolConfig = {
-    connectionString,
+    database: process.env.POSTGRES_DB || "echolens",
+    host: process.env.POSTGRES_HOST || "localhost",
     max: readPositiveIntegerEnv("POSTGRES_POOL_MAX", 10),
+    password,
+    port: readPositiveIntegerEnv("POSTGRES_PORT", 5432),
+    user: process.env.POSTGRES_USER || "postgres",
   };
   if (readBooleanEnv("POSTGRES_SSL", false)) {
     config.ssl = { rejectUnauthorized: readBooleanEnv("POSTGRES_SSL_REJECT_UNAUTHORIZED", true) };
@@ -144,6 +148,7 @@ async function migrateSchema(db: PooledQueryable): Promise<void> {
     await db.query(statement);
   }
   await migrateTranscriptSchemaV3(db);
+  await migrateTranscriptSchemaV4(db);
 }
 
 const TRANSCRIPT_SCHEMA_V3_VERSION = "transcript-schema-v3-session-name";
@@ -157,12 +162,11 @@ async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
       "SELECT version FROM app_schema_migrations WHERE version = $1",
       [TRANSCRIPT_SCHEMA_V3_VERSION],
     );
-    if (applied.rows.length === 0) {
-      for (const statement of RESET_TRANSCRIPT_SCHEMA_STATEMENTS) {
-        await client.query(statement);
-      }
+    for (const statement of TRANSCRIPT_SCHEMA_BASE_STATEMENTS) {
+      await client.query(statement);
     }
-    for (const statement of TRANSCRIPT_SCHEMA_STATEMENTS) {
+    await migrateLegacyTranscriptHistory(client);
+    for (const statement of TRANSCRIPT_SCHEMA_FINALIZE_STATEMENTS) {
       await client.query(statement);
     }
     if (applied.rows.length === 0) {
@@ -180,17 +184,125 @@ async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
   }
 }
 
-const RESET_TRANSCRIPT_SCHEMA_STATEMENTS = [
-  "DROP TABLE IF EXISTS transcript_history_summaries",
-  "DROP TABLE IF EXISTS transcript_history_assets",
-  "DROP TABLE IF EXISTS transcript_open_api_quota_usage",
-  "DROP TABLE IF EXISTS transcript_asr_tasks",
-  "DROP TABLE IF EXISTS transcript_custom_prompts",
-  "DROP TABLE IF EXISTS transcript_history_records",
-  "DROP TABLE IF EXISTS douyin_favorites_cache",
-  "DROP TABLE IF EXISTS douyin_following_cache",
-  "DROP INDEX IF EXISTS user_settings_user_id_idx",
+const LEGACY_HISTORY_COLUMNS = new Set(["display_title", "original_title"]);
+
+async function migrateLegacyTranscriptHistory(db: Queryable): Promise<void> {
+  const columns = await db.query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'transcript_history_records'`,
+  );
+  const existing = new Set(columns.rows.map(({ column_name }) => column_name));
+  for (const statement of LEGACY_HISTORY_COLUMN_STATEMENTS) {
+    await db.query(statement);
+  }
+
+  const captionSources = [
+    "caption",
+    ...(existing.has("original_title") ? ["original_title"] : []),
+    ...(existing.has("display_title") ? ["display_title"] : []),
+    "'历史记录'",
+  ];
+  const sessionNameSources = [
+    "session_name",
+    ...(existing.has("display_title") ? ["display_title"] : []),
+    ...captionSources,
+  ];
+  const now = Date.now();
+  await db.query(
+    `UPDATE transcript_history_records
+     SET work_key = COALESCE(work_key, 'legacy:' || id),
+         work_id = COALESCE(work_id, id),
+         work_kind = COALESCE(work_kind, 'video'),
+         input_url = COALESCE(input_url, ''),
+         final_url = COALESCE(final_url, ''),
+         caption = COALESCE(${captionSources.join(", ")}),
+         session_name = COALESCE(${sessionNameSources.join(", ")}),
+         transcript_content = COALESCE(transcript_content, ''),
+         created_at = COALESCE(created_at, $1),
+         updated_at = COALESCE(updated_at, $1)`,
+    [now],
+  );
+
+  for (const column of existing) {
+    if (LEGACY_HISTORY_COLUMNS.has(column)) {
+      await db.query(`ALTER TABLE transcript_history_records DROP COLUMN ${column}`);
+    }
+  }
+}
+
+const LEGACY_HISTORY_COLUMN_STATEMENTS = [
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS work_key text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS work_id text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS work_kind text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS input_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS final_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS author_name text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS author_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS caption text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS session_name text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS duration_seconds double precision",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS transcript_content text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS transcript_segments jsonb",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS created_at bigint",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS updated_at bigint",
 ];
+
+const TRANSCRIPT_SCHEMA_V4_VERSION = "transcript-schema-v4-single-history-record";
+
+async function migrateTranscriptSchemaV4(db: PooledQueryable): Promise<void> {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [TRANSCRIPT_SCHEMA_V4_VERSION]);
+    const applied = await client.query<{ version: string }>(
+      "SELECT version FROM app_schema_migrations WHERE version = $1",
+      [TRANSCRIPT_SCHEMA_V4_VERSION],
+    );
+    await client.query("DROP TABLE IF EXISTS transcript_history_assets");
+    for (const statement of TRANSCRIPT_SCHEMA_V4_STATEMENTS) {
+      await client.query(statement);
+    }
+    await migrateLegacyOriginalAudioColumn(client);
+    if (applied.rows.length === 0) {
+      await client.query("INSERT INTO app_schema_migrations (version) VALUES ($1)", [TRANSCRIPT_SCHEMA_V4_VERSION]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+const TRANSCRIPT_SCHEMA_V4_STATEMENTS = [
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS avatar_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS cover_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS video_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS dubbing_url text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS original_audio text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS source_metadata_refreshed_at bigint",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS source_urls_expires_at bigint",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS media_quality text",
+  "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS dash_video_url text",
+];
+
+async function migrateLegacyOriginalAudioColumn(db: Queryable): Promise<void> {
+  const result = await db.query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'transcript_history_records'
+       AND column_name = 'original_audio_object_key'`,
+  );
+  if (result.rows.length === 0) return;
+  await db.query(
+    `UPDATE transcript_history_records
+     SET original_audio = COALESCE(original_audio, original_audio_object_key)`,
+  );
+  await db.query("ALTER TABLE transcript_history_records DROP COLUMN original_audio_object_key");
+}
 
 const LEGACY_AUTH_DISPLAY_VIEWS = new Set(["users_display", "sessions_display", "email_codes_display"]);
 
@@ -338,7 +450,7 @@ const CORE_SCHEMA_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS api_access_tokens_prefix_idx ON api_access_tokens(token_prefix)",
 ];
 
-const TRANSCRIPT_SCHEMA_STATEMENTS = [
+const TRANSCRIPT_SCHEMA_BASE_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS transcript_open_api_quota_usage (
       user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       used_seconds double precision NOT NULL DEFAULT 0 CHECK (used_seconds >= 0),
@@ -381,23 +493,15 @@ const TRANSCRIPT_SCHEMA_STATEMENTS = [
       created_at bigint NOT NULL,
       updated_at bigint NOT NULL
     )`,
+];
+
+const TRANSCRIPT_SCHEMA_FINALIZE_STATEMENTS = [
+  "CREATE UNIQUE INDEX IF NOT EXISTS transcript_history_records_id_uidx ON transcript_history_records(id)",
   `CREATE UNIQUE INDEX IF NOT EXISTS transcript_history_records_user_work_uidx
       ON transcript_history_records(user_id, work_key)`,
   "ALTER TABLE transcript_history_records ADD COLUMN IF NOT EXISTS pinned_at bigint",
   `CREATE INDEX IF NOT EXISTS transcript_history_records_user_updated_idx
       ON transcript_history_records(user_id, updated_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS transcript_history_assets (
-      history_record_id text NOT NULL REFERENCES transcript_history_records(id) ON DELETE CASCADE,
-      asset_kind text NOT NULL CHECK (asset_kind IN ('avatar', 'cover', 'video', 'originalAudio')),
-      object_key text NOT NULL,
-      content_type text NOT NULL,
-      size_bytes bigint NOT NULL,
-      duration_seconds double precision,
-      verified_at bigint,
-      updated_at bigint NOT NULL,
-      PRIMARY KEY(history_record_id, asset_kind)
-    )`,
-  "ALTER TABLE transcript_history_assets ADD COLUMN IF NOT EXISTS verified_at bigint",
   `CREATE TABLE IF NOT EXISTS transcript_history_comments (
       history_record_id text PRIMARY KEY REFERENCES transcript_history_records(id) ON DELETE CASCADE,
       payload jsonb NOT NULL,

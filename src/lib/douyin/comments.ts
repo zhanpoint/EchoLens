@@ -1,42 +1,24 @@
 import type { DouyinWebClient } from "./web-client";
+import type {
+  Comment as DouyinComment,
+  CommentAuthor as DouyinCommentAuthor,
+  CommentCollectionProgress,
+  CommentReply as DouyinCommentReply,
+  CommentsPayload,
+} from "@/lib/comment-model";
 
 const PAGE_SIZE = 20;
 const REPLY_CONCURRENCY = 4;
 
-export type DouyinCommentAuthor = {
-  id: string;
-  name: string;
+export type {
+  DouyinComment,
+  DouyinCommentAuthor,
+  DouyinCommentReply,
+  CommentCollectionProgress,
 };
 
-export type DouyinComment = {
-  author: DouyinCommentAuthor;
-  id: string;
-  likeCount: number;
-  publishedAt: number;
-  replies: DouyinCommentReply[];
-  replyCount: number;
-  replyPageHasMore: boolean;
-  text: string;
-};
-
-export type DouyinCommentReply = {
-  author: DouyinCommentAuthor;
-  id: string;
-  likeCount: number;
-  publishedAt: number;
-  text: string;
-};
-
-export type DouyinCommentsPayload = {
+export type DouyinCommentsPayload = CommentsPayload & {
   awemeId: string;
-  collectedAt: number;
-  commentCount: number;
-  comments: DouyinComment[];
-};
-
-export type CommentCollectionProgress = {
-  commentCount: number;
-  page: number;
 };
 
 type PagedComments = {

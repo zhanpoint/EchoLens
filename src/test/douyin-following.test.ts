@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectDouyinFollowingUsers } from "@/lib/douyin/following";
 
+vi.mock("@/lib/douyin/ms-token", () => ({
+  resolveMsToken: vi.fn(async () => "mock-ms-token"),
+}));
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("douyin following", () => {

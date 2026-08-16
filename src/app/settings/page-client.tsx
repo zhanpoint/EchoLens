@@ -1385,7 +1385,12 @@ function ApiTokensPanel({ isLoaded }: { isLoaded: boolean }) {
     }
   }
 
-  async function revealToken(token: ApiAccessTokenRecord) {
+  async function toggleTokenVisibility(token: ApiAccessTokenRecord) {
+    if (revealedToken?.id === token.id) {
+      setRevealedToken(undefined);
+      return;
+    }
+
     const plain = await readPlainToken(token);
     if (plain) setRevealedToken({ id: token.id, value: plain });
   }
@@ -1450,8 +1455,15 @@ function ApiTokensPanel({ isLoaded }: { isLoaded: boolean }) {
             <span className="hidden text-xs text-muted-foreground lg:block">{token.lastUsedAt ? formatTokenDate(token.lastUsedAt) : "从未使用"}</span>
             <div className="flex min-w-0 items-center gap-1">
               <code className="min-w-0 flex-1 break-all text-xs text-foreground">{revealedToken?.id === token.id ? revealedToken.value : `${token.prefix}…`}</code>
-              <button type="button" onClick={() => void revealToken(token)} disabled={isBusy} className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan disabled:opacity-35" aria-label={`查看 ${token.name} 明文`} title="查看明文">
-                <Eye className="size-3.5" aria-hidden="true" />
+              <button
+                type="button"
+                onClick={() => void toggleTokenVisibility(token)}
+                disabled={isBusy}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-cyan disabled:opacity-35"
+                aria-label={revealedToken?.id === token.id ? `隐藏 ${token.name} 明文` : `查看 ${token.name} 明文`}
+                title={revealedToken?.id === token.id ? "隐藏明文" : "查看明文"}
+              >
+                {revealedToken?.id === token.id ? <EyeOff className="size-3.5" aria-hidden="true" /> : <Eye className="size-3.5" aria-hidden="true" />}
               </button>
               <button type="button" onClick={() => void copyToken(token)} disabled={isBusy} className={`inline-flex size-7 shrink-0 items-center justify-center rounded-md transition hover:bg-white/[0.06] disabled:opacity-35 ${copiedTokenId === token.id ? "text-emerald-400" : "text-muted-foreground hover:text-cyan"}`} aria-label={copiedTokenId === token.id ? `${token.name} 已复制` : `复制 ${token.name}`} title={copiedTokenId === token.id ? "已复制" : "复制令牌"}>
                 {copiedTokenId === token.id ? <Check className="size-3.5" aria-hidden="true" /> : <Copy className="size-3.5" aria-hidden="true" />}
@@ -1769,7 +1781,7 @@ export function SettingsPage({
     organization: DEFAULT_DOWNLOAD_ORGANIZATION,
     videoQuality: DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   });
-  const [isCredentialVisible, setIsCredentialVisible] = useState(false);
+  const [visibleCredential, setVisibleCredential] = useState<"bilibili" | "douyin">();
   const [isLoaded, setIsLoaded] = useState(false);
   const [isDouyinSaving, setIsDouyinSaving] = useState(false);
   const [isBilibiliSaving, setIsBilibiliSaving] = useState(false);
@@ -2332,7 +2344,7 @@ export function SettingsPage({
                   <div className="relative min-w-0 flex-1">
                     <input
                       id="douyin-credential"
-                      type={isCredentialVisible ? "text" : "password"}
+                      type={visibleCredential === "douyin" ? "text" : "password"}
                       value={settings.cookie}
                       onChange={(event) => {
                         setSettings({ ...settings, cookie: event.target.value });
@@ -2362,12 +2374,12 @@ export function SettingsPage({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setIsCredentialVisible((current) => !current)}
+                      onClick={() => setVisibleCredential((current) => current === "douyin" ? undefined : "douyin")}
                       className="absolute inset-y-0 right-0 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
-                      aria-label={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
-                      title={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
+                      aria-label={visibleCredential === "douyin" ? "隐藏访问凭证" : "显示访问凭证"}
+                      title={visibleCredential === "douyin" ? "隐藏访问凭证" : "显示访问凭证"}
                     >
-                      {isCredentialVisible ? (
+                      {visibleCredential === "douyin" ? (
                         <EyeOff className="size-3.5" aria-hidden="true" />
                       ) : (
                         <Eye className="size-3.5" aria-hidden="true" />
@@ -2488,7 +2500,7 @@ export function SettingsPage({
                   <div className="relative min-w-0 flex-1">
                     <input
                       id="bilibili-credential"
-                      type={isCredentialVisible ? "text" : "password"}
+                      type={visibleCredential === "bilibili" ? "text" : "password"}
                       value={bilibiliSettings.cookie}
                       onChange={(event) => {
                         setBilibiliSettings({ ...bilibiliSettings, cookie: event.target.value });
@@ -2518,12 +2530,12 @@ export function SettingsPage({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setIsCredentialVisible((current) => !current)}
+                      onClick={() => setVisibleCredential((current) => current === "bilibili" ? undefined : "bilibili")}
                       className="absolute inset-y-0 right-0 inline-flex w-9 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
-                      aria-label={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
-                      title={isCredentialVisible ? "隐藏访问凭证" : "显示访问凭证"}
+                      aria-label={visibleCredential === "bilibili" ? "隐藏访问凭证" : "显示访问凭证"}
+                      title={visibleCredential === "bilibili" ? "隐藏访问凭证" : "显示访问凭证"}
                     >
-                      {isCredentialVisible ? <EyeOff className="size-3.5" aria-hidden="true" /> : <Eye className="size-3.5" aria-hidden="true" />}
+                      {visibleCredential === "bilibili" ? <EyeOff className="size-3.5" aria-hidden="true" /> : <Eye className="size-3.5" aria-hidden="true" />}
                     </button>
                   </div>
                   <button

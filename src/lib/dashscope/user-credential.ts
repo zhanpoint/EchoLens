@@ -22,17 +22,6 @@ export type DashScopeUserConfig = {
 export async function readDashScopeUserConfig(userId: string): Promise<DashScopeUserConfig> {
   const platformApiKey = normalizeApiKey(process.env.DASHSCOPE_API_KEY);
   const platformModels = readEnvironmentDashScopeModelIds();
-  if (!process.env.DATABASE_URL?.trim()) {
-    return {
-      apiKey: platformApiKey,
-      customModels: normalizeDashScopeModelIds(undefined),
-      isCustomApiKey: false,
-      models: platformModels,
-      platformApiKey,
-      platformModels,
-    };
-  }
-
   const [credential, modelSetting] = await Promise.all([
     readUserSetting(userId, "aiCredential") as Promise<AiCredentialSetting | undefined>,
     readUserSetting(userId, "aiModels"),
@@ -51,9 +40,6 @@ export async function readDashScopeUserConfig(userId: string): Promise<DashScope
 }
 
 export async function readDashScopeApiKeyForUser(userId: string): Promise<string | undefined> {
-  if (!process.env.DATABASE_URL?.trim()) {
-    return normalizeApiKey(process.env.DASHSCOPE_API_KEY);
-  }
   const credential = await readUserSetting(userId, "aiCredential") as AiCredentialSetting | undefined;
   return normalizeApiKey(credential?.apiKey) || normalizeApiKey(process.env.DASHSCOPE_API_KEY);
 }

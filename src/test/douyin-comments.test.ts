@@ -106,5 +106,6 @@ function fakeClient(
     getSelfProfile: async () => ({}),
     query: () => ({ aid: "6383", msToken: "test-token" }),
     request,
+    verifyAuthenticatedSession: async () => undefined,
   };
 }

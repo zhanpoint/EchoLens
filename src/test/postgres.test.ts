@@ -30,7 +30,7 @@ describe("postgres storage", () => {
     expect(row).toEqual({ table_name: "users" });
   });
 
-  it("rebuilds legacy transcript data while preserving auth and Douyin credentials", async () => {
+  it("upgrades legacy transcript data without losing auth, credentials, or history", async () => {
     await closePostgresPoolForTest();
     pool = createPostgresTestPool();
     setPostgresPoolForTest(pool);
@@ -88,8 +88,16 @@ describe("postgres storage", () => {
       .resolves.toMatchObject({ rows: [{ id: "user-1" }] });
     await expect(pool.query("SELECT category, value FROM user_settings WHERE user_id = 'user-1'"))
       .resolves.toMatchObject({ rows: [{ category: "douyin", value: { cookie: "encrypted-cookie" } }] });
-    await expect(pool.query("SELECT id FROM transcript_history_records"))
-      .resolves.toMatchObject({ rows: [] });
+    await expect(pool.query(
+      "SELECT id, caption, session_name, work_key FROM transcript_history_records",
+    )).resolves.toMatchObject({
+      rows: [{
+        caption: "旧作品标题",
+        id: "legacy-history",
+        session_name: "旧会话名称",
+        work_key: "legacy:legacy-history",
+      }],
+    });
 
     const columns = await pool.query(
       `SELECT column_name
