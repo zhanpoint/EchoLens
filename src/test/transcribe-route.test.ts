@@ -175,6 +175,7 @@ describe("douyin transcribe route", () => {
           onStart: expect.any(Function),
         },
         signal: expect.any(AbortSignal),
+        title: "测试作品",
       },
     );
     expect(upsertTranscriptHistoryRecordMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -222,6 +223,7 @@ describe("douyin transcribe route", () => {
           onStart: expect.any(Function),
         },
         signal: expect.any(AbortSignal),
+        title: "测试作品",
       },
     );
   });
@@ -298,6 +300,7 @@ describe("douyin transcribe route", () => {
           onStart: expect.any(Function),
         },
         signal: expect.any(AbortSignal),
+        title: "测试作品",
       },
     );
   });

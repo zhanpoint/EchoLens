@@ -154,7 +154,6 @@ export async function POST(request: Request) {
               },
               signal: request.signal,
               title: work.caption,
-              authorName: work.authorName,
             },
           );
 
