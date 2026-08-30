@@ -164,7 +164,7 @@ describe("douyin transcribe route", () => {
         objectKey: "echolens/media/video/7649250336875613449/audio.m4a",
         signedUrl: "https://oss.example.com/server-signed-audio.m4a",
       },
-      { model: "fun-asr", profile: "e2" },
+      { model: "fun-asr", profile: "e3" },
       {
         apiKey: "test-user-key",
         clientJobId: "client-job-1",
@@ -248,7 +248,7 @@ describe("douyin transcribe route", () => {
       "user-1",
       "video:7649250336875613449",
       expect.any(Object),
-      { model: "fun-asr", profile: "e2" },
+      { model: "fun-asr", profile: "e3" },
       expect.objectContaining({
         apiKey: "platform-key",
         credentialSource: "platform",
@@ -322,7 +322,7 @@ describe("douyin transcribe route", () => {
       "user-1",
       "video:7649250336875613449",
       expect.any(Object),
-      { model: "fun-asr", profile: "e2" },
+      { model: "fun-asr", profile: "e3" },
       expect.objectContaining({
         historyContext: expect.objectContaining({
           work: expect.objectContaining({ caption: "Claude Fable 5 回归" }),

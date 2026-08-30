@@ -2830,10 +2830,7 @@ export default function HomePage() {
         ) : null}
 
         <section
-          className={cn(
-            "work-flow-panel shrink-0 rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]",
-            hasVisibleResults ? "min-h-[10.5rem] overflow-hidden" : "overflow-visible",
-          )}
+          className="work-flow-panel shrink-0 overflow-visible rounded-lg border border-white/25 p-0 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.07)]"
         >
           {activeKind ? (
             <div className="relative z-10 px-4 pt-4 sm:px-5 sm:pt-5">
@@ -2932,20 +2929,6 @@ export default function HomePage() {
               actionBusy={isTranscribing}
               actionDisabled={!canUseTranscribeAction}
               actionLabel={transcribeActionLabel}
-              configSlot={
-                activeKind === "video" && supportsAsrEnhancementOptions && specialWordFilterEnabled && specialWordFilterPanelOpen ? (
-                  <SpecialWordFilterPanel
-                    disabled={isTranscribing}
-                    emptyFilterWords={emptyFilterWords}
-                    onEmptyFilterWordsChange={setEmptyFilterWords}
-                    onClose={() => setSpecialWordFilterPanelOpen(false)}
-                    onSignedFilterWordsChange={setSignedFilterWords}
-                    onSystemReservedFilterChange={setSystemReservedFilter}
-                    signedFilterWords={signedFilterWords}
-                    systemReservedFilter={systemReservedFilter}
-                  />
-                ) : undefined
-              }
               notice={
                 activeKind === "video" ? (
                   <>
@@ -2978,10 +2961,26 @@ export default function HomePage() {
                     hasValidSpeakerCount={hasValidSpeakerCount}
                     onCheckedChange={setSpeakerDiarizationEnabled}
                     onSpeakerCountChange={setSpeakerCount}
-                    onSpecialWordFilterCheckedChange={updateSpecialWordFilterEnabled}
-                    onSpecialWordFilterPanelOpen={() => setSpecialWordFilterPanelOpen(true)}
+                    onSpecialWordFilterCheckedChange={(checked) => {
+                      updateSpecialWordFilterEnabled(checked);
+                      setSpecialWordFilterPanelOpen(checked);
+                    }}
                     speakerCount={speakerCount}
                     specialWordFilterEnabled={specialWordFilterEnabled}
+                    specialWordFilterPanel={
+                      specialWordFilterPanelOpen ? (
+                        <SpecialWordFilterPanel
+                          disabled={isTranscribing}
+                          emptyFilterWords={emptyFilterWords}
+                          onEmptyFilterWordsChange={setEmptyFilterWords}
+                          onClose={() => setSpecialWordFilterPanelOpen(false)}
+                          onSignedFilterWordsChange={setSignedFilterWords}
+                          onSystemReservedFilterChange={setSystemReservedFilter}
+                          signedFilterWords={signedFilterWords}
+                          systemReservedFilter={systemReservedFilter}
+                        />
+                      ) : undefined
+                    }
                     supportsEnhancementOptions={supportsAsrEnhancementOptions}
                     supportsSpecialWordFilter={asrModel === "e2"}
                   />
@@ -3838,7 +3837,6 @@ function TranscribeControls({
   actionDisabled,
   actionLabel,
   actionSlot,
-  configSlot,
   modelSlot,
   notice,
   onAction,
@@ -3848,16 +3846,13 @@ function TranscribeControls({
   actionDisabled: boolean;
   actionLabel: string;
   actionSlot?: ReactNode;
-  configSlot?: ReactNode;
   modelSlot?: ReactNode;
   notice?: ReactNode;
   onAction?: () => void;
   quotaSlot?: ReactNode;
 }) {
-  const hasConfig = Boolean(configSlot);
-
   return (
-    <div className={cn("empty-result-stage", hasConfig && "empty-result-stage--expanded")}>
+    <div className="empty-result-stage">
       <div className="empty-result-main">
         <p className="animated-gradient-text empty-result-message mobile-readable relative z-10 max-w-[34rem] text-center text-sm font-semibold leading-6">
           使用 Echolens，将视频作品内容即时转化为有用的可视化笔记。
@@ -3865,7 +3860,6 @@ function TranscribeControls({
         {notice ? <div className="relative z-10 w-full max-w-[34rem]">{notice}</div> : null}
       </div>
       <div className="empty-result-actions relative z-20 grid w-full gap-3">
-        {configSlot ? <div className="min-w-0">{configSlot}</div> : null}
         <div className="grid min-w-0 gap-3 md:flex md:flex-nowrap md:items-center md:justify-between">
           <div className="min-w-0 md:flex-1">{actionSlot}</div>
           <div className="grid min-w-0 gap-2 sm:flex sm:items-center sm:justify-end sm:gap-3 md:shrink-0">
@@ -3901,9 +3895,9 @@ function SpeakerDiarizationSwitch({
   onCheckedChange,
   onSpeakerCountChange,
   onSpecialWordFilterCheckedChange,
-  onSpecialWordFilterPanelOpen,
   speakerCount,
   specialWordFilterEnabled,
+  specialWordFilterPanel,
   supportsEnhancementOptions,
   supportsSpecialWordFilter,
 }: {
@@ -3913,9 +3907,9 @@ function SpeakerDiarizationSwitch({
   onCheckedChange: (checked: boolean) => void;
   onSpeakerCountChange: (speakerCount: string) => void;
   onSpecialWordFilterCheckedChange: (checked: boolean) => void;
-  onSpecialWordFilterPanelOpen: () => void;
   speakerCount: string;
   specialWordFilterEnabled: boolean;
+  specialWordFilterPanel?: ReactNode;
   supportsEnhancementOptions: boolean;
   supportsSpecialWordFilter: boolean;
 }) {
@@ -3988,24 +3982,19 @@ function SpeakerDiarizationSwitch({
         </label>
       ) : null}
       {supportsSpecialWordFilter ? (
-        <>
+        <span className="relative inline-flex shrink-0">
           <CompactSwitch
             checked={specialWordFilterEnabled}
             disabled={disabled}
             label="敏感词过滤"
             onChange={onSpecialWordFilterCheckedChange}
           />
-          {specialWordFilterEnabled ? (
-            <button
-              type="button"
-              onClick={onSpecialWordFilterPanelOpen}
-              disabled={disabled}
-              className="inline-flex h-6 items-center rounded-md px-1.5 text-xs font-medium text-cyan transition hover:bg-cyan/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              配置
-            </button>
+          {specialWordFilterPanel ? (
+            <div className="absolute left-full top-1/2 z-30 ml-2 w-[min(28rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] -translate-y-1/2">
+              {specialWordFilterPanel}
+            </div>
           ) : null}
-        </>
+        </span>
       ) : null}
     </div>
   );
@@ -4174,7 +4163,7 @@ function AsrModelSelect({
         ? createPortal(
             <div
               ref={panelRef}
-              className="z-[120] max-h-[min(16rem,calc(100vh-1rem))] overflow-auto rounded-md bg-[#0e1420] p-1 text-left shadow-2xl shadow-black/40 ring-1 ring-white/8"
+              className="content-scroll z-[120] max-h-[min(16rem,calc(100vh-1rem))] overflow-auto rounded-md bg-[#0e1420] p-1 text-left shadow-2xl shadow-black/40 ring-1 ring-white/8"
               role="listbox"
               style={{ position: "fixed", visibility: "hidden" }}
             >
@@ -4600,7 +4589,7 @@ function WorkDownloadActions({
   const actions = work.source === "douyin"
     ? DOWNLOAD_ACTIONS
     : DOWNLOAD_ACTIONS.filter((action) => action.asset !== "dubbing");
-  const [preview, setPreview] = useState<(typeof actions)[number] | null>(null);
+  const [preview, setPreview] = useState<{ action: (typeof actions)[number]; url: string } | null>(null);
   const [downloadError, setDownloadError] = useState("");
   const [freshAssetUrls, setFreshAssetUrls] = useState<Partial<Record<MediaAssetKind, string>>>({});
   const [loadingAssets, setLoadingAssets] = useState<ReadonlySet<MediaAssetKind>>(() => new Set());
@@ -4626,10 +4615,6 @@ function WorkDownloadActions({
       });
     }
   }
-
-  const previewCache = preview ? cachedAssets[preview.asset] : undefined;
-  const previewCached = previewCache?.workKey === workKey ? previewCache : undefined;
-  const previewUrl = preview ? freshAssetUrls[preview.asset] ?? previewCached?.url : undefined;
 
   return (
     <>
@@ -4664,7 +4649,7 @@ function WorkDownloadActions({
                 onClick={() => {
                   setDownloadError("");
                   void ensureAssetUrl(action.asset)
-                    .then(() => setPreview(action))
+                    .then((url) => setPreview({ action, url }))
                     .catch((error) => {
                       setDownloadError(readUserFacingError(error, "资源准备失败。"));
                     });
@@ -4708,21 +4693,21 @@ function WorkDownloadActions({
           {downloadError}
         </p>
       ) : null}
-      {preview && previewUrl && typeof document !== "undefined"
+      {preview && typeof document !== "undefined"
         ? createPortal(
             <AssetPreviewDialog
-              action={preview}
-              previewUrl={previewUrl}
-              downloadUrl={previewUrl}
+              action={preview.action}
+              previewUrl={preview.url}
+              downloadUrl={preview.url}
               onDownload={() => downloadCachedAsset(
-                previewUrl,
-                previewCached?.downloadName ?? `echolens-${work.id}-${preview.asset}`,
+                preview.url,
+                cachedAssets[preview.action.asset]?.downloadName ?? `echolens-${work.id}-${preview.action.asset}`,
                 work,
               )}
               onClose={() => setPreview(null)}
               onResourceError={() => {
                 setPreview(null);
-                onRetryAsset(preview.asset);
+                onRetryAsset(preview.action.asset);
               }}
             />,
             document.body,

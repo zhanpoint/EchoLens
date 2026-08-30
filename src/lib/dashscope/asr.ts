@@ -52,6 +52,8 @@ export type DashScopeAsrRuntimeOptions = {
   clientJobId?: string;
   credentialSource?: AsrCredentialSource;
   historyContext?: StoredAsrHistoryContext;
+  authorName?: string;
+  title?: string;
   postprocess?: {
     model?: string;
     onStart?: () => void;
@@ -268,6 +270,7 @@ export async function transcribeDashScopeAsrOnce(
           model: normalizedOptions.model,
           runtimeOptions,
           title: runtimeOptions.title,
+          authorName: runtimeOptions.authorName,
           transcript: {
             asrModel: normalizedOptions.model,
             ok: true,
@@ -360,6 +363,7 @@ async function settleDashScopeAsrTask(
       model,
       runtimeOptions,
       title: job.historyContext?.work.caption,
+      authorName: job.historyContext?.work.authorName,
       transcript: {
         asrModel: model,
         ok: true,
@@ -642,6 +646,7 @@ async function postprocessTranscript(input: {
   model: DashScopeAsrModel;
   runtimeOptions: DashScopeAsrRuntimeOptions;
   title?: string;
+  authorName?: string;
   transcript: Extract<ProviderResult, { ok: true }>;
 }): Promise<ProviderResult> {
   input.runtimeOptions.postprocess?.onStart?.();
@@ -652,6 +657,7 @@ async function postprocessTranscript(input: {
     segments: input.transcript.transcriptSegments,
     signal: input.runtimeOptions.signal,
     title: input.title,
+    authorName: input.authorName,
   });
 
   if (result.ok) {

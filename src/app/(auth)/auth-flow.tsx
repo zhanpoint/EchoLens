@@ -786,17 +786,26 @@ function readNetworkError(error: unknown): string {
 }
 
 function formatRequestError(status: number, code: string | undefined): string {
+  if (code === "USERNAME_NOT_FOUND") {
+    return "用户名不存在，请检查后重试。";
+  }
+  if (code === "EMAIL_NOT_REGISTERED" || code === "EMAIL_NOT_FOUND") {
+    return "邮箱尚未注册，请先注册账号。";
+  }
+  if (code === "INVALID_CREDENTIALS" || code === "INVALID_PASSWORD") {
+    return "密码错误，请重新输入。";
+  }
+  if (code === "INVALID_CODE") {
+    return "验证码无效或已过期，请重新获取。";
+  }
+  if (code === "LEGAL_NOT_ACCEPTED") {
+    return "请先同意用户协议和隐私政策。";
+  }
   if (status === 401) {
-    if (code === "USERNAME_NOT_FOUND") {
-      return "该用户名不存在，请检查后重试。";
-    }
-    if (code === "EMAIL_NOT_FOUND") {
-      return "该邮箱尚未注册，请先注册账号。";
-    }
-    if (code === "INVALID_PASSWORD") {
-      return "密码错误，请重新输入，或使用“忘记密码”重置。";
-    }
-    return "登录状态无效，请重新登录。";
+    return "账号或密码错误，请检查后重试。";
+  }
+  if (status === 404) {
+    return "账号不存在，请检查后重试。";
   }
   if (status === 400) {
     if (code === "INVALID_IDENTIFIER" || code === "INVALID_PASSWORD_FORMAT") {
@@ -810,5 +819,5 @@ function formatRequestError(status: number, code: string | undefined): string {
   if (status >= 500) {
     return "服务暂时不可用，请稍后重试。";
   }
-  return "请求失败，请稍后重试。";
+  return "请求失败，请检查登录信息后重试。";
 }

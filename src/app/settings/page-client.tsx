@@ -79,9 +79,6 @@ import {
 } from "@/lib/download-settings";
 import { getApiError, readJsonPayload, readUserFacingError } from "../douyin/_client-api";
 import {
-  DASHSCOPE_FIXED_BASE_URL,
-} from "@/lib/dashscope/fixed-config";
-import {
   DASHSCOPE_MODEL_METADATA,
   DASHSCOPE_MODEL_OPTIONS,
   DEFAULT_DASHSCOPE_MODELS,
@@ -943,19 +940,6 @@ function AiCredentialPanel({
             <h3 className="text-xs font-semibold text-foreground">连接信息</h3>
           </div>
 
-          <label htmlFor="dashscope-base-url" className="mt-4 block text-xs font-semibold text-foreground">
-            DASHSCOPE_BASE_URL
-          </label>
-          <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-            <input
-              id="dashscope-base-url"
-              value={DASHSCOPE_FIXED_BASE_URL}
-              readOnly
-              className="h-10 min-w-0 rounded-md border border-white/10 bg-black/25 px-3 font-mono text-[11px] text-muted-foreground outline-none"
-            />
-            <span className="rounded-md bg-cyan/[0.1] px-2 py-1 text-[11px] font-semibold text-cyan">固定</span>
-          </div>
-
           <label htmlFor="dashscope-api-key" className="mt-4 block text-xs font-semibold text-foreground">
             DASHSCOPE_API_KEY
           </label>
@@ -1112,7 +1096,7 @@ function AiCredentialPanel({
            </button>
 
            <div className="mt-3 grid gap-2">
-            <GuideDisclosure title="1. 选择新加坡地域" defaultOpen>
+            <GuideDisclosure title="1. 选择新加坡地域">
               <ol className="grid list-decimal gap-1 pl-4">
                 <li>登录阿里云百炼控制台，查看页面右上角的地域选择器。</li>
                 <li>选择“新加坡”，等待控制台重新加载。</li>
@@ -1155,7 +1139,7 @@ function AiCredentialPanel({
             <GuideDisclosure title="5. 保存前完成最终核对">
               <ol className="grid list-decimal gap-1 pl-4">
                 <li>地域显示“新加坡”，地址包含 <code className="text-cyan">ap-southeast-1</code>。</li>
-                <li>Key 归属 EchoLens 非默认业务空间，空间调用地址与本页固定地址一致。</li>
+                <li>Key 归属 EchoLens 非默认业务空间。</li>
                 <li>空间已授权四个固定模型并设置限流，Key 的自定义模型范围也包含同样四个模型。</li>
                 <li>把 Key 粘贴到左侧并保存，不要通过聊天、截图或日志分享 Key。</li>
               </ol>

@@ -35,6 +35,7 @@ export async function createOpenTranscription(input: {
           postprocess: { model: config.customModels.transcriptPostprocess },
           signal: input.signal,
           title: media.title,
+          authorName: media.resource.author.name,
         },
       )
     : undefined;
@@ -48,6 +49,7 @@ export async function createOpenTranscription(input: {
       signal: input.signal,
       signedUrl: media.audioUrl,
       title: media.title,
+      authorName: media.resource.author.name,
       userId: input.userId,
     });
   }
@@ -79,6 +81,7 @@ async function transcribeWithPlatformQuota(input: {
   signal?: AbortSignal;
   signedUrl: string;
   title: string;
+  authorName: string;
   userId: string;
 }): Promise<{ fallbackEligible?: boolean; result: ProviderResult } | undefined> {
   if (!input.apiKey) return undefined;
@@ -100,6 +103,7 @@ async function transcribeWithPlatformQuota(input: {
         postprocess: { model: input.models.transcriptPostprocess },
         signal: input.signal,
         title: input.title,
+        authorName: input.authorName,
       },
     );
     consumed = outcome.result.ok;

@@ -103,15 +103,16 @@ ${text}`;
 
 export function buildTranscriptPostprocessPrompt(
   segments: TimestampedPromptSegment[],
-  context: { title?: string } = {},
+  context: { authorName?: string; title?: string } = {},
 ): string {
+  const authorName = context.authorName?.trim();
   const title = context.title?.trim();
 
   return `你是 ASR 转录后处理器。ASR 结果通常准确，仅对 segments 的 text 做必要修正，并保持各 id 对应的时间范围不变。
 
 处理规则：
 - 全局阅读转录，并结合当前句与相邻 segments 修复片段边界：去除首尾重复或重叠文本，合理归置被切断的语义，使各片段尽量在完整句子或自然停顿处结束，下一片段从自然语义起点开始。
-- 作品标题是纠错时的最高优先级上下文，但只能用于修正语音中对应内容的明显同音、近音、漏词或误识别，不得写入语音未表达的标题信息。
+- 作品标题和作者名称是纠错时的重要上下文，但只能用于修正语音中对应内容的明显同音、近音、漏词或误识别，不得写入语音未表达的标题或作者信息。
 - 结合转录文本上下文，核对人名、公司名、品牌名、产品名、地名、英文缩写、技术术语、小众词、热梗和热点词等；只修正有充分依据的明显转录错误，不得臆改。
 - 在不改变含义的前提下，将明确的数量、序数、分数、百分比、倍数、年份、日期、时间、金额、型号和计量值优先写成阿拉伯数字，专名中的数字遵循标题或通行写法；成语、固定搭配和模糊数量不强制转换。
 - 除上述修正外，尽量保留 ASR 原有字词、语气、顺序和正常口语表达，不总结、不改写、不扩写。
@@ -123,8 +124,8 @@ export function buildTranscriptPostprocessPrompt(
 - 每项只能包含 {"id":number,"text":string}，不得输出时间戳或其他字段。
 - 无有效语音、纯水印或纯噪声片段的 text 返回 ""。
 
-作品标题 JSON：
-${title ? JSON.stringify({ title }) : "null"}
+作品标题和作者名称 JSON：
+${JSON.stringify({ ...(title ? { title } : {}), ...(authorName ? { authorName } : {}) })}
 
 输入 segments JSON：
 ${JSON.stringify(segments)}`;

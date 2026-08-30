@@ -361,10 +361,10 @@ async function requestWbiJsonAnonymousFirst(
   requestPolicy?: OpenApiPlatformRequestPolicy,
 ): Promise<Record<string, unknown>> {
   try {
-    return await requestWbiJson(endpoint, params, "", requestPolicy);
+    return await requestBilibiliWbiJson(endpoint, params, "", requestPolicy);
   } catch (error) {
     if (!cookie.trim()) throw error;
-    return await requestWbiJson(endpoint, params, cookie, requestPolicy);
+    return await requestBilibiliWbiJson(endpoint, params, cookie, requestPolicy);
   }
 }
 
@@ -375,15 +375,6 @@ export async function requestBilibiliWbiJson(
   requestPolicy?: OpenApiPlatformRequestPolicy,
 ): Promise<Record<string, unknown>> {
   return await requestWbiJsonWithSession(endpoint, params, await getWbiSession(cookie, requestPolicy), requestPolicy);
-}
-
-async function requestWbiJson(
-  endpoint: string,
-  params: Record<string, string | number>,
-  cookie: string,
-  requestPolicy?: OpenApiPlatformRequestPolicy,
-): Promise<Record<string, unknown>> {
-  return await requestBilibiliWbiJson(endpoint, params, cookie, requestPolicy);
 }
 
 async function requestWbiJsonWithSession(

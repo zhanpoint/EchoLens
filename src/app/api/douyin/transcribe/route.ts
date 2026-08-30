@@ -153,6 +153,8 @@ export async function POST(request: Request) {
                 onStart: onPostprocessStart,
               },
               signal: request.signal,
+              title: work.caption,
+              authorName: work.authorName,
             },
           );
 

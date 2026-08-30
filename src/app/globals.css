@@ -237,19 +237,85 @@ body::-webkit-scrollbar-button {
   background: rgb(255 255 255 / 0.58);
 }
 
-.content-scroll::-webkit-scrollbar-button {
+.content-scroll::-webkit-scrollbar-button,
+.content-scroll::-webkit-scrollbar-button:single-button,
+.content-scroll::-webkit-scrollbar-button:vertical:start,
+.content-scroll::-webkit-scrollbar-button:vertical:end,
+.content-scroll::-webkit-scrollbar-button:vertical:start:decrement,
+.content-scroll::-webkit-scrollbar-button:vertical:end:increment {
   display: none;
+  visibility: hidden;
   width: 0;
   height: 0;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  background-image: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .content-scroll::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-.echolens-themed-select {
-  color-scheme: light;
+.select-content-scroll,
+[data-select-scroll-viewport="true"] {
+  scrollbar-color: rgb(255 255 255 / 0.42) transparent;
+  scrollbar-width: thin;
 }
+
+.select-content-scroll::-webkit-scrollbar,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar {
+  width: 0.25rem;
+  height: 0.25rem;
+  background: transparent;
+}
+
+.select-content-scroll::-webkit-scrollbar-track,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.select-content-scroll::-webkit-scrollbar-thumb,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-thumb {
+  min-height: 2rem;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.42);
+}
+
+.select-content-scroll::-webkit-scrollbar-button,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button,
+.select-content-scroll::-webkit-scrollbar-button:single-button,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button:single-button,
+.select-content-scroll::-webkit-scrollbar-button:vertical:start,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button:vertical:start,
+.select-content-scroll::-webkit-scrollbar-button:vertical:end,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button:vertical:end,
+.select-content-scroll::-webkit-scrollbar-button:vertical:start:decrement,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button:vertical:start:decrement,
+.select-content-scroll::-webkit-scrollbar-button:vertical:end:increment,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-button:vertical:end:increment {
+  display: none;
+  visibility: hidden;
+  width: 0;
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  background-image: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.select-content-scroll::-webkit-scrollbar-corner,
+[data-select-scroll-viewport="true"]::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 
 .dark .echolens-themed-select {
   color-scheme: dark;
@@ -678,11 +744,6 @@ body::-webkit-scrollbar-button {
   overflow: visible;
   padding: clamp(0.875rem, 1.8vw, 1.25rem) clamp(1rem, 2.2vw, 1.5rem) clamp(0.875rem, 1.6vw, 1rem);
   border-radius: inherit;
-}
-
-.empty-result-stage--expanded {
-  grid-template-rows: minmax(4.5rem, auto) auto;
-  min-height: clamp(16rem, 36dvh, 20rem);
 }
 
 .empty-result-main {

@@ -40,7 +40,7 @@ export type EchoLensDashScopeModelIds = Omit<Record<DashScopeModelPurpose, strin
   asrE3?: string;
 };
 
-export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e2" as const;
+export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e3" as const;
 
 export const DEFAULT_DASHSCOPE_MODELS: EchoLensDashScopeModelIds = {
   asrE1: "qwen3-asr-flash-filetrans",

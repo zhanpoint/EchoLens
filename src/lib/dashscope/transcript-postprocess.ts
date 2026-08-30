@@ -12,7 +12,7 @@ type PostprocessedSegmentText = {
   text: string;
 };
 
-export const TRANSCRIPT_POSTPROCESS_VERSION = "transcript-postprocess-v7";
+export const TRANSCRIPT_POSTPROCESS_VERSION = "transcript-postprocess-v8";
 
 export async function streamTranscriptPostprocess(input: {
   apiKey?: string;
@@ -21,13 +21,14 @@ export async function streamTranscriptPostprocess(input: {
   segments?: TranscriptSegment[];
   signal?: AbortSignal;
   title?: string;
+  authorName?: string;
 }): Promise<ProviderResult> {
   const promptSegments = buildPromptSegments(input);
   if (promptSegments.length === 0) {
     return { ok: false, code: "unavailable", detail: "没有可后处理的转录文本。" };
   }
 
-  const prompt = buildTranscriptPostprocessPrompt(promptSegments, { title: input.title });
+  const prompt = buildTranscriptPostprocessPrompt(promptSegments, { authorName: input.authorName, title: input.title });
   const result = await streamDashScopeChat({
     apiKey: input.apiKey,
     model: input.model ?? DEFAULT_DASHSCOPE_MODELS.transcriptPostprocess,

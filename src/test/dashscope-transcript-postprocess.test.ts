@@ -38,10 +38,11 @@ describe("dashscope transcript postprocess", () => {
         { endSeconds: 2.4, emotion: "happy", speakerId: "2", startSeconds: 1.2, text: "讲 A。然后继续。" },
       ],
       title: "A 主题",
+      authorName: "作者名称",
     })).resolves.toMatchObject({
       ok: true,
       content: "今天我们讲 A。\n然后继续。",
-      postprocessVersion: "transcript-postprocess-v7",
+      postprocessVersion: "transcript-postprocess-v8",
       transcriptSegments: [
         { endSeconds: 1.2, emotion: "neutral", speakerId: "1", startSeconds: 0, text: "今天我们讲 A。" },
         { endSeconds: 2.4, emotion: "happy", speakerId: "2", startSeconds: 1.2, text: "然后继续。" },
@@ -63,6 +64,7 @@ describe("dashscope transcript postprocess", () => {
     expect(body.tools).toBeUndefined();
     const prompt = body.messages?.[0]?.content ?? "";
     expect(prompt).toContain("A 主题");
+    expect(prompt).toContain("作者名称");
     expect(prompt).toContain("ASR 结果通常准确");
     expect(prompt).toContain("明确的数量、序数、分数、百分比、倍数");
     expect(prompt).toContain("\"startSeconds\":0");

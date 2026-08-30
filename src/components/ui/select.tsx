@@ -38,12 +38,15 @@ const SelectContent = React.forwardRef<
       ref={ref}
       position={position}
       className={cn(
-        "relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-white/10 bg-surface-strong p-1 text-foreground shadow-xl shadow-black/30",
+        "select-content-scroll relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-white/10 bg-surface-strong p-1 text-foreground shadow-xl shadow-black/30",
         className,
       )}
       {...props}
     >
-      <SelectPrimitive.Viewport className="p-0.5">
+      <SelectPrimitive.Viewport
+        className="select-content-scroll p-0.5"
+        data-select-scroll-viewport="true"
+      >
         {children}
       </SelectPrimitive.Viewport>
     </SelectPrimitive.Content>
