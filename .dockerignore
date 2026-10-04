@@ -9,8 +9,11 @@ pnpm-debug.log*
 .env*.local
 tsconfig.tsbuildinfo
 README.md
-skills-lock.json
+CONTRIBUTING.md
+.codex
+.cursor
 .agents
+public/readme-*.png
 coverage
 .turbo
 *.log
