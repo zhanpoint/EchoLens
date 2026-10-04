@@ -1,5 +1,4 @@
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -10,7 +9,6 @@ import { execFileSync } from "node:child_process";
 
 const root = process.cwd();
 const helperSourceDir = resolve(root, "scripts", "douyin-credential-helper");
-const distDir = resolve(root, "dist");
 const publicDir = resolve(root, "public", "downloads");
 const artifactManifest = JSON.parse(readFileSync(
   resolve(root, "src", "lib", "douyin", "credential-helper-artifacts.json"),
@@ -26,11 +24,10 @@ const goRoot = execFileSync(goBinary, ["env", "GOROOT"], {
 }).trim();
 const baseEnv = { ...cleanEnv, CGO_ENABLED: "0", GOROOT: goRoot, GOOS: "windows" };
 
-mkdirSync(distDir, { recursive: true });
 mkdirSync(publicDir, { recursive: true });
 
 for (const target of windowsTargets) {
-  const outputPath = resolve(distDir, target.fileName);
+  const outputPath = resolve(publicDir, target.fileName);
   execFileSync(goBinary, [
     "build",
     "-trimpath",
@@ -43,12 +40,11 @@ for (const target of windowsTargets) {
     env: { ...baseEnv, GOARCH: target.goArch },
     stdio: "inherit",
   });
-  copyFileSync(outputPath, resolve(publicDir, target.fileName));
   console.log(`Built ${outputPath}`);
 }
 
 if (process.argv.includes("--run")) {
-  execFileSync(resolve(distDir, artifactManifest.windows.x64.fileName), [], {
+  execFileSync(resolve(publicDir, artifactManifest.windows.x64.fileName), [], {
     stdio: "inherit",
   });
 }

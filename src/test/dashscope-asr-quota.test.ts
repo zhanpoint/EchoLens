@@ -185,7 +185,8 @@ describe("DashScope ASR lifetime platform quota", () => {
       status: "failed",
       result: {
         code: "NETWORK_RETRY_EXHAUSTED",
-        detail: "网络连接失败，请检查网络后重试。",
+        detail: "识别提交确认中断，请先核对服务商记录后重试；避免重复计费。",
+        submissionUncertain: true,
         ok: false,
       },
     });

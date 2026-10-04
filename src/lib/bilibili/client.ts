@@ -488,10 +488,6 @@ function requestHeaders(cookie: string): Record<string, string> {
   };
 }
 
-export function bilibiliMediaHeaders(cookie = ""): Record<string, string> {
-  return requestHeaders(cookie);
-}
-
 function chooseVideo(
   streams: BilibiliMediaStream[],
   codec: BilibiliVideoCodec,

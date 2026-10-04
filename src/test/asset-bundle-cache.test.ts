@@ -7,23 +7,22 @@ const mocks = vi.hoisted(() => ({
   deleteOssObjects: vi.fn(),
   fetchRemoteMedia: vi.fn(),
   getOssObjectInfo: vi.fn(),
-  probeTranscribableAudioFromUrl: vi.fn(),
   putOssStream: vi.fn(),
 }));
 
-vi.mock("@/lib/media/audio", () => ({
+vi.mock("@/lib/media/audio", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/media/audio")>(),
   createTranscribableAudioFileFromNode: mocks.createTranscribableAudioFileFromNode,
   fetchRemoteMedia: mocks.fetchRemoteMedia,
-  probeTranscribableAudioFromUrl: mocks.probeTranscribableAudioFromUrl,
 }));
 vi.mock("@/lib/oss/object-store", () => ({
-  createOssSignedUrl: vi.fn((objectKey: string) => `https://cache/${objectKey}`),
   deleteOssObjects: mocks.deleteOssObjects,
   getOssObjectInfo: mocks.getOssObjectInfo,
   putOssStream: mocks.putOssStream,
 }));
 
 import { prepareDouyinOriginalAudio } from "@/lib/douyin/asset-bundle";
+import { FfmpegProcessError } from "@/lib/media/ffmpeg-runner";
 
 const input = { id: "123456", kind: "video" as const, videoQuality: "lowest" as const };
 const metadata = {
@@ -40,7 +39,6 @@ describe("original-audio OSS pipeline", () => {
     vi.clearAllMocks();
     mocks.deleteOssObjects.mockResolvedValue(undefined);
     mocks.putOssStream.mockResolvedValue(undefined);
-    mocks.probeTranscribableAudioFromUrl.mockResolvedValue(undefined);
     mocks.getOssObjectInfo.mockImplementation(async (objectKey: string) => {
       const uploaded = mocks.putOssStream.mock.calls.some(([value]) => value.objectKey === objectKey);
       return uploaded ? { contentLength: 3, contentType: "audio/mp4", metadata: {} } : null;
@@ -66,7 +64,7 @@ describe("original-audio OSS pipeline", () => {
     vi.restoreAllMocks();
   });
 
-  it("streams independent Douyin audio directly to OSS and verifies it", async () => {
+  it("decodes independent Douyin audio locally before uploading a validated M4A", async () => {
     await expect(prepareDouyinOriginalAudio(input, metadata)).resolves.toMatchObject({
       contentType: "audio/mp4",
       durationSeconds: 90,
@@ -74,12 +72,12 @@ describe("original-audio OSS pipeline", () => {
     });
 
     expect(mocks.fetchRemoteMedia).toHaveBeenCalledWith(metadata.audioUrls, { mediaSource: "douyin" });
-    expect(mocks.createTranscribableAudioFileFromNode).not.toHaveBeenCalled();
+    expect(mocks.createTranscribableAudioFileFromNode).toHaveBeenCalledOnce();
     expect(mocks.putOssStream).toHaveBeenCalledWith(expect.objectContaining({
       contentLength: 3,
       objectKey: "echolens/media/video/123456/audio.m4a",
     }));
-    expect(mocks.probeTranscribableAudioFromUrl).toHaveBeenCalledOnce();
+    expect(mocks.audioCleanup).toHaveBeenCalledOnce();
   });
 
   it("shares audio preparation across concurrent requests and releases failed tasks for retry", async () => {
@@ -90,7 +88,7 @@ describe("original-audio OSS pipeline", () => {
     expect(results.every((result) => result.objectKey === results[0].objectKey)).toBe(true);
     expect(mocks.fetchRemoteMedia).toHaveBeenCalledOnce();
     expect(mocks.putOssStream).toHaveBeenCalledOnce();
-    expect(mocks.probeTranscribableAudioFromUrl).toHaveBeenCalledOnce();
+    expect(mocks.createTranscribableAudioFileFromNode).toHaveBeenCalledOnce();
 
     await prepareDouyinOriginalAudio(input, metadata);
     expect(mocks.fetchRemoteMedia).toHaveBeenCalledOnce();
@@ -106,6 +104,26 @@ describe("original-audio OSS pipeline", () => {
     expect(mocks.createTranscribableAudioFileFromNode).toHaveBeenCalledOnce();
     expect(mocks.putOssStream).toHaveBeenCalledOnce();
     expect(mocks.audioCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to the video when independent audio cannot be decoded", async () => {
+    mocks.createTranscribableAudioFileFromNode.mockRejectedValueOnce(new FfmpegProcessError("损坏的音频", 1));
+    await expect(prepareDouyinOriginalAudio(input, metadata)).resolves.toMatchObject({ sizeBytes: 3 });
+    expect(mocks.fetchRemoteMedia.mock.calls.map(call => call[0])).toEqual([metadata.audioUrls, metadata.videoUrls]);
+    expect(mocks.putOssStream).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the undecodable-audio classification when no video fallback exists", async () => {
+    mocks.createTranscribableAudioFileFromNode.mockRejectedValueOnce(new FfmpegProcessError("没有音轨", 1));
+    await expect(prepareDouyinOriginalAudio(input, { ...metadata, videoUrls: [] })).rejects.toBeInstanceOf(FfmpegProcessError);
+    expect(mocks.putOssStream).not.toHaveBeenCalled();
+  });
+
+  it("rejects media with no available sources before downloading or uploading", async () => {
+    await expect(prepareDouyinOriginalAudio(input, { ...metadata, audioUrls: [], videoUrls: [] }))
+      .rejects.toThrow("没有可用的音频或视频资源");
+    expect(mocks.fetchRemoteMedia).not.toHaveBeenCalled();
+    expect(mocks.putOssStream).not.toHaveBeenCalled();
   });
 
   it("reuses one extracted file across upload retries without retaining the source video in memory", async () => {
@@ -140,6 +158,5 @@ describe("original-audio OSS pipeline", () => {
     expect(mocks.fetchRemoteMedia).not.toHaveBeenCalled();
     expect(mocks.putOssStream).not.toHaveBeenCalled();
     expect(mocks.deleteOssObjects).not.toHaveBeenCalled();
-    expect(mocks.probeTranscribableAudioFromUrl).not.toHaveBeenCalled();
   });
 });

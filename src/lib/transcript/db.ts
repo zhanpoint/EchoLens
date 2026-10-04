@@ -10,7 +10,7 @@ type StoredAsrTaskRow = {
   error_detail: string | null;
   history_record_id: string | null;
   history_work: unknown;
-  result: Extract<ProviderResult, { ok: true }> | null;
+  result: ProviderResult | null;
   id: string;
   model: string;
   object_key: string;
@@ -72,6 +72,7 @@ export type StoredAsrTask = {
   cacheKey: string;
   credentialSource: AsrCredentialSource;
   errorDetail?: string;
+  failure?: Extract<ProviderResult, { ok: false }>;
   historyContext?: StoredAsrHistoryContext;
   result?: Extract<ProviderResult, { ok: true }>;
   id: string;
@@ -232,13 +233,15 @@ export async function reserveAsrTask(input: {
 export async function attachAsrTaskProviderTask(input: {
   id: string;
   taskId: string;
+  model?: string;
+  cacheKey?: string;
 }): Promise<boolean> {
   const row = await queryRow<{ id: string }>(
     `UPDATE transcript_asr_tasks
-     SET task_id = $1, updated_at = $2
+     SET task_id = $1, updated_at = $2, model = COALESCE($4, model), cache_key = COALESCE($5, cache_key)
      WHERE id = $3 AND status = 'running'
      RETURNING id`,
-    [input.taskId, Date.now(), input.id],
+    [input.taskId, Date.now(), input.id, input.model ?? null, input.cacheKey ?? null],
   );
   return Boolean(row);
 }
@@ -307,13 +310,13 @@ export async function deleteAsrTask(input: { id: string; userId: string }): Prom
   return rowCount > 0;
 }
 
-export async function markAsrTaskFailed(id: string, detail: string): Promise<void> {
+export async function markAsrTaskFailed(id: string, detail: string, failure?: Extract<ProviderResult, { ok: false }>): Promise<void> {
   const now = Date.now();
   await execute(
     `UPDATE transcript_asr_tasks
-     SET status = 'failed', error_detail = $1, updated_at = $2
-     WHERE id = $3`,
-    [detail, now, id],
+     SET status = 'failed', error_detail = $1, updated_at = $2, result = COALESCE($4::jsonb, result)
+     WHERE id = $3 AND status = 'running'`,
+    [detail, now, id, failure ? JSON.stringify(failure) : null],
   );
 }
 
@@ -806,13 +809,15 @@ export async function deleteTranscriptCustomPrompt(input: {
 }
 
 function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
+  const storedResult = row.result;
   return {
     audioDurationSeconds: row.audio_duration_seconds ?? 0,
     cacheKey: row.cache_key,
     credentialSource: row.credential_source,
     errorDetail: row.error_detail ?? undefined,
     historyContext: mapAsrHistoryContext(row),
-    result: row.result ?? undefined,
+    result: storedResult?.ok ? storedResult : undefined,
+    failure: storedResult && !storedResult.ok ? storedResult : undefined,
     id: row.id,
     model: row.model,
     objectKey: row.object_key,

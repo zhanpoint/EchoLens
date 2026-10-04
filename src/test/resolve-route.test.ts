@@ -14,7 +14,6 @@ vi.mock("@/lib/douyin/url", () => {
 
   return {
     DouyinResolveError,
-    extractFirstUrl: vi.fn(() => "https://v.douyin.com/abc/"),
     resolveDouyinUrl: vi.fn(),
   };
 });

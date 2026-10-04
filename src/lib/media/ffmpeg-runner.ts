@@ -4,6 +4,13 @@ const STDERR_TAIL_CHARS = 8_192;
 const NO_OUTPUT_TIMEOUT_MS = 300_000;
 const KILL_GRACE_MS = 10_000;
 
+export class FfmpegProcessError extends Error {
+  constructor(message: string, readonly exitCode: number) {
+    super(message);
+    this.name = "FfmpegProcessError";
+  }
+}
+
 /** Settles only after the process and its pipes close, before callers remove temporary files. */
 export async function runFfmpegProcess(input: {
   args: readonly string[];
@@ -52,7 +59,8 @@ export async function runFfmpegProcess(input: {
       if (failure) {
         reject(failure);
       } else if (code !== 0) {
-        reject(new Error(`${input.operation}失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`));
+        const message = `${input.operation}失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`;
+        reject(code === null ? new Error(message) : new FfmpegProcessError(message, code));
       } else {
         resolve();
       }

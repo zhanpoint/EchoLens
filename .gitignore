@@ -12,13 +12,6 @@
 
 # testing
 /coverage
-.coverage
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-__pycache__/
-*.py[cod]
 
 # next.js
 /.next/
@@ -26,7 +19,6 @@ __pycache__/
 
 # production
 /build
-/dist
 /public/downloads/*.exe
 
 # misc

@@ -5,7 +5,10 @@ import {
   NetworkRetryExhaustedError,
   NETWORK_RETRY_ERROR_CODE,
   NETWORK_RETRY_ERROR_MESSAGE,
+  isRetryableNetworkError,
 } from "@/lib/http/retry";
+import { readSseJsonStream } from "@/lib/http/sse";
+import { dashScopeRequestPolicy } from "./request-policy";
 import { streamTranscriptPostprocess } from "@/lib/dashscope/transcript-postprocess";
 import {
   DASHSCOPE_FIXED_BASE_URL,
@@ -186,26 +189,45 @@ export async function submitDashScopeAsrJob(
     }
     reservedJobId = jobId;
     if (model === DASHSCOPE_ASR_FLASH_MODEL) {
-      const transcript = await recognizeFlashAudio(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
-      if (!transcript) {
-        await markAsrTaskFailed(jobId, NO_SPEECH_DETAIL);
-        return { status: "failed", result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL } };
+      let transcript: TranscriptPayload | null;
+      try {
+        transcript = await recognizeFlashAudio(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
+      } catch (error) {
+        // A definite rejection of the synchronous transport can use the queryable file transport.
+        // Never replay an ambiguous network failure: the provider may already have billed it.
+        if (!(error instanceof DashScopeRequestError) || error.status !== 400) throw error;
+        normalizedOptions.model = DEFAULT_DASHSCOPE_MODELS.asrE1;
+        taskInput.model = normalizedOptions.model;
+        taskInput.cacheKey = buildTranscriptCacheKey(taskInput.model, audio.objectKey, normalizedOptions, credentialSource);
+        transcript = null;
       }
-      const rawResult = { ...transcript, ok: true as const, asrModel: model };
-      providerResultSaved = await checkpointAsrTaskResult(jobId, rawResult);
-      if (!providerResultSaved) return { status: "canceled", result: { ok: false, code: "error", detail: "转录任务已取消。" } };
-      return await settleTranscript(config, taskInput, transcript, runtimeOptions);
+      if (normalizedOptions.model === model) {
+        if (!transcript) {
+          const failure = { ok: false as const, code: "no_speech" as const, detail: NO_SPEECH_DETAIL, retryable: false };
+          await markAsrTaskFailed(jobId, NO_SPEECH_DETAIL, failure);
+          return { status: "failed", result: failure };
+        }
+        const rawResult = { ...transcript, ok: true as const, asrModel: model };
+        providerResultSaved = await checkpointAsrTaskResult(jobId, rawResult);
+        if (!providerResultSaved) return { status: "canceled", result: { ok: false, code: "error", detail: "转录任务已取消。" } };
+        return await settleTranscript(config, taskInput, transcript, runtimeOptions);
+      }
     }
     const taskId = await submitDashScopeAsrTask(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
-    if (!(await attachAsrTaskProviderTask({ id: jobId, taskId }))) {
+    if (!(await attachAsrTaskProviderTask({ id: jobId, taskId, model: taskInput.model, cacheKey: taskInput.cacheKey }))) {
       await cancelDashScopeAsrTask(config, taskId).catch(() => undefined);
       return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已放弃。" } };
     }
     return { status: "running", historyContext, jobId };
   } catch (error) {
+    const failure = toProviderFailure(error);
+    if (reservedJobId && !providerResultSaved &&
+      (!(error instanceof DashScopeRequestError) || error.kind === "network")) {
+      failure.submissionUncertain = true;
+      failure.detail = "识别提交确认中断，请先核对服务商记录后重试；避免重复计费。";
+    }
     if (reservedJobId && !providerResultSaved) {
-      const detail = error instanceof Error ? error.message : "转录任务提交失败。";
-      await markAsrTaskFailed(reservedJobId, detail).catch(() => undefined);
+      await markAsrTaskFailed(reservedJobId, failure.detail, failure).catch(() => undefined);
     }
     if (error instanceof AsrQuotaExceededError) {
       throw error;
@@ -213,7 +235,7 @@ export async function submitDashScopeAsrJob(
     return {
       status: "failed",
       fallbackEligible: canFallbackSubmission(error, options.model),
-      result: toProviderFailure(error),
+      result: failure,
     };
   }
 }
@@ -359,12 +381,16 @@ async function settleDashScopeAsrTask(
   if (status === "SUCCEEDED") {
     const transcript = await readDashScopeTranscript(taskPayload, runtimeOptions.signal);
     if (!transcript) {
-      await markAsrTaskFailed(job.id, NO_SPEECH_DETAIL);
+      const failure = { ok: false as const, code: "no_speech" as const, detail: NO_SPEECH_DETAIL };
+      await markAsrTaskFailed(job.id, NO_SPEECH_DETAIL, failure);
       return {
         status: "failed",
         historyContext: job.historyContext,
-        result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL },
+        result: failure,
       };
+    }
+    if (!(await checkpointAsrTaskResult(job.id, { ...transcript, ok: true, asrModel: job.model }))) {
+      return { status: "canceled", result: { ok: false, code: "error", detail: "转录任务已取消。" } };
     }
     return settleTranscript(config, job, transcript, runtimeOptions);
   }
@@ -377,7 +403,7 @@ async function settleDashScopeAsrTask(
 
   if (status === "FAILED") {
     const result = readDashScopeTaskFailure(taskPayload);
-    await markAsrTaskFailed(job.id, result.detail);
+    await markAsrTaskFailed(job.id, result.detail, result);
     return { status: "failed", historyContext: job.historyContext, result };
   }
 
@@ -457,12 +483,13 @@ export async function refreshDashScopeAsrJobWithOptions(
         model: runtimeOptions.postprocessModels?.[source] ?? runtimeOptions.postprocess?.model,
       },
     };
+    if (job.result) return await settleTranscript(config, job, job.result, options);
     if (job.model === DASHSCOPE_ASR_FLASH_MODEL) {
-      if (job.result) return await settleTranscript(config, job, job.result, options);
       if (Date.now() - job.updatedAt >= DASH_SCOPE_FLASH_TIMEOUT_MS) {
         const detail = "短音频提交确认中断，无法查询服务商结果；请先核对服务商记录，再决定是否重新转录。";
-        await markAsrTaskFailed(job.id, detail);
-        return { status: "failed", result: { ok: false, code: "error", detail } };
+        const failure = { ok: false as const, code: "error" as const, detail, submissionUncertain: true };
+        await markAsrTaskFailed(job.id, detail, failure);
+        return { status: "failed", result: failure };
       }
       return readStoredAsrTaskResult(job);
     }
@@ -549,21 +576,49 @@ export function buildDashScopeFlashRequest(fileUrl: string, options: DashScopeAs
 }
 
 export function parseDashScopeFlashTranscriptPayload(payload: unknown): TranscriptPayload | null {
-  const output = payload && typeof payload === "object" ? (payload as { output?: Record<string, unknown> }).output : undefined;
+  const output = readFlashOutput(payload);
   if (!output || typeof output.text !== "string") throw new Error("DashScope 短音频结果格式无效：缺少 output.text。");
   if (!output.text.trim()) return null;
-  const sentences = Array.isArray(output.sentences) ? output.sentences : output.sentence ? [output.sentence] : [];
+  const detail = output.output && typeof output.output === "object" ? output.output as Record<string, unknown> : output;
+  const sentences = Array.isArray(detail.sentences) ? detail.sentences : detail.sentence ? [detail.sentence] : [];
   return buildTranscriptPayload(output.text, sentences.length ? parseTranscriptSegments({ sentences }) : []);
 }
 
 async function recognizeFlashAudio(config: DashScopeConfig, fileUrl: string, options: DashScopeAsrOptions, signal?: AbortSignal) {
   const response = await dashScopeFetch(config, "/services/aigc/multimodal-generation/generation", {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", "x-dashscope-sse": "enable" },
     body: JSON.stringify(buildDashScopeFlashRequest(fileUrl, options)), signal,
   }, { retryNetworkErrors: false, timeoutMs: DASH_SCOPE_FLASH_TIMEOUT_MS });
-  const payload = await readJson(response);
-  if (!response.ok) throw DashScopeRequestError.fromResponse(response.status, payload);
-  return parseDashScopeFlashTranscriptPayload(payload);
+  if (!response.ok) throw DashScopeRequestError.fromResponse(response.status, await readJson(response));
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+    return parseDashScopeFlashTranscriptPayload(await readJson(response));
+  }
+  if (!response.body) throw new Error("识别响应缺少数据流。");
+  const sentences = new Map<string, Record<string, unknown>>();
+  let text = "";
+  for await (const packet of readSseJsonStream<Record<string, unknown>>(response.body)) {
+    signal?.throwIfAborted();
+    if (packet.code) throw DashScopeRequestError.fromResponse(response.status, packet);
+    const output = readFlashOutput(packet);
+    if (!output) continue;
+    if (typeof output.text === "string") text = output.text;
+    const detail = output.output && typeof output.output === "object" ? output.output as Record<string, unknown> : output;
+    const updates = Array.isArray(detail.sentences) ? detail.sentences : detail.sentence ? [detail.sentence] : [];
+    for (const value of updates) {
+      const sentence = value as Record<string, unknown>;
+      const key = `${sentence.channel_id ?? 0}:${sentence.sentence_id ?? sentence.begin_time}`;
+      sentences.set(key, sentence);
+    }
+  }
+  if ([...sentences.values()].some(sentence => sentence.sentence_end === false)) {
+    throw new Error("识别数据流提前结束，尚未返回完整句子。");
+  }
+  const segments = parseTranscriptSegments({ sentences: [...sentences.values()].sort((a, b) => Number(a.begin_time) - Number(b.begin_time)) });
+  return buildTranscriptPayload(text, segments);
+}
+
+function readFlashOutput(payload: unknown): Record<string, unknown> | undefined {
+  return payload && typeof payload === "object" ? (payload as { output?: Record<string, unknown> }).output : undefined;
 }
 
 async function queryDashScopeAsrTask(config: DashScopeConfig, taskId: string, signal?: AbortSignal): Promise<unknown> {
@@ -650,6 +705,8 @@ async function dashScopeFetch(
   retryOptions: { retryNetworkErrors?: boolean; timeoutMs?: number } = {},
 ): Promise<Response> {
   try {
+    const model = init.method === "GET" ? "query" : typeof init.body === "string" ? (JSON.parse(init.body) as { model?: string }).model : undefined;
+    if (model) await dashScopeRequestPolicy.beforeRequest(model, init.signal);
     return await fetchWithRetry(`${config.baseUrl}${path}`, {
       ...init,
       headers: {
@@ -681,7 +738,7 @@ function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
     return {
       status: "failed",
       historyContext: job.historyContext,
-      result: { ok: false, code: "error", detail: job.errorDetail ?? "转录文本失败。" },
+      result: job.failure ?? { ok: false, code: "error", detail: job.errorDetail ?? "转录文本失败。" },
     };
   }
   if (job.status === "canceled") {
@@ -978,7 +1035,7 @@ function readDashScopeTaskFailure(payload: unknown): Extract<ProviderResult, { o
   if (providerCode && NO_SPEECH_TASK_CODES.has(providerCode)) {
     return { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL };
   }
-  return { ok: false, code: "error", detail: formatDashScopeTaskFailure("FAILED", payload) };
+  return { ok: false, code: "error", detail: formatDashScopeTaskFailure("FAILED", payload), retryable: true };
 }
 
 function isFallbackEligibleRequestError(error: unknown): boolean {
@@ -1004,12 +1061,13 @@ function canFallbackSubmission(error: unknown, model: string): boolean {
 }
 
 function toProviderFailure(error: unknown): Extract<ProviderResult, { ok: false }> {
-  if (error instanceof NetworkRetryExhaustedError ||
+  if (isRetryableNetworkError(error) ||
     (error instanceof DashScopeRequestError && error.kind === "network")) {
     return {
       ok: false,
       code: NETWORK_RETRY_ERROR_CODE,
       detail: NETWORK_RETRY_ERROR_MESSAGE,
+      retryable: true,
     };
   }
 
@@ -1021,6 +1079,7 @@ function toProviderFailure(error: unknown): Extract<ProviderResult, { ok: false 
       ? "not_configured"
       : "error",
     detail,
+    retryable: error instanceof DashScopeRequestError ? error.status === 429 || (error.status ?? 0) >= 500 || error.status === 200 : undefined,
   };
 }
 

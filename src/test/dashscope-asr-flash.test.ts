@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ read: vi.fn(), checkpoint: vi.fn(), succeed: vi.fn(), fail: vi.fn(), postprocess: vi.fn(), reserve: vi.fn() }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), checkpoint: vi.fn(), succeed: vi.fn(), fail: vi.fn(), postprocess: vi.fn(), reserve: vi.fn(), attach: vi.fn() }));
 vi.mock("@/lib/dashscope/user-credential", () => ({ readDashScopeApiKeyForUser: vi.fn(async () => "key") }));
 vi.mock("@/lib/dashscope/transcript-postprocess", () => ({ streamTranscriptPostprocess: mocks.postprocess }));
 vi.mock("@/lib/transcript/db", () => ({
   readAsrTask: mocks.read, readRunningAsrTask: vi.fn(async () => null), reserveAsrTask: mocks.reserve,
   checkpointAsrTaskResult: mocks.checkpoint, markAsrTaskSucceeded: mocks.succeed, markAsrTaskFailed: mocks.fail,
-  attachAsrTaskProviderTask: vi.fn(), markAsrTaskCanceled: vi.fn(), markAsrTaskRunning: vi.fn(), deleteAsrTask: vi.fn(),
+  attachAsrTaskProviderTask: mocks.attach, markAsrTaskCanceled: vi.fn(), markAsrTaskRunning: vi.fn(), deleteAsrTask: vi.fn(),
 }));
 import { buildDashScopeAsrParameters, parseDashScopeFlashTranscriptPayload, submitDashScopeAsrJob, refreshDashScopeAsrJobWithOptions } from "@/lib/dashscope/asr";
 import { DASHSCOPE_ASR_FLASH_MODEL as model } from "@/lib/dashscope/model-config";
@@ -18,11 +18,47 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.read.mockResolvedValue(null); mocks.reserve.mockResolvedValue(true);
   mocks.checkpoint.mockResolvedValue(true); mocks.succeed.mockResolvedValue(true);
   mocks.fail.mockResolvedValue(undefined);
+  mocks.attach.mockResolvedValue(true);
   mocks.postprocess.mockResolvedValue({ ok: true, content: "整理后的文字" });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe("E1 synchronous short audio", () => {
+  it("consumes sentence revisions from SSE without duplicating partial text", async () => {
+    const sentence = { sentence_id: 0, begin_time: 0, end_time: 1000, text: "你", sentence_end: false };
+    const packets = [
+      { output: { sentence } },
+      { output: { sentence: { ...sentence, text: "你好", sentence_end: true } } },
+      { output: { sentence: { sentence_id: 1, begin_time: 1000, end_time: 2000, text: "世界", sentence_end: true } } },
+    ];
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      packets.map(packet => `data: ${JSON.stringify(packet)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } },
+    ));
+    await expect(submitDashScopeAsrJob("user", "video:1", audio, { model }, { clientJobId: "stream", apiKey: "key" }))
+      .resolves.toMatchObject({ status: "successed" });
+    expect(fetch.mock.calls[0][1]?.headers).toHaveProperty("x-dashscope-sse", "enable");
+    expect(mocks.checkpoint).toHaveBeenCalledWith("stream", expect.objectContaining({ content: "你好\n世界" }));
+  });
+  it("rejects a prematurely terminated stream without saving incomplete recognition", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      `data: ${JSON.stringify({ output: { sentence: { sentence_id: 0, begin_time: 0, end_time: 1000, text: "未完成", sentence_end: false } } })}\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    await expect(submitDashScopeAsrJob("user", "video:1", audio, { model }, { clientJobId: "stream", apiKey: "key" }))
+      .resolves.toMatchObject({ status: "failed", result: { submissionUncertain: true } });
+    expect(mocks.checkpoint).not.toHaveBeenCalled();
+  });
+  it("switches a definitively rejected Flash request to Filetrans under the same reserved job", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ code: "BadRequest", message: "[asr]Backend buffer overflow." }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({ output: { task_id: "accepted-file" } }));
+    await expect(submitDashScopeAsrJob("user", "video:1", audio, { model }, { clientJobId: "job", apiKey: "key" }))
+      .resolves.toMatchObject({ status: "running", jobId: "job" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetch.mock.calls[1][1]?.body)).model).toBe("qwen-audio-3.1-asr-flash-filetrans");
+    expect(mocks.reserve).toHaveBeenCalledOnce();
+    expect(mocks.attach).toHaveBeenCalledWith(expect.objectContaining({ id: "job", taskId: "accepted-file", model: "qwen-audio-3.1-asr-flash-filetrans" }));
+  });
   it("uses the native Flash protocol and checkpoints recognition before postprocessing", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(payload));
     const result = await submitDashScopeAsrJob("user", "video:1", audio, { model, diarizationEnabled: true, speakerCount: 3 }, { clientJobId: "job", apiKey: "key" });

@@ -114,6 +114,26 @@ describe("fetchWithRetry", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+  it("enforces the deadline while a response body stalls after receiving headers", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => new Response(new ReadableStream({
+      start(stream) {
+        init?.signal?.addEventListener("abort", () => stream.error(init.signal?.reason), { once: true });
+      },
+    })));
+    const response = await fetchWithRetry("https://example.com", { retry: { timeoutMs: 20 } });
+    await expect(response.text()).rejects.toMatchObject({ name: "TimeoutError" });
+  });
+  it("honors Retry-After values longer than the local backoff cap", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("limited", { status: 429, headers: { "retry-after": "30" } }))
+      .mockResolvedValueOnce(new Response("ok"));
+    const task = fetchWithRetry("https://example.com");
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(fetch).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(task).resolves.toMatchObject({ status: 200 });
+  });
 
   it("uses Retry-After for 429 responses", async () => {
     vi.useFakeTimers();

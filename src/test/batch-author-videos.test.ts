@@ -29,11 +29,12 @@ vi.mock("@/lib/open-api/platform-request-policy", () => ({
   },
 }));
 import { fetchAuthorVideos, resolveAuthorId } from "@/lib/batch/author-videos";
-import { AuthorVideoFiltersSchema } from "@/lib/batch/video-filters";
+import { AuthorVideoFiltersSchema, selectAuthorVideos } from "@/lib/batch/video-filters";
 const secUid = "MS4wLjABAAAA1234567890abcd";
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.credential.mockResolvedValue({ status: "valid", cookie: "cookie" });
+  mocks.tags.mockResolvedValue({ data: [] });
 });
 describe("author video catalogues", () => {
   it("resolves canonical user profiles without downloading their HTML and rejects other hosts", async () => {
@@ -118,7 +119,7 @@ describe("author video catalogues", () => {
         },
       ],
     });
-    expect(mocks.tags).not.toHaveBeenCalled();
+    expect(mocks.tags).toHaveBeenCalledOnce();
   });
 
   it.each([{ cursor: "1", total: 1 }, { cursor: "2", total: 31 }])("rejects an empty Bilibili page while the reported count still requires items: %o", async ({ cursor, total }) => {
@@ -135,18 +136,21 @@ describe("author video catalogues", () => {
     }
   });
 
-  it("uses Douyin topic metadata and keeps the next cursor when a filter excludes the page", async () => {
+  it("preserves every Douyin video and its topic metadata independently of display filters", async () => {
     mocks.request.mockResolvedValue({
       has_more: 1, max_cursor: 22,
       aweme_list: [{ aweme_id: "123456", desc: "作品", create_time: 1, text_extra: [{ hashtag_name: "摄影" }], cha_list: [{ cha_name: "旅行" }] }],
     });
-    const page = await fetchAuthorVideos({ platform: "douyin", authorId: secUid, userId: "u", filters: AuthorVideoFiltersSchema.parse({ tags: ["摄影", "旅行"], tagMode: "all" }) });
+    const page = await fetchAuthorVideos({ platform: "douyin", authorId: secUid, userId: "u" });
     expect(page.videos[0].tags).toEqual(["摄影", "旅行"]);
-    await expect(fetchAuthorVideos({ platform: "douyin", authorId: secUid, userId: "u", filters: AuthorVideoFiltersSchema.parse({ publishedFrom: "2026-01-01" }) }))
-      .resolves.toMatchObject({ cursor: "22", scannedCount: 1, videos: [] });
+    expect(selectAuthorVideos(page.videos, AuthorVideoFiltersSchema.parse({ publishedFrom: "2026-01-01" }))).toEqual([]);
+    expect(page).toMatchObject({ cursor: "22", videos: [{ id: "123456" }] });
+    expect(selectAuthorVideos(page.videos, AuthorVideoFiltersSchema.parse({ tags: ["摄影", "旅行"], tagMode: "all" })))
+      .toHaveLength(1);
+    expect(mocks.request).toHaveBeenCalledOnce();
   });
 
-  it("fetches Bilibili tags only for date and keyword candidates and propagates cancellation", async () => {
+  it("fetches Bilibili tags for every video so date, keyword and tag changes reuse the complete catalogue", async () => {
     const signal = new AbortController().signal;
     mocks.wbi.mockResolvedValue({ data: { page: { count: 3 }, list: { vlist: [
       { bvid: "BV1yes", title: "教程", created: Date.parse("2026-10-03T08:00:00+08:00") / 1000 },
@@ -155,10 +159,12 @@ describe("author video catalogues", () => {
     ] } } });
     mocks.tags.mockResolvedValue({ data: [{ tag_name: "AI" }, { tag_name: "知识" }] });
     const filters = AuthorVideoFiltersSchema.parse({ publishedFrom: "2026-10-03", keyword: "教程", tags: ["#ai"] });
-    const result = await fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u", filters, signal });
-    expect(result.videos.map(({ id }) => id)).toEqual(["BV1yes"]);
-    expect(result.scannedCount).toBe(3);
-    expect(mocks.tags).toHaveBeenCalledOnce();
+    const result = await fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u", signal });
+    expect(result.videos.map(({ id }) => id)).toEqual(["BV1yes", "BV1old", "BV1other"]);
+    expect(result.videos.every(video => video.tags?.includes("ai"))).toBe(true);
+    expect(selectAuthorVideos(result.videos, filters).map(({ id }) => id)).toEqual(["BV1yes"]);
+    expect(selectAuthorVideos(result.videos, AuthorVideoFiltersSchema.parse({ tags: ["知识"] }))).toHaveLength(3);
+    expect(mocks.tags).toHaveBeenCalledTimes(3);
     expect(mocks.tags).toHaveBeenCalledWith("https://api.bilibili.com/x/tag/archive/tags?bvid=BV1yes", "", expect.any(Object), signal);
     expect(mocks.wbi.mock.calls[0][4]).toBe(signal);
   });
@@ -167,11 +173,10 @@ describe("author video catalogues", () => {
     const controller = new AbortController();
     mocks.wbi.mockResolvedValue({ data: { page: { count: 2 }, list: { vlist: [{ bvid: "BV1first", title: "视频" }, { bvid: "BV1next", title: "视频" }] } } });
     mocks.tags.mockImplementationOnce(async () => { controller.abort(); return { data: [{ tag_name: "摄影" }] }; });
-    const filters = AuthorVideoFiltersSchema.parse({ tags: ["摄影"] });
-    await expect(fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u", filters, signal: controller.signal }))
+    await expect(fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u", signal: controller.signal }))
       .rejects.toMatchObject({ name: "AbortError" });
     expect(mocks.tags).toHaveBeenCalledOnce();
     mocks.tags.mockRejectedValueOnce(new Error("tag unavailable"));
-    await expect(fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u", filters })).rejects.toThrow("tag unavailable");
+    await expect(fetchAuthorVideos({ platform: "bilibili", authorId: "123", userId: "u" })).rejects.toThrow("tag unavailable");
   });
 });

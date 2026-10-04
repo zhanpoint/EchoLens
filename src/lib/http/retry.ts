@@ -138,23 +138,21 @@ function fetchOnce(
 ): Promise<Response> {
   if (!timeoutMs) return fetch(url, { ...init, signal: externalSignal ?? undefined });
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  // Keep the deadline active while the response body (including SSE) is consumed.
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = externalSignal
-    ? AbortSignal.any([controller.signal, externalSignal])
-    : controller.signal;
-
-  return fetch(url, { ...init, signal }).finally(() => {
-    clearTimeout(timeout);
-  });
+    ? AbortSignal.any([timeoutSignal, externalSignal])
+    : timeoutSignal;
+  return fetch(url, { ...init, signal });
 }
 
 function readRetryDelay(response: Response, attempt: number, baseDelayMs: number, maxDelayMs: number): number {
   const retryAfter = response.headers.get("retry-after");
   const retryAfterSeconds = retryAfter ? Number(retryAfter) : NaN;
-  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
-    return Math.min(retryAfterSeconds * 1000, maxDelayMs);
-  }
+  const retryAfterMs = Number.isFinite(retryAfterSeconds)
+    ? retryAfterSeconds * 1000
+    : retryAfter ? Date.parse(retryAfter) - Date.now() : NaN;
+  if (retryAfterMs > 0) return retryAfterMs;
   return exponentialRetryDelay(attempt, baseDelayMs, maxDelayMs);
 }
 

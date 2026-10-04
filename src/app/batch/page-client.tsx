@@ -38,7 +38,7 @@ import type {
   ExportFormat,
 } from "@/lib/batch/contracts";
 import { videoUrl } from "@/lib/batch/contracts";
-import { AuthorVideoFiltersSchema, DEFAULT_VIDEO_FILTERS, DEFAULT_FILTER_DRAFT, draftFromFilters, isUnfilteredVideoScope, normalizeSearchText, parseFilterDraft, selectAuthorVideos, type AuthorVideoFilters } from "@/lib/batch/video-filters";
+import { DEFAULT_FILTER_DRAFT, draftFromFilters, normalizeSearchText, normalizeTags, parseFilterDraft, selectAuthorVideos, type AuthorVideoFilters } from "@/lib/batch/video-filters";
 import { supportsDownloadDirectoryPicker } from "@/lib/browser-download-directory";
 import { saveBatchFiles } from "@/lib/batch/browser-export";
 import { VideoFilterFields } from "./video-filter-fields";
@@ -58,13 +58,11 @@ type Catalogue = {
   videos: AuthorVideo[];
   cursor: string | null;
   total?: number;
-  filters?: AuthorVideoFilters;
-  scannedCount?: number;
 };
 const button =
   "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-surface px-3 text-sm font-medium transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-ring";
 const actionButton = cn(button, "h-8 px-2.5 text-xs");
-const CACHE_KEY = "batch-author-catalogue-v1";
+const CACHE_KEY = "batch-author-catalogue-v2";
 const FILTER_CACHE_KEY = "batch-author-filters-v1";
 type FilterCache = Pick<Catalogue, "platform" | "input"> & { filters: AuthorVideoFilters };
 
@@ -126,14 +124,18 @@ export function BatchPage() {
           readClientSessionCache<Catalogue>(user.id, CACHE_KEY).catch(() => null),
           readClientSessionCache<FilterCache>(user.id, FILTER_CACHE_KEY).catch(() => null),
         ]);
-        if (cache && mounted.current) {
-          const filters = AuthorVideoFiltersSchema.parse(cache.filters ?? DEFAULT_VIDEO_FILTERS);
-          setCatalogue({ ...cache, filters });
-          setPlatform(cache.platform);
-          setInput(cache.input);
-          setFilterDraft(draftFromFilters(filterCache?.platform === cache.platform && filterCache.input === cache.input
-            ? filterCache.filters : filters));
-          setScanState(cache.cursor !== null ? "interrupted" : "complete");
+        if (mounted.current) {
+          const source = cache ?? filterCache;
+          if (source) {
+            setPlatform(source.platform);
+            setInput(source.input);
+            if (filterCache?.platform === source.platform && filterCache.input === source.input)
+              setFilterDraft(draftFromFilters(filterCache.filters));
+          }
+          if (cache) {
+            setCatalogue(cache);
+            setScanState(cache.cursor !== null ? "interrupted" : "complete");
+          }
         }
         if (mounted.current) setCacheRestored(true);
       })
@@ -205,11 +207,6 @@ export function BatchPage() {
 
   async function scan(restart: boolean) {
     if (!userId || scanningRef.current) return;
-    if (!parsedFilters.success) {
-      setError(parsedFilters.error.issues[0]?.message || "筛选参数无效，请检查日期和作品数量。");
-      return;
-    }
-    const filters = parsedFilters.data;
     scanningRef.current = true;
     const controller = new AbortController();
     scanController.current = controller;
@@ -219,10 +216,10 @@ export function BatchPage() {
     let current =
       !restart &&
       catalogue?.platform === platform &&
-      catalogue.input === input.trim() &&
-      JSON.stringify(catalogue.filters ?? DEFAULT_VIDEO_FILTERS) === JSON.stringify(filters)
+      catalogue.input === input.trim()
         ? catalogue
         : null;
+    const byId = new Map(current?.videos.map(video => [video.id, video]));
     if (restart) {
       setCatalogue(null);
       setSelected(new Set());
@@ -244,21 +241,18 @@ export function BatchPage() {
           body: JSON.stringify({
             platform,
             input: current?.authorId || input.trim(),
-            filters,
             ...(current?.cursor ? { cursor: current.cursor } : {}),
           }),
         });
-        const videos = selectAuthorVideos([...(current?.videos || []), ...result.videos], filters);
+        for (const video of result.videos) byId.set(video.id, video);
         current = {
           platform,
           input: input.trim(),
           authorId: result.authorId,
           authorName: result.authorName || current?.authorName || "",
-          videos,
+          videos: [...byId.values()],
           cursor: result.cursor,
           total: result.total ?? current?.total,
-          filters,
-          scannedCount: (current?.scannedCount ?? 0) + (result.scannedCount ?? result.videos.length),
         };
         if (!mounted.current) return;
         setCatalogue(current);
@@ -285,19 +279,11 @@ export function BatchPage() {
 
   const matchingCatalogue =
     catalogue?.platform === platform && catalogue.input === input.trim() ? catalogue : null;
-  const filtersChanged = Boolean(matchingCatalogue && (!parsedFilters.success ||
-    JSON.stringify(matchingCatalogue.filters ?? DEFAULT_VIDEO_FILTERS) !== JSON.stringify(parsedFilters.data)));
-  // Only an unrestricted, complete scan can answer a new scope without fetching again.
-  // Bilibili requires tag enrichment from its separate API when tags were not fetched.
-  const canFilterLocally = Boolean(matchingCatalogue?.cursor === null && parsedFilters.success &&
-    isUnfilteredVideoScope(matchingCatalogue.filters ?? DEFAULT_VIDEO_FILTERS) &&
-    (platform === "douyin" || !parsedFilters.data.tags.length));
-  const filtersPending = filtersChanged && !canFilterLocally;
   const scopedVideos = useMemo(
-    () => matchingCatalogue && canFilterLocally && parsedFilters.success
+    () => matchingCatalogue && parsedFilters.success
       ? selectAuthorVideos(matchingCatalogue.videos, parsedFilters.data)
-      : matchingCatalogue?.videos ?? [],
-    [matchingCatalogue, canFilterLocally, parsedFilters],
+      : [],
+    [matchingCatalogue, parsedFilters],
   );
   const videos = useMemo(
     () =>
@@ -308,7 +294,8 @@ export function BatchPage() {
   );
   const currentPage = Math.min(page, Math.max(0, Math.ceil(videos.length / 30) - 1));
   const visible = videos.slice(currentPage * 30, currentPage * 30 + 30);
-  const rankingPending = filtersPending || Boolean(matchingCatalogue?.filters?.limit && matchingCatalogue.cursor !== null);
+  const rankingPending = Boolean(matchingCatalogue && matchingCatalogue.cursor !== null &&
+    parsedFilters.success && parsedFilters.data.limit);
   const chosen = useMemo(() => {
     const byId = new Map(
       scopedVideos.map((video) => [video.id, video]),
@@ -323,7 +310,7 @@ export function BatchPage() {
   const job = detail?.job;
   const percent = job?.total
     ? Math.round(
-        ((job.succeeded + job.failed + (job.canceled || 0)) / job.total) * 100,
+        ((job.succeeded + (job.skipped || 0) + job.failed + (job.canceled || 0)) / job.total) * 100,
       )
     : 0;
 
@@ -499,7 +486,7 @@ export function BatchPage() {
                 />
                 <button
                   className={`${button} h-10`}
-                  disabled={!userId || !input.trim() || scanning || !parsedFilters.success}
+                  disabled={!userId || !input.trim() || scanning}
                 >
                   {scanning ? (
                     <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
@@ -509,7 +496,7 @@ export function BatchPage() {
                   获取
                 </button>
               </form>
-              <VideoFilterFields value={filterDraft} disabled={scanning} platform={platform} onChange={(value) => {
+              <VideoFilterFields value={filterDraft} onChange={(value) => {
                 setFilterDraft(value);
                 setSelected(new Set());
                 setPage(0);
@@ -533,6 +520,7 @@ export function BatchPage() {
                           <li>进度自动保存。</li>
                           <li>关闭页面后继续处理，服务重启后恢复。</li>
                           <li>暂停保留当前处理。</li>
+                          <li>无语音、音频不可用或提交结果不明确时跳过当前视频。</li>
                           <li>取消终止未完成项。</li>
                         </ul>
                       </Popover.Content>
@@ -540,7 +528,7 @@ export function BatchPage() {
                   </Popover.Root>
                 </div>
                 <div className="flex items-center gap-2">
-                  {job && job.succeeded < job.total && (
+                  {job && job.succeeded + (job.skipped || 0) < job.total && (
                     <button
                       type="button"
                       className={cn(actionButton, "border-primary/30 text-primary hover:bg-primary/10")}
@@ -587,10 +575,10 @@ export function BatchPage() {
                 <>
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-sm font-semibold tabular-nums">
-                      {job.succeeded}
+                      {job.succeeded + (job.skipped || 0)}
                       <span className="font-normal text-muted-foreground">
                         {" "}
-                        / {job.total} 完成
+                        / {job.total} 已处理
                       </span>
                     </span>
                     <span className="text-xs text-muted-foreground">
@@ -617,11 +605,12 @@ export function BatchPage() {
                     />
                   </div>
                   <p className="mb-3 text-xs leading-5 text-muted-foreground">
-                    {job.processing} 个处理中 · {job.failed} 个失败 ·{" "}
+                    {job.succeeded} 个完成 · {job.processing} 个处理中 · {job.failed} 个失败 ·{" "}
                     {Math.max(
                       0,
                       job.total -
                         job.succeeded -
+                        (job.skipped || 0) -
                         job.failed -
                         job.processing -
                         (job.interrupted || 0) -
@@ -632,6 +621,7 @@ export function BatchPage() {
                       ? ` · ${job.interrupted} 个中断待恢复`
                       : ""}
                     {job.canceled > 0 ? ` · ${job.canceled} 个已取消` : ""}
+                    {job.skipped > 0 ? ` · ${job.skipped} 个已跳过` : ""}
                   </p>
                   <div className="mb-3 flex flex-wrap gap-2">
                     {job.status === "running" ? (
@@ -701,7 +691,7 @@ export function BatchPage() {
                         <div className="flex items-start gap-2">
                           {item.interrupted ? (
                             <Pause className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                          ) : item.status === "processing" ? (
+                          ) : item.status === "processing" || item.status === "waiting" ? (
                             <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin text-primary motion-reduce:animate-none" />
                           ) : (
                             <span
@@ -713,9 +703,9 @@ export function BatchPage() {
                               {item.video.title}
                             </p>
                             <p
-                              className={`mt-1 leading-4 ${item.error ? "text-destructive" : "text-muted-foreground"}`}
+                              className={`mt-1 leading-4 ${item.error && item.status !== "skipped" ? "text-destructive" : "text-muted-foreground"}`}
                             >
-                              {item.error || item.stage}
+                              {item.error ? `${item.stage} · ${item.error}` : item.stage}
                             </p>
                           </div>
                           {item.status === "failed" && <button type="button" aria-label={`重试 ${item.video.title}`} title="重试此作品" disabled={Boolean(busy)} onClick={() => void control("retry", item.id)} className={cn(actionButton, "h-7 shrink-0 px-2 text-primary")}>
@@ -753,13 +743,12 @@ export function BatchPage() {
                     aria-live="polite"
                   >
                     已获取 {matchingCatalogue?.videos.length || 0} 个视频
-                    {canFilterLocally && filtersChanged ? ` · 筛选匹配 ${scopedVideos.length} 个` : ""}
+                    {matchingCatalogue ? ` · 显示 ${videos.length} 个` : ""}
                     {matchingCatalogue?.total !== undefined
                       ? ` / ${matchingCatalogue.total} 个投稿`
                       : ""}{" "}
                     · 已选 {chosen.length} 个
-                    {matchingCatalogue?.scannedCount !== undefined ? ` · 已检查 ${matchingCatalogue.scannedCount} 个视频` : ""}
-                    {matchingCatalogue?.cursor === null ? " · 范围扫描完成" : ""}
+                    {matchingCatalogue?.cursor === null ? " · 全部获取完成" : ""}
                   </p>
                 </div>
                 {scanning ? (
@@ -773,7 +762,7 @@ export function BatchPage() {
                     停止获取
                   </button>
                 ) : (
-                  matchingCatalogue?.cursor && !filtersPending && (
+                  matchingCatalogue?.cursor && (
                     <button
                       type="button"
                       className={button}
@@ -802,8 +791,7 @@ export function BatchPage() {
                     : "获取已中断，已获取的作品已保留，可继续获取。"}
                 </div>
               )}
-              {filtersPending && <p role="status" className="mb-3 text-xs leading-5 text-muted-foreground">筛选条件已修改。当前显示上次获取的作品，请点击「获取」应用新条件并扫描完整范围。</p>}
-              {rankingPending && !filtersPending && <p role="status" className="mb-3 text-xs leading-5 text-muted-foreground">最新／最早作品的排序暂未完成，扫描全部分页后可选择转录。</p>}
+              {rankingPending && <p role="status" className="mb-3 text-xs leading-5 text-muted-foreground">最新／最早作品的排序暂未完成，获取全部分页后可选择转录。</p>}
               <div role="group" aria-label="作品列表操作" className="mb-3 flex flex-wrap items-center gap-2">
                 <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs">
                   <Checkbox
@@ -874,7 +862,7 @@ export function BatchPage() {
                   className={`${actionButton} shrink-0`}
                 >
                   <Download className="size-3.5" />
-                  导出文件 ({job.succeeded})
+                  导出文件
                 </a>
               ) : (
                 <button type="button" disabled className={`${actionButton} shrink-0`}>
@@ -885,10 +873,12 @@ export function BatchPage() {
               </div>
               {exporting ? <button type="button" className="mb-3 rounded text-xs text-muted-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-ring" onClick={() => exportController.current?.abort()}>停止导出，保留已保存文件</button> : exportMode === "separate" && exportCount > 0 ? <p role="status" className="mb-3 text-xs text-muted-foreground">已保存 {exportCount} 个文件，可再次导出覆盖同名文件。</p> : null}
                <ul className="max-h-[28rem] divide-y divide-border overflow-y-auto">
-                {visible.map((video) => (
+                {visible.map((video) => {
+                  const title = displayVideoTitle(video);
+                  return (
                   <li key={video.id} className="flex items-center gap-3 py-3">
                     <Checkbox
-                      aria-label={`选择 ${video.title}`}
+                      aria-label={`选择 ${title}`}
                       checked={selected.has(video.id)}
                       disabled={rankingPending}
                       onChange={() =>
@@ -923,7 +913,7 @@ export function BatchPage() {
                         rel="noopener noreferrer"
                         className="line-clamp-2 text-sm leading-5 hover:text-primary"
                       >
-                        {video.title}
+                        {title}
                       </a>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {formatDuration(video.durationSeconds)}
@@ -934,7 +924,8 @@ export function BatchPage() {
                       {video.tags && video.tags.length > 0 && <p className="mt-1 truncate text-xs text-primary/80">{video.tags.map((tag) => `#${tag}`).join(" ")}</p>}
                     </div>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
               {scanning && (
                 <div
@@ -976,6 +967,15 @@ export function BatchPage() {
       </div>
     </main>
   );
+}
+
+function displayVideoTitle(video: AuthorVideo): string {
+  const tags = new Set(normalizeTags(video.tags ?? []));
+  if (!tags.size) return video.title;
+  return video.title
+    .replace(/[#＃]([^\s#＃,，]+)/gu, (hashtag, tag: string) => tags.has(normalizeSearchText(tag)) ? "" : hashtag)
+    .replace(/\s+/gu, " ")
+    .trim() || `视频 ${video.id}`;
 }
 
 function Pagination({

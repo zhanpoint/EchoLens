@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AuthorVideoFiltersSchema, DEFAULT_FILTER_DRAFT, createAuthorVideoMatcher, draftFromFilters, isUnfilteredVideoScope, parseFilterDraft, selectAuthorVideos } from "@/lib/batch/video-filters";
+import { AuthorVideoFiltersSchema, DEFAULT_FILTER_DRAFT, createAuthorVideoMatcher, draftFromFilters, parseFilterDraft, selectAuthorVideos } from "@/lib/batch/video-filters";
 import type { AuthorVideo } from "@/lib/batch/contracts";
 
 const video = (id: string, date: string, tags: string[] = []): AuthorVideo => ({ id, title: `作品 ${id}`, publishedAt: date ? Date.parse(date) : 0, tags, durationSeconds: 10, coverUrl: "" });
@@ -36,13 +36,6 @@ describe("author video filters", () => {
     ];
     expect(selectAuthorVideos(list, AuthorVideoFiltersSchema.parse({ tags: ["#网络谜踪"] })).map(({ id }) => id)).toEqual(["1", "2"]);
     expect(selectAuthorVideos(list, AuthorVideoFiltersSchema.parse({ tags: ["网络谜踪", "科普"], tagMode: "all" })).map(({ id }) => id)).toEqual(["2"]);
-  });
-
-  it("only treats scans without restrictive filters as a complete reusable source", () => {
-    expect(isUnfilteredVideoScope(AuthorVideoFiltersSchema.parse({ order: "oldest" }))).toBe(true);
-    for (const filters of [{ limit: 50 }, { publishedFrom: "2026-01-01" }, { publishedTo: "2026-10-03" }, { keyword: "城市" }, { tags: ["网络谜踪"] }]) {
-      expect(isUnfilteredVideoScope(AuthorVideoFiltersSchema.parse(filters))).toBe(false);
-    }
   });
 
   it("merges repeated pages and retains the correct oldest count incrementally", () => {

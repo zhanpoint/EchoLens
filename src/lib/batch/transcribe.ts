@@ -10,7 +10,6 @@ import { readDouyinCredentialState } from "@/lib/douyin/account";
 import { readUserSetting } from "@/lib/user-settings";
 import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
 import {
-  getDashScopeAsrModel,
   refreshDashScopeAsrJobWithOptions,
   submitDashScopeAsrJob,
   type DashScopeAsrJobResult,
@@ -20,10 +19,12 @@ import {
   findOrCreateTranscriptHistoryRecord,
   updateTranscriptHistoryRecordTranscript,
   markAsrTaskFailed,
+  type StoredAsrTask,
 } from "@/lib/transcript/db";
 import {
   prepareBilibiliSnapshotAsset,
   prepareDouyinSnapshotAsset,
+  ensureHistoryAsset,
   type AvailableHistoryAsset,
 } from "@/lib/transcript/assets";
 import {
@@ -31,21 +32,38 @@ import {
   createDouyinResourceSnapshot,
 } from "@/lib/media/resource-snapshot";
 import { openApiPlatformRequestPolicy } from "@/lib/open-api/platform-request-policy";
+import type { ProviderResult } from "@/lib/ai/provider-result";
+import { AudioUnavailableError } from "@/lib/media/audio";
+import { FfmpegProcessError } from "@/lib/media/ffmpeg-runner";
 import { checkpointItem, type ClaimedItem } from "./db";
 import { videoUrl } from "./contracts";
 
-export class RetryableBatchError extends Error {}
 export class BatchBlockedError extends Error {}
+type BatchItemResult = string | { pending: true } | { skipped: string };
 export async function transcribeBatchItem(
   item: ClaimedItem,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<BatchItemResult> {
   signal.throwIfAborted();
   if (item.part_count > 0 && item.completed_parts.length === item.part_count)
     return mergeParts(item.completed_parts);
   const config = await readDashScopeUserConfig(item.user_id);
-  const settings = await readUserSetting(item.user_id, "bilibili");
-  const cookie = readUsableBilibiliCookie(settings);
+  const completed = [...item.completed_parts];
+  const previous = item.asr_job_id
+    ? await readAsrTask({ id: item.asr_job_id, userId: item.user_id })
+    : null;
+  const context = previous?.historyContext;
+  if (context && (previous.status === "running" || previous.status === "succeeded" ||
+    (previous.failure && shouldSkipFailure(previous.failure))) &&
+    !completed.some(part => part.workId === context.work.id)) {
+    const result = await resume(previous);
+    if (result?.status === "running") return { pending: true };
+    await savePart(context.work.id, context.work.caption, context.historyRecordId, result);
+    if (item.part_count > 0 && completed.length === item.part_count) return mergeParts(completed);
+  }
+  const cookie = item.platform === "bilibili"
+    ? readUsableBilibiliCookie(await readUserSetting(item.user_id, "bilibili"))
+    : "";
   const url = videoUrl(item.platform, item.video.id);
   const resolved =
     item.platform === "bilibili"
@@ -63,7 +81,6 @@ export async function transcribeBatchItem(
           part: item.video.title,
         },
       ];
-  const completed = [...item.completed_parts];
   await checkpointItem(item, {
     stage: "读取作品信息",
     partCount: parts.length,
@@ -100,12 +117,10 @@ export async function transcribeBatchItem(
     });
 
     // The deterministic ID closes the gap between an accepted provider job and batch checkpoints.
-    const previous = item.asr_job_id
-      ? await readAsrTask({ id: item.asr_job_id, userId: item.user_id })
-      : null;
     const reusable =
       previous?.workKey === workKey &&
-      (previous.status === "running" || previous.status === "succeeded");
+      (previous.status === "running" || previous.status === "succeeded" ||
+        (previous.failure && shouldSkipFailure(previous.failure)));
     const jobId = reusable
       ? previous.id
       : `${item.id}:${item.generation}:${part.cid}`;
@@ -122,25 +137,17 @@ export async function transcribeBatchItem(
       );
     let result: DashScopeAsrJobResult | null;
     if (stored) {
-      if (stored.status === "running" && (!stored.taskId || stored.taskId.startsWith("pending:")) && !stored.result) {
-        const error =
-          "上次提交确认中断。重试可能重新计费，请先核对服务商任务记录。";
-        await markAsrTaskFailed(jobId, error);
-        throw new Error(error);
-      }
-      result = await refreshDashScopeAsrJobWithOptions(item.user_id, jobId, {
-        apiKeys: {
-          custom: config.customApiKey,
-          platform: config.platformApiKey,
-        },
-        postprocessModels: {
-          custom: config.customModels.transcriptPostprocess,
-          platform: config.platformModels.transcriptPostprocess,
-        },
-        signal,
-      });
+      result = await resume(stored);
     } else {
-      const audio = await prepareAudio();
+      let audio: AvailableHistoryAsset;
+      try {
+        audio = await prepareAudio();
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof FfmpegProcessError || error instanceof AudioUnavailableError)) throw error;
+        await skipPart(workId, title, error.message);
+        continue;
+      }
       signal.throwIfAborted();
       const custom = Boolean(config.customApiKey);
       const models = custom ? config.customModels : config.platformModels;
@@ -155,7 +162,8 @@ export async function transcribeBatchItem(
           durationSeconds: audio.durationSeconds,
         },
         {
-          model: getDashScopeAsrModel(audio.durationSeconds, models),
+          // Batch work needs a queryable provider task even for short audio.
+          model: models.asrE1,
         },
         {
           apiKey: custom ? config.customApiKey : config.platformApiKey,
@@ -178,47 +186,19 @@ export async function transcribeBatchItem(
         },
       );
     }
-    while (result?.status === "running") {
+    if (result?.status === "running") {
       await checkpointItem(item, { stage: "转录中", asrJobId: jobId });
-      await waitForPoll(signal);
-      result = await refreshDashScopeAsrJobWithOptions(item.user_id, jobId, {
-        apiKeys: {
-          custom: config.customApiKey,
-          platform: config.platformApiKey,
-        },
-        postprocessModels: {
-          custom: config.customModels.transcriptPostprocess,
-          platform: config.platformModels.transcriptPostprocess,
-        },
-        signal,
-      });
+      return { pending: true };
     }
-    if (!result || result.status !== "successed" || !result.result.ok) {
-      const error =
-        result && !result.result.ok ? result.result.detail : "转录任务不可用。";
-      const task = await readAsrTask({ id: jobId, userId: item.user_id });
-      if (
-        result &&
-        !result.result.ok &&
-        result.result.code === "not_configured"
-      )
-        throw new BatchBlockedError(error);
-      if (task?.status === "running") throw new RetryableBatchError(error);
-      throw new Error(error);
-    }
-    await updateTranscriptHistoryRecordTranscript({
-      id: history.id,
-      userId: item.user_id,
-      transcriptContent: result.result.content,
-      transcriptSegments: result.result.transcriptSegments,
-    });
-    completed.push({ workId, title, text: result.result.content });
-    await checkpointItem(item, {
-      stage: "保存转录结果",
-      completedParts: completed,
-    });
+    await savePart(workId, title, history.id, result);
 
     async function prepareAudio(): Promise<AvailableHistoryAsset> {
+      if (history.originalAudio) {
+        const cached = await ensureHistoryAsset({
+          assetKind: "originalAudio", historyRecordId: history.id, userId: item.user_id, signal,
+        });
+        if (cached) return cached;
+      }
       if (resolved) {
         const metadata = {
           ...resolved.metadata,
@@ -243,7 +223,7 @@ export async function transcribeBatchItem(
           selection,
           snapshot: createBilibiliResourceSnapshot(metadata, selection),
         });
-        if (!asset) throw new Error("原声音频不可用。");
+        if (!asset) throw new AudioUnavailableError("原声音频不可用。");
         return asset;
       }
       const credential = await readDouyinCredentialState(item.user_id);
@@ -268,7 +248,7 @@ export async function transcribeBatchItem(
           metadata: lease.metadata,
           snapshot: createDouyinResourceSnapshot(lease.metadata, "lowest"),
         });
-        if (!asset) throw new Error("原声音频不可用。");
+        if (!asset) throw new AudioUnavailableError("原声音频不可用。");
         return asset;
       } finally {
         lease.release();
@@ -276,28 +256,58 @@ export async function transcribeBatchItem(
     }
   }
   return mergeParts(completed);
+
+  async function resume(stored: StoredAsrTask) {
+    if (stored.status === "running" && (!stored.taskId || stored.taskId.startsWith("pending:")) && !stored.result) {
+      const detail = "上次提交确认中断。重试可能重新计费，请先核对服务商任务记录。";
+      const failure = { ok: false as const, code: "error" as const, detail, submissionUncertain: true };
+      await markAsrTaskFailed(stored.id, detail, failure);
+      return { status: "failed" as const, result: failure };
+    }
+    return refreshDashScopeAsrJobWithOptions(item.user_id, stored.id, {
+      apiKeys: { custom: config.customApiKey, platform: config.platformApiKey },
+      postprocessModels: { custom: config.customModels.transcriptPostprocess, platform: config.platformModels.transcriptPostprocess },
+      signal,
+    });
+  }
+
+  async function savePart(workId: string, title: string, historyId: string, result: DashScopeAsrJobResult | null) {
+    if (!result || result.status === "running") throw new Error("转录任务不可用。");
+    if (result.status !== "successed" || !result.result.ok) {
+      const failure = result.result;
+      const detail = failure.ok ? "转录任务不可用。" : failure.detail;
+      if (!failure.ok && failure.code === "not_configured") throw new BatchBlockedError(detail);
+      if (!failure.ok && shouldSkipFailure(failure)) {
+        await skipPart(workId, title, detail);
+        return;
+      }
+      throw new Error(detail);
+    }
+    await updateTranscriptHistoryRecordTranscript({
+      id: historyId, userId: item.user_id,
+      transcriptContent: result.result.content, transcriptSegments: result.result.transcriptSegments,
+    });
+    completed.push({ workId, title, text: result.result.content });
+    await checkpointItem(item, { stage: "保存转录结果", completedParts: completed });
+  }
+
+  async function skipPart(workId: string, title: string, reason: string) {
+    completed.push({ workId, title, text: "", skipped: reason });
+    await checkpointItem(item, { stage: "跳过不可转录音频", completedParts: completed });
+  }
 }
 
-function mergeParts(parts: ClaimedItem["completed_parts"]): string {
-  return parts
+function shouldSkipFailure(failure: Extract<ProviderResult, { ok: false }>): boolean {
+  return failure.code !== "not_configured" && (failure.code === "no_speech" || failure.code === "unavailable" ||
+    failure.submissionUncertain === true || failure.retryable === false);
+}
+
+function mergeParts(parts: ClaimedItem["completed_parts"]): BatchItemResult {
+  const transcribed = parts.filter(part => !part.skipped && part.text.trim());
+  if (!transcribed.length) return { skipped: parts.find(part => part.skipped)?.skipped ?? "未检测到可识别的语音。" };
+  return transcribed
     .map((part) =>
       parts.length > 1 ? `# ${part.title}\n\n${part.text}` : part.text,
     )
     .join("\n\n");
-}
-
-function waitForPoll(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    signal.throwIfAborted();
-    const finish = () => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    };
-    const timer = setTimeout(finish, 3000);
-    const abort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    signal.addEventListener("abort", abort, { once: true });
-  });
 }

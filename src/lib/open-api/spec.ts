@@ -19,8 +19,6 @@ export type OpenApiEndpoint = {
   variants: OpenApiVariant[];
 };
 
-export const OPEN_API_BASE_PATH = "/api/open";
-
 export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
   {
     method: "POST",

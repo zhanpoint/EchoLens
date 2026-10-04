@@ -14,7 +14,6 @@ export const AuthorVideoFiltersSchema = z.object({
   { message: "开始日期不能晚于结束日期。", path: ["publishedTo"] },
 );
 export type AuthorVideoFilters = z.infer<typeof AuthorVideoFiltersSchema>;
-export const DEFAULT_VIDEO_FILTERS = AuthorVideoFiltersSchema.parse({});
 
 export type VideoFilterDraft = {
   mode: "all" | "newest" | "oldest";
@@ -54,11 +53,6 @@ export function normalizeSearchText(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase();
 }
 
-export function isUnfilteredVideoScope(filters: AuthorVideoFilters): boolean {
-  return !filters.publishedFrom && !filters.publishedTo && !filters.limit &&
-    !filters.keyword && !normalizeTags(filters.tags).length;
-}
-
 export function normalizeTags(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => normalizeSearchText(value).replace(/^#+/u, "").trim()).filter(Boolean))];
 }
@@ -67,7 +61,7 @@ export function extractHashtags(title: string): string[] {
   return [...title.normalize("NFKC").matchAll(/#([^\s#,]+)/gu)].map((match) => match[1]);
 }
 
-export function createAuthorVideoMatcher(filters: AuthorVideoFilters, ignoreTags = false) {
+export function createAuthorVideoMatcher(filters: AuthorVideoFilters) {
   // User-facing dates are inclusive calendar days in Asia/Shanghai, independent of browser/server timezone.
   const from = filters.publishedFrom ? Date.parse(`${filters.publishedFrom}T00:00:00+08:00`) : null;
   const until = filters.publishedTo ? Date.parse(`${filters.publishedTo}T00:00:00+08:00`) + 86_400_000 : null;
@@ -78,7 +72,7 @@ export function createAuthorVideoMatcher(filters: AuthorVideoFilters, ignoreTags
     if (from !== null && video.publishedAt < from) return false;
     if (until !== null && video.publishedAt >= until) return false;
     if (keyword && !normalizeSearchText(video.title).includes(keyword)) return false;
-    if (ignoreTags || !tags.length) return true;
+    if (!tags.length) return true;
     const actual = new Set(normalizeTags([...(video.tags ?? []), ...extractHashtags(video.title)]));
     return filters.tagMode === "all" ? tags.every((tag) => actual.has(tag)) : tags.some((tag) => actual.has(tag));
   };

@@ -7,10 +7,10 @@ import {
 } from "@/lib/http/retry";
 import {
   createTranscribableAudioFileFromNode,
+  AudioUnavailableError,
   fetchRemoteMedia,
-  probeTranscribableAudioFromUrl,
 } from "@/lib/media/audio";
-import { createOssSignedUrl, deleteOssObjects, getOssObjectInfo, putOssStream } from "@/lib/oss/object-store";
+import { deleteOssObjects, getOssObjectInfo, putOssStream } from "@/lib/oss/object-store";
 import type { DownloadVideoQuality } from "@/lib/download-settings";
 import type { DouyinKind } from "@/types/douyin";
 
@@ -70,55 +70,21 @@ async function ensureOriginalAudioFromSources(
 
   if (audioUrls.length) {
     try {
-      return await uploadDirectAudio(objectKey, audioUrls, durationSeconds);
-    } catch {
-      await deleteOssObjects([objectKey]);
+      return await extractAndUploadAudio(objectKey, audioUrls, durationSeconds);
+    } catch (error) {
+      if (!videoUrls.length || isRetryableNetworkError(error)) throw error;
     }
   }
+  if (!videoUrls.length) throw new AudioUnavailableError("作品没有可用的音频或视频资源。");
   return await extractAndUploadAudio(objectKey, videoUrls, durationSeconds);
-}
-
-async function uploadDirectAudio(
-  objectKey: string,
-  audioUrls: readonly string[],
-  durationSeconds?: number,
-): Promise<OriginalAudioAsset> {
-  return await retryOperation(async () => {
-    const response = await fetchRemoteMedia(audioUrls, { mediaSource: "douyin" });
-    try {
-      await putOssStream({
-        body: response.body!,
-        cacheControl: REVALIDATED_CACHE_CONTROL,
-        contentLength: positiveContentLength(response),
-        contentType: response.headers.get("content-type") || "audio/mp4",
-        objectKey,
-      });
-      const stored = await requireStoredAudio(objectKey);
-      await probeTranscribableAudioFromUrl(createOssSignedUrl(objectKey));
-      return {
-        contentType: stored.contentType || "audio/mp4",
-        durationSeconds: durationSeconds ?? 0,
-        objectKey,
-        sizeBytes: stored.contentLength,
-      };
-    } catch (error) {
-      await deleteOssObjects([objectKey]);
-      throw error;
-    } finally {
-      await response.body?.cancel().catch(() => undefined);
-    }
-  }, {
-    attempts: AUDIO_UPLOAD_ATTEMPTS,
-    shouldRetry: (error) => error instanceof InvalidOriginalAudioError || isRetryableNetworkError(error),
-  });
 }
 
 async function extractAndUploadAudio(
   objectKey: string,
-  videoUrls: readonly string[],
+  sourceUrls: readonly string[],
   durationSeconds?: number,
 ): Promise<OriginalAudioAsset> {
-  const response = await fetchRemoteMedia(videoUrls, { mediaSource: "douyin" });
+  const response = await fetchRemoteMedia(sourceUrls, { mediaSource: "douyin" });
   let audio: Awaited<ReturnType<typeof createTranscribableAudioFileFromNode>> | undefined;
   try {
     audio = await createTranscribableAudioFileFromNode(
@@ -137,7 +103,6 @@ async function extractAndUploadAudio(
         if (stored.contentLength !== audio!.sizeBytes) {
           throw new InvalidOriginalAudioError("OSS 原声音频长度不一致。");
         }
-        await probeTranscribableAudioFromUrl(createOssSignedUrl(objectKey));
       } catch (error) {
         await deleteOssObjects([objectKey]);
         throw error;
@@ -162,11 +127,6 @@ async function requireStoredAudio(objectKey: string) {
   const stored = await getOssObjectInfo(objectKey);
   if (!stored?.contentLength) throw new InvalidOriginalAudioError("OSS 原声音频不存在或为空。");
   return stored;
-}
-
-function positiveContentLength(response: Response): number | undefined {
-  const value = Number(response.headers.get("content-length"));
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function bundlePrefix(kind: DouyinKind, id: string): string {

@@ -2,7 +2,6 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { fetchAuthorVideos, resolveAuthorId } from "@/lib/batch/author-videos";
 import { PlatformSchema } from "@/lib/batch/contracts";
-import { AuthorVideoFiltersSchema } from "@/lib/batch/video-filters";
 import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { toDouyinApiErrorResponse } from "@/app/api/douyin/_credential";
@@ -13,14 +12,13 @@ const Schema = z.object({
   platform: PlatformSchema,
   input: z.string().trim().min(1).max(2000),
   cursor: z.string().max(20).optional(),
-  filters: AuthorVideoFiltersSchema.optional(),
 });
 export async function POST(request: Request) {
   const user = await requireUser(request);
   if (user instanceof Response) return user;
   const parsed = Schema.safeParse(await request.json().catch(() => null));
   if (!parsed.success)
-    return Response.json({ error: parsed.error.issues[0]?.message || "用户主页或筛选参数无效。" }, { status: 400 });
+    return Response.json({ error: parsed.error.issues[0]?.message || "用户主页或分页参数无效。" }, { status: 400 });
   if (parsed.data.platform === "douyin") {
     const disabled = rejectDisabledDouyinAccountServices(user);
     if (disabled) return disabled;

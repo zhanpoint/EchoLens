@@ -1,6 +1,5 @@
 import type { DouyinKind, DouyinWorkIdentity } from "@/types/douyin";
 import {
-  extractFirstUrl as extractMediaUrl,
   MediaRedirectError,
   resolveMediaUrl,
 } from "@/lib/media/redirect";
@@ -17,20 +16,6 @@ export class DouyinResolveError extends Error {
       | "network_error",
   ) {
     super(message);
-  }
-}
-
-export function extractFirstUrl(input: string): string {
-  try {
-    return extractMediaUrl(input);
-  } catch (error) {
-    if (error instanceof MediaRedirectError) {
-      throw new DouyinResolveError(
-        error.message,
-        error.code === "unsupported_source" ? "unsupported_host" : error.code,
-      );
-    }
-    throw error;
   }
 }
 

@@ -14,8 +14,9 @@ import type {
   BatchPlatform,
 } from "./contracts";
 import { videoUrl } from "./contracts";
+import { exponentialRetryDelay } from "@/lib/http/retry";
 
-export type CompletedPart = { workId: string; title: string; text: string };
+export type CompletedPart = { workId: string; title: string; text: string; skipped?: string };
 export type ClaimedItem = {
   id: string;
   batch_id: string;
@@ -33,8 +34,9 @@ export type ClaimedItem = {
 const JOB_COLUMNS = `b.id, b.platform, b.author_name AS "authorName", b.model, b.status, b.created_at AS "createdAt",
   COUNT(i.id)::int AS total,
   COALESCE(SUM(CASE WHEN i.status = 'succeeded' THEN 1 ELSE 0 END), 0)::int AS succeeded,
+  COALESCE(SUM(CASE WHEN i.status = 'skipped' THEN 1 ELSE 0 END), 0)::int AS skipped,
   COALESCE(SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END), 0)::int AS failed,
-  COALESCE(SUM(CASE WHEN i.status = 'processing' AND i.lease_until >= EXTRACT(EPOCH FROM now()) * 1000 THEN 1 ELSE 0 END), 0)::int AS processing,
+  COALESCE(SUM(CASE WHEN i.status = 'waiting' OR (i.status = 'processing' AND i.lease_until >= EXTRACT(EPOCH FROM now()) * 1000) THEN 1 ELSE 0 END), 0)::int AS processing,
   COALESCE(SUM(CASE WHEN i.status = 'processing' AND i.lease_until < EXTRACT(EPOCH FROM now()) * 1000 THEN 1 ELSE 0 END), 0)::int AS interrupted,
   COALESCE(SUM(CASE WHEN i.status = 'canceled' THEN 1 ELSE 0 END), 0)::int AS canceled`;
 
@@ -132,15 +134,17 @@ export async function controlBatch(
         [id],
       );
       await client.query(
-        "UPDATE transcript_batch_items SET status = 'canceled', stage = '已取消', error = NULL, lease_token = NULL, lease_until = 0, updated_at = $2 WHERE batch_id = $1 AND status IN ('queued', 'processing')",
+        "UPDATE transcript_batch_items SET status = 'canceled', stage = '已取消', error = NULL, lease_token = NULL, lease_until = 0, updated_at = $2 WHERE batch_id = $1 AND status IN ('queued', 'processing', 'waiting')",
         [id, Date.now()],
       );
       return true;
     }
-    if (action === "retry") {
+    if (action === "retry" || action === "resume") {
       // Preserve provider IDs and completed parts: a retry first resumes any accepted job.
       const retried = await client.query(
-        "UPDATE transcript_batch_items SET status = 'queued', generation = generation + 1, retries = 0, next_run_at = 0, error = NULL, stage = '等待重试' WHERE batch_id = $1 AND status IN ('failed', 'canceled')" + (itemId ? " AND id = $2" : ""),
+        "UPDATE transcript_batch_items SET status = 'queued', generation = generation + 1, retries = 0, next_run_at = 0, error = NULL, stage = '等待重试' WHERE batch_id = $1 AND " +
+          (action === "retry" ? "(status IN ('failed', 'canceled') OR (status = 'queued' AND error IS NOT NULL))" : "(status = 'failed' OR (status = 'queued' AND error IS NOT NULL))") +
+          (itemId ? " AND id = $2" : ""),
         itemId ? [id, itemId] : [id],
       );
       if (itemId && !retried.rowCount) return false;
@@ -155,13 +159,17 @@ export async function controlBatch(
 }
 
 export const LEASE_MS = 120_000;
-export async function claimBatchItem(): Promise<ClaimedItem | null> {
+export async function claimBatchItem(maxInFlight = 8): Promise<ClaimedItem | null> {
   return withTransaction(async (client) => {
+    // Serialize only admission so multiple instances cannot exceed the durable pipeline window.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('echolens.batch.admission'))");
     const { rows } = await client.query<ClaimedItem>(
       `SELECT i.*, b.user_id, b.platform, b.model FROM transcript_batch_items i JOIN transcript_batches b ON b.id = i.batch_id
-      WHERE b.status = 'running' AND i.next_run_at <= $1 AND (i.status = 'queued' OR (i.status = 'processing' AND i.lease_until < $1))
-      ORDER BY b.created_at, i.position LIMIT 1 FOR UPDATE OF i SKIP LOCKED`,
-      [Date.now()],
+      WHERE (b.status = 'running' OR (b.status = 'paused' AND i.status = 'waiting')) AND i.next_run_at <= $1
+      AND (i.status IN ('queued', 'waiting') OR (i.status = 'processing' AND i.lease_until < $1))
+      AND (i.status <> 'queued' OR (SELECT COUNT(*) FROM transcript_batch_items WHERE status = 'waiting' OR (status = 'processing' AND lease_until > $1)) < $2)
+      ORDER BY CASE WHEN i.status = 'waiting' THEN 0 ELSE 1 END, b.created_at, i.position LIMIT 1 FOR UPDATE OF i SKIP LOCKED`,
+      [Date.now(), maxInFlight],
     );
     const item = rows[0];
     if (!item) return null;
@@ -219,7 +227,7 @@ export class LeaseLostError extends Error {
 export async function finishItem(
   item: ClaimedItem,
   outcome:
-    { text: string } | { error: string; retry: boolean; pause?: boolean },
+    { text: string } | { pending: true } | { skipped: string } | { error: string; retry: boolean; pause?: boolean; retryAfterMs?: number },
 ): Promise<void> {
   await withTransaction(async (client) => {
     // Control and completion lock the batch before its items to avoid lock inversion.
@@ -228,32 +236,40 @@ export async function finishItem(
       [item.batch_id],
     );
     const success = "text" in outcome;
-    const paused = !success && outcome.pause === true;
-    const retries = success || paused ? item.retries : item.retries + 1;
+    const pending = "pending" in outcome;
+    const skipped = "skipped" in outcome;
+    const paused = "error" in outcome && outcome.pause === true;
+    const retries = success || pending || skipped || paused ? item.retries : item.retries + 1;
     const status = success
       ? "succeeded"
-      : paused || (outcome.retry && retries < 5)
+      : pending ? "waiting"
+      : skipped ? "skipped"
+      : paused || ("error" in outcome && outcome.retry)
         ? "queued"
         : "failed";
     const updated = await client.query(
       `UPDATE transcript_batch_items SET status = $3, stage = $4, transcript = $5, error = $6, retries = $7,
-      next_run_at = $8, lease_token = NULL, lease_until = 0, updated_at = $9 WHERE id = $1 AND lease_token = $2`,
+      next_run_at = $8, lease_token = NULL, lease_until = 0, updated_at = $9,
+      generation = generation + $10 WHERE id = $1 AND lease_token = $2`,
       [
         item.id,
         item.lease_token,
         status,
         success
           ? "转录完成"
+          : pending ? "转录中"
+          : skipped ? "已跳过"
           : paused
             ? "等待继续"
             : status === "queued"
               ? "等待自动重试"
               : "转录失败",
         success ? outcome.text : null,
-        success ? null : outcome.error,
+        skipped ? outcome.skipped : "error" in outcome ? outcome.error : null,
         retries,
-        paused ? 0 : Date.now() + Math.min(60_000, 3000 * 2 ** retries),
+        paused || success || skipped ? 0 : Date.now() + (pending ? 3000 : Math.max("error" in outcome ? outcome.retryAfterMs ?? 0 : 0, exponentialRetryDelay(retries, 3000, 300_000))),
         Date.now(),
+        !success && !pending && !paused && status === "queued" ? 1 : 0,
       ],
     );
     if (!updated.rowCount) return;
@@ -272,9 +288,34 @@ async function settleBatch(
 ): Promise<void> {
   await client.query(
     `UPDATE transcript_batches SET status = 'completed' WHERE id = $1 AND status = 'running'
-    AND NOT EXISTS (SELECT 1 FROM transcript_batch_items WHERE batch_id = $1 AND status IN ('queued', 'processing'))`,
+    AND NOT EXISTS (SELECT 1 FROM transcript_batch_items WHERE batch_id = $1 AND status IN ('queued', 'processing', 'waiting'))`,
     [id],
   );
+}
+
+export async function recoverBatchQueue(): Promise<void> {
+  await withTransaction(async client => {
+    // Revisit legacy ASR pauses through their persisted failure codes, without resubmitting them.
+    await client.query(
+      `UPDATE transcript_batches b SET status = 'running' WHERE b.status = 'paused'
+       AND EXISTS (SELECT 1 FROM transcript_batch_items i JOIN transcript_asr_tasks a ON a.id = i.asr_job_id
+         WHERE i.batch_id = b.id AND i.status = 'queued' AND i.error IS NOT NULL AND a.status = 'failed'
+         AND a.result->>'code' <> 'not_configured'
+         AND (a.result->>'code' IN ('no_speech', 'unavailable') OR a.result->>'submissionUncertain' = 'true'
+           OR a.result->>'retryable' = 'false'))`,
+    );
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM transcript_batches b WHERE status IN ('running', 'completed')
+       AND EXISTS (SELECT 1 FROM transcript_batch_items WHERE batch_id = b.id AND status = 'failed') FOR UPDATE`,
+    );
+    if (!rows.length) return;
+    const ids = rows.map(row => row.id);
+    await client.query("UPDATE transcript_batches SET status = 'running' WHERE id = ANY($1::text[])", [ids]);
+    await client.query(
+      `UPDATE transcript_batch_items SET status = 'queued', generation = generation + 1,
+       next_run_at = 0, stage = '等待自动重试' WHERE batch_id = ANY($1::text[]) AND status = 'failed'`, [ids],
+    );
+  });
 }
 
 export async function* readBatchExport(

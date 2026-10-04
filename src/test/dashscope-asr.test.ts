@@ -25,6 +25,7 @@ vi.mock("@/lib/transcript/db", () => ({
   markAsrTaskCanceled: vi.fn(),
   markAsrTaskRunning: vi.fn(),
   markAsrTaskSucceeded: vi.fn(),
+  checkpointAsrTaskResult: vi.fn(async () => true),
   readAsrTask: vi.fn(),
   readRunningAsrTask: vi.fn(),
 }));
@@ -274,8 +275,25 @@ describe("dashscope ASR polling", () => {
     expect(markAsrTaskFailedMock).toHaveBeenCalledWith(
       "job-1",
       "未检测到可识别的语音。暂不支持转录纯静音、仅背景噪声或没有人声的音频。",
+      expect.objectContaining({ ok: false, code: "no_speech" }),
     );
     expect(onPostprocessStart).not.toHaveBeenCalled();
+  });
+
+  it("persists a structured no-speech failure when a successful provider task contains no words", async () => {
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ output: {
+        task_status: "SUCCEEDED", result: { transcription_url: "https://dashscope.example.com/empty.json" },
+      } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ transcripts: [{ sentences: [] }] }), { status: 200 }));
+    await expect(refreshDashScopeAsrJobWithOptions("user-1", "job-1")).resolves.toMatchObject({
+      status: "failed", result: { ok: false, code: "no_speech" },
+    });
+    expect(markAsrTaskFailedMock).toHaveBeenCalledWith("job-1", expect.any(String),
+      expect.objectContaining({ ok: false, code: "no_speech" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(markAsrTaskSucceededMock).not.toHaveBeenCalled();
   });
 
   it("uses the fixed compatible endpoint for required postprocessing", async () => {

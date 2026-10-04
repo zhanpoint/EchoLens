@@ -17,7 +17,6 @@ export type AuthorVideoPage = {
   videos: AuthorVideo[];
   cursor: string | null;
   total?: number;
-  scannedCount?: number;
 };
 
 export const ExportFormatSchema = z.enum(["md", "txt", "json"]);
@@ -31,7 +30,7 @@ export const CreateBatchSchema = z.object({
 });
 export type BatchStatus = "running" | "paused" | "completed" | "canceled";
 export type BatchItemStatus =
-  "queued" | "processing" | "succeeded" | "failed" | "canceled";
+  "queued" | "processing" | "waiting" | "succeeded" | "skipped" | "failed" | "canceled";
 export type BatchJob = {
   id: string;
   platform: BatchPlatform;
@@ -41,6 +40,7 @@ export type BatchJob = {
   createdAt: number;
   total: number;
   succeeded: number;
+  skipped: number;
   failed: number;
   processing: number;
   interrupted: number;

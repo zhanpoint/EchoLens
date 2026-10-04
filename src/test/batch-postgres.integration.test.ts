@@ -20,12 +20,14 @@ import {
   renewBatchLease,
   LeaseLostError,
   readBatchExport,
+  recoverBatchQueue,
 } from "@/lib/batch/db";
 import {
   insertAsrTask,
   markAsrTaskSucceeded,
   checkpointAsrTaskResult,
   markAsrTaskCanceled,
+  markAsrTaskFailed,
   readAsrTask,
 } from "@/lib/transcript/db";
 
@@ -168,6 +170,55 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
       expect(await claimBatchItem()).toBeNull();
       expect((await readBatch("owner", id))!.items.map(item => item.status)).toEqual(["succeeded", "processing", "failed"]);
     });
+    it("continues automatic retries beyond five failures with fresh generations", async () => {
+      const id = await createBatch("owner", input);
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const claimed = (await claimBatchItem())!;
+        expect(claimed.generation).toBe(attempt);
+        await finishItem(claimed, { error: "暂时失败", retry: true, retryAfterMs: 300000 });
+        const queued = await queryRow<{ next_run_at: string }>("SELECT next_run_at FROM transcript_batch_items WHERE id = $1", [claimed.id]);
+        expect(Number(queued!.next_run_at)).toBeGreaterThanOrEqual(Date.now() + 299900);
+        const batch = (await readBatch("owner", id))!;
+        expect(batch.job).toMatchObject({ status: "running", failed: 0 });
+        expect(batch.items[0].status).toBe("queued");
+        await execute("UPDATE transcript_batch_items SET next_run_at = 0 WHERE id = $1", [claimed.id]);
+      }
+      await finishItem((await claimBatchItem())!, { text: "最终成功" });
+      expect((await readBatch("owner", id))!.job).toMatchObject({ status: "completed", succeeded: 1, failed: 0 });
+    });
+    it("bounds cloud jobs across concurrent claimers and collects results while paused", async () => {
+      const id = await createBatch("owner", { ...input, videos: Array.from({ length: 5 }, (_, i) => ({ ...input.videos[0], id: String(123450 + i) })) });
+      const claims = await Promise.all(Array.from({ length: 5 }, () => claimBatchItem(2)));
+      const active = claims.filter((claim): claim is NonNullable<typeof claim> => claim !== null);
+      expect(active).toHaveLength(2);
+      for (const item of active) await finishItem(item, { pending: true });
+      expect((await readBatch("owner", id))!.job).toMatchObject({ processing: 2, total: 5, status: "running" });
+      expect(await claimBatchItem(2)).toBeNull();
+      await controlBatch("owner", id, "pause");
+      await execute("UPDATE transcript_batch_items SET next_run_at = 0 WHERE status = 'waiting'");
+      const poll = (await claimBatchItem(2))!;
+      expect(active.some(item => item.id === poll.id)).toBe(true);
+      await finishItem(poll, { text: "已完成" });
+      await finishItem((await claimBatchItem(2))!, { pending: true });
+      expect(await claimBatchItem(2)).toBeNull();
+      await controlBatch("owner", id, "cancel");
+      expect((await readBatch("owner", id))!.job).toMatchObject({ processing: 0, succeeded: 1, canceled: 4 });
+    });
+    it("recovers old failed jobs on restart while respecting paused and canceled batches", async () => {
+      const jobs: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const id = await createBatch("owner", input);
+        await finishItem((await claimBatchItem())!, { error: "旧失败", retry: false });
+        jobs.push(id);
+      }
+      await controlBatch("owner", jobs[1], "pause");
+      await controlBatch("owner", jobs[2], "cancel");
+      await recoverBatchQueue();
+      expect((await readBatch("owner", jobs[0]))!.job).toMatchObject({ status: "running", failed: 0 });
+      expect((await claimBatchItem())!).toMatchObject({ generation: 1 });
+      expect((await readBatch("owner", jobs[1]))!.job).toMatchObject({ status: "paused", failed: 1 });
+      expect((await readBatch("owner", jobs[2]))!.job.status).toBe("canceled");
+    });
 
     it("rejects retry targets outside the batch or owner and does not resume a paused batch", async () => {
       const id = await createBatch("owner", input);
@@ -178,6 +229,43 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
       expect(await controlBatch("owner", id, "retry", randomUUID())).toBe(false);
       expect((await readBatch("owner", id))!.job).toMatchObject({ status: "paused", failed: 1 });
       expect(await claimBatchItem()).toBeNull();
+    });
+
+    it("counts skips as terminal, excludes them from export, and never requeues them", async () => {
+      const id = await createBatch("owner", { ...input, videos: [input.videos[0], { ...input.videos[0], id: "123457" }] });
+      const silent = (await claimBatchItem())!;
+      await finishItem(silent, { skipped: "没有可识别语音" });
+      expect((await readBatch("owner", id))!.job).toMatchObject({ status: "running", skipped: 1, failed: 0 });
+      expect(await controlBatch("owner", id, "retry", silent.id)).toBe(false);
+      await finishItem((await claimBatchItem())!, { text: "有效结果" });
+      await recoverBatchQueue();
+      await controlBatch("owner", id, "retry");
+      const detail = (await readBatch("owner", id))!;
+      expect(detail.job).toMatchObject({ status: "completed", succeeded: 1, skipped: 1, failed: 0, processing: 0 });
+      expect(detail.items[0]).toMatchObject({ status: "skipped", stage: "已跳过", error: "没有可识别语音" });
+      expect(await claimBatchItem()).toBeNull();
+      const transcripts = [];
+      for await (const row of readBatchExport("owner", id)) transcripts.push(row.transcript);
+      expect(transcripts).toEqual(["有效结果"]);
+    });
+
+    it.each([
+      { ok: false, code: "no_speech", detail: "没有人声" },
+      { ok: false, code: "error", detail: "确认中断", submissionUncertain: true },
+    ] as const)("recovers legacy ASR pauses using persisted failure metadata: $code", async failure => {
+      const id = await createBatch("owner", input);
+      const item = (await claimBatchItem())!;
+      const asrId = randomUUID();
+      await insertAsrTask({ id: asrId, userId: "owner", cacheKey: asrId, workKey: "video:123456",
+        model: "qwen-audio-3.1-asr-flash-filetrans", objectKey: "audio", taskId: "provider-task", audioDurationSeconds: 60 });
+      await markAsrTaskFailed(asrId, failure.detail, failure);
+      await checkpointItem(item, { stage: "转录中", asrJobId: asrId });
+      await finishItem(item, { error: failure.detail, retry: false, pause: true });
+      await recoverBatchQueue();
+      const resumed = (await claimBatchItem())!;
+      expect(resumed).toMatchObject({ id: item.id, asr_job_id: asrId, generation: 0 });
+      await finishItem(resumed, { skipped: failure.detail });
+      expect((await readBatch("owner", id))!.job).toMatchObject({ status: "completed", skipped: 1, failed: 0 });
     });
 
     it("cancels unfinished items, fences active workers, and preserves completed exports", async () => {
@@ -294,7 +382,7 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
       expect((await readBatch("owner", id))!.job).toMatchObject({ status: "paused", failed: 0 });
       expect(await controlBatch("owner", id, "retry")).toBe(true);
       const resumed = (await claimBatchItem())!;
-      expect(resumed).toMatchObject({ id: item.id, generation: 0, retries: 0, asr_job_id: "accepted-task", part_count: 1 });
+      expect(resumed).toMatchObject({ id: item.id, generation: 1, retries: 0, asr_job_id: "accepted-task", part_count: 1 });
     });
 
     it("retries canceled and failed items without discarding results or accepting stale workers", async () => {
@@ -341,6 +429,8 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
       expect(await checkpointAsrTaskResult("flash-checkpoint", { ok: true, content: "已识别" })).toBe(true);
       expect(await readAsrTask({ id: "flash-checkpoint", userId: "owner" })).toMatchObject({ status: "running", result: { content: "已识别" } });
       await markAsrTaskCanceled("flash-checkpoint");
+      await markAsrTaskFailed("flash-checkpoint", "取消后的过期错误", { ok: false, code: "error", detail: "过期错误" });
+      expect(await readAsrTask({ id: "flash-checkpoint", userId: "owner" })).toMatchObject({ status: "canceled" });
       expect(await checkpointAsrTaskResult("flash-checkpoint", { ok: true, content: "过期写入" })).toBe(false);
       expect(await readAsrTask({ id: "flash-checkpoint", userId: "owner" })).toMatchObject({ status: "canceled", result: { content: "已识别" } });
     });
@@ -371,7 +461,7 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
       expect(await claimBatchItem()).toBeNull();
       await controlBatch("owner", id, "resume");
       const resumed = (await claimBatchItem())!;
-      expect(resumed).toMatchObject({ id: item.id, asr_job_id: "accepted-task", retries: 0, generation: 0, part_count: 1 });
+      expect(resumed).toMatchObject({ id: item.id, asr_job_id: "accepted-task", retries: 0, generation: 1, part_count: 1 });
     });
   },
 );

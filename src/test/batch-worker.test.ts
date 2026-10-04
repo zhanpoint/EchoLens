@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ claim: vi.fn(), finish: vi.fn(), transcribe: vi.fn() }));
 vi.mock("@/lib/batch/db", () => ({
   claimBatchItem: mocks.claim, finishItem: mocks.finish, renewBatchLease: vi.fn(),
+  recoverBatchQueue: vi.fn(async () => undefined),
   LeaseLostError: class extends Error {},
 }));
 vi.mock("@/lib/batch/transcribe", () => ({
   transcribeBatchItem: mocks.transcribe,
-  BatchBlockedError: class extends Error {}, RetryableBatchError: class extends Error {},
+  BatchBlockedError: class extends Error {},
 }));
 import { startBatchWorker } from "@/lib/batch/worker";
 import { DouyinApiError } from "@/lib/douyin/web-client";
@@ -24,6 +25,15 @@ afterEach(() => {
   vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
 });
 describe("batch worker upstream recovery", () => {
+  it("settles skipped work and immediately dispatches the next video", async () => {
+    vi.stubEnv("BATCH_TRANSCRIBE_CONCURRENCY", "1");
+    mocks.claim.mockResolvedValueOnce({ id: "silent" }).mockResolvedValueOnce({ id: "speech" });
+    mocks.transcribe.mockResolvedValueOnce({ skipped: "无可识别语音" }).mockResolvedValueOnce("有效结果");
+    startBatchWorker();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.finish).toHaveBeenCalledWith({ id: "silent" }, { skipped: "无可识别语音" });
+    expect(mocks.finish).toHaveBeenCalledWith({ id: "speech" }, { text: "有效结果" });
+  });
   it("retires stale singleton callbacks and keeps in-flight concurrency during reload", async () => {
     vi.stubEnv("BATCH_TRANSCRIBE_CONCURRENCY", "1");
     const staleTick = vi.fn();
@@ -59,7 +69,7 @@ describe("batch worker upstream recovery", () => {
     expect(mocks.finish).toHaveBeenCalledWith(item, { text: "完成" });
   });
 
-  it.each(["RATE_LIMITED", "ANTI_BOT", "BROWSER_SESSION_UNAVAILABLE"] as const)("pauses %s without progressing through the remaining videos", async code => {
+  it.each(["ANTI_BOT", "BROWSER_SESSION_UNAVAILABLE"] as const)("pauses %s without progressing through the remaining videos", async code => {
     const item = { id: "active" };
     mocks.claim.mockResolvedValueOnce(item);
     mocks.transcribe.mockRejectedValueOnce(new DouyinApiError("稍后继续", code));
@@ -73,6 +83,24 @@ describe("batch worker upstream recovery", () => {
     mocks.transcribe.mockRejectedValueOnce(new DouyinApiError("作品不可用", "UPSTREAM_ERROR"));
     startBatchWorker();
     await vi.advanceTimersByTimeAsync(0);
-    expect(mocks.finish).toHaveBeenCalledWith(item, { error: "作品不可用", retry: false, pause: false });
+    expect(mocks.finish).toHaveBeenCalledWith(item, { error: "作品不可用", retry: true, pause: false, retryAfterMs: undefined });
+  });
+  it("backs off a rate-limited platform without permanently failing the video", async () => {
+    const item = { id: "limited" };
+    mocks.claim.mockResolvedValueOnce(item);
+    mocks.transcribe.mockRejectedValueOnce(new DouyinApiError("限流", "RATE_LIMITED", { retryAfterSeconds: 120 }));
+    startBatchWorker();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.finish).toHaveBeenCalledWith(item, { error: "限流", retry: true, pause: false, retryAfterMs: 120000 });
+  });
+  it("immediately prepares the next video while an accepted cloud task waits", async () => {
+    vi.stubEnv("BATCH_TRANSCRIBE_CONCURRENCY", "1");
+    mocks.claim.mockResolvedValueOnce({ id: "first" }).mockResolvedValueOnce({ id: "second" });
+    mocks.transcribe.mockResolvedValueOnce({ pending: true }).mockResolvedValueOnce("完成");
+    startBatchWorker();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.finish).toHaveBeenCalledWith({ id: "first" }, { pending: true });
+    expect(mocks.finish).toHaveBeenCalledWith({ id: "second" }, { text: "完成" });
+    expect(mocks.claim).toHaveBeenCalledWith(2);
   });
 });

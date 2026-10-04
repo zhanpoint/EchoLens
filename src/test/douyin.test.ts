@@ -11,11 +11,11 @@ import {
   createTranscribableAudioFileFromNode,
   fetchRemoteMedia,
   muxVideoAndAudioToFile,
-  probeTranscribableAudioFromUrl,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
 } from "../lib/media/audio";
-import { classifyDouyinUrl, extractFirstUrl, resolveDouyinUrl } from "../lib/douyin/url";
+import { classifyDouyinUrl, resolveDouyinUrl } from "../lib/douyin/url";
+import { extractFirstUrl } from "../lib/media/redirect";
 import { getFeatureLabel } from "../types/douyin";
 
 afterEach(() => {
@@ -583,7 +583,7 @@ describe("audio transcription preparation", () => {
       const file = await muxVideoAndAudioToFile(videoPath, audioPath);
       try {
         expect(file.sizeBytes).toBeGreaterThan(0);
-        await expect(probeTranscribableAudioFromUrl(file.filePath)).resolves.toBeUndefined();
+        await runFfmpeg(resolveBundledFfmpegPath(), ["-i", file.filePath, "-map", "0:a:0", "-frames:a", "1", "-f", "null", "-"]);
       } finally {
         await file.cleanup();
       }
@@ -615,7 +615,7 @@ describe("audio transcription preparation", () => {
       const source = await fs.readFile(sourcePath);
       const audio = await createTranscribableAudioFileFromNode(Readable.from(source));
       try {
-        await expect(probeTranscribableAudioFromUrl(audio.filePath)).resolves.toBeUndefined();
+        await runFfmpeg(resolveBundledFfmpegPath(), ["-i", audio.filePath, "-map", "0:a:0", "-frames:a", "1", "-f", "null", "-"]);
         expect(audio.contentType).toBe("audio/mp4");
         expect(audio.durationSeconds).toBeGreaterThan(0);
         expect(audio.sizeBytes).toBe((await fs.stat(audio.filePath)).size);

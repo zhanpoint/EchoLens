@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bilibiliMediaHeaders, getBilibiliDashSelection, resolveBilibiliWork } from "@/lib/bilibili/client";
+import { getBilibiliDashSelection, resolveBilibiliWork } from "@/lib/bilibili/client";
+import { fetchRemoteMedia } from "@/lib/media/audio";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -23,8 +24,8 @@ describe("Bilibili client", () => {
       });
       expect(selection.audio.urls.length).toBeGreaterThan(0);
       expect(selection.video.urls.length).toBeGreaterThan(0);
-      const probe = await fetch(selection.audio.urls[0], {
-        headers: { ...bilibiliMediaHeaders(), range: "bytes=0-1023" },
+      const probe = await fetchRemoteMedia(selection.audio.urls, {
+        mediaSource: "bilibili", range: "bytes=0-1023",
       });
       expect([200, 206]).toContain(probe.status);
       await probe.body?.cancel();

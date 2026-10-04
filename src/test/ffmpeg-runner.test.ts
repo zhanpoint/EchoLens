@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
-import { runFfmpegProcess } from "@/lib/media/ffmpeg-runner";
+import { FfmpegProcessError, runFfmpegProcess } from "@/lib/media/ffmpeg-runner";
 
 describe("FFmpeg process lifecycle", () => {
   let child: EventEmitter & { kill: ReturnType<typeof vi.fn>; stderr: PassThrough };
@@ -90,5 +90,14 @@ describe("FFmpeg process lifecycle", () => {
     child.emit("close", -2);
     await result;
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("exposes a structured process exit separately from cancellation and spawn failure", async () => {
+    const task = runFfmpegProcess(options);
+    const failure = expect(task).rejects.toBeInstanceOf(FfmpegProcessError);
+    child.stderr.write("invalid input\n");
+    child.emit("close", 1);
+    await failure;
+    await expect(task).rejects.toMatchObject({ exitCode: 1, message: expect.stringContaining("invalid input") });
   });
 });

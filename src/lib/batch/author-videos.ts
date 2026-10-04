@@ -11,11 +11,8 @@ import {
   type BatchPlatform,
 } from "./contracts";
 import {
-  createAuthorVideoMatcher,
-  DEFAULT_VIDEO_FILTERS,
   extractHashtags,
   normalizeTags,
-  type AuthorVideoFilters,
 } from "./video-filters";
 
 const record = (value: unknown): Record<string, unknown> =>
@@ -78,11 +75,8 @@ export async function fetchAuthorVideos(input: {
   cursor?: string;
   userId: string;
   signal?: AbortSignal;
-  filters?: AuthorVideoFilters;
 }): Promise<AuthorVideoPage> {
   input.signal?.throwIfAborted();
-  const filters = input.filters ?? DEFAULT_VIDEO_FILTERS;
-  const matches = createAuthorVideoMatcher(filters);
   const cursor = input.cursor ?? (input.platform === "douyin" ? "0" : "1");
   if (!/^\d{1,20}$/.test(cursor)) throw new Error("分页参数无效。");
   if (input.platform === "douyin") {
@@ -136,8 +130,7 @@ export async function fetchAuthorVideos(input: {
       authorId: input.authorId,
       authorName: text(record(items[0]?.author).nickname),
       cursor: hasMore ? next : null,
-      scannedCount: videos.length,
-      videos: videos.filter(matches),
+      videos,
     };
   }
   if (!/^\d{1,20}$/.test(input.authorId))
@@ -174,40 +167,36 @@ export async function fetchAuthorVideos(input: {
   if (!items.length && (Number(cursor) - 1) * 30 < total)
     throw new Error("Bilibili 返回了不完整分页，请稍后重试。");
   const videos = items
-      .filter((item) => text(item.bvid))
-      .map((item) => {
-        const id = text(item.bvid);
-        videoUrl("bilibili", id);
-        return {
-          id,
-          title: text(item.title) || id,
-          coverUrl: text(item.pic).replace(/^\/\//, "https://"),
-          durationSeconds: parseDuration(text(item.length)),
-          publishedAt: Number(item.created ?? 0) * 1000,
-          tags: normalizeTags(extractHashtags(text(item.title))),
-        };
-      });
-  const candidates = videos.filter(createAuthorVideoMatcher(filters, true));
-  if (filters.tags.length) {
-    for (const video of candidates) {
-      input.signal?.throwIfAborted();
-      const payload = await requestBilibiliJson(
-        `https://api.bilibili.com/x/tag/archive/tags?bvid=${encodeURIComponent(video.id)}`,
-        cookie,
-        policy,
-        input.signal,
-      );
-      if (!Array.isArray(payload.data)) throw new Error("Bilibili 标签响应格式异常，请稍后重试。");
-      video.tags = normalizeTags(payload.data.map((tag) => text(record(tag).tag_name)));
-    }
+    .filter((item) => text(item.bvid))
+    .map((item) => {
+      const id = text(item.bvid);
+      videoUrl("bilibili", id);
+      return {
+        id,
+        title: text(item.title) || id,
+        coverUrl: text(item.pic).replace(/^\/\//, "https://"),
+        durationSeconds: parseDuration(text(item.length)),
+        publishedAt: Number(item.created ?? 0) * 1000,
+        tags: normalizeTags(extractHashtags(text(item.title))),
+      };
+    });
+  for (const video of videos) {
+    input.signal?.throwIfAborted();
+    const payload = await requestBilibiliJson(
+      `https://api.bilibili.com/x/tag/archive/tags?bvid=${encodeURIComponent(video.id)}`,
+      cookie,
+      policy,
+      input.signal,
+    );
+    if (!Array.isArray(payload.data)) throw new Error("Bilibili 标签响应格式异常，请稍后重试。");
+    video.tags = normalizeTags([...video.tags, ...payload.data.map((tag) => text(record(tag).tag_name))]);
   }
   return {
     authorId: input.authorId,
     authorName: text(items[0]?.author),
     total,
     cursor: Number(cursor) * 30 < total ? String(Number(cursor) + 1) : null,
-    scannedCount: videos.length,
-    videos: candidates.filter(matches),
+    videos,
   };
 }
 

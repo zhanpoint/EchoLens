@@ -15,7 +15,6 @@ const MEDIA_USER_AGENT =
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 600_000;
 const FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS = 600_000;
-const FFMPEG_AUDIO_PROBE_TIMEOUT_MS = 60_000;
 const MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS = 12 * 60 * 60;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -35,7 +34,8 @@ export type TranscribableAudioFile = {
   sizeBytes: number;
 };
 
-export class AudioTranscriptionLimitError extends Error {}
+export class AudioUnavailableError extends Error {}
+export class AudioTranscriptionLimitError extends AudioUnavailableError {}
 
 export function resolveBundledFfmpegPath(): string {
   // Native runtime loading avoids tracing the installer's legacy dynamic filesystem search.
@@ -60,11 +60,10 @@ export async function fetchRemoteMedia(
   let lastError: unknown;
   for (const url of urls) {
     options.signal?.throwIfAborted();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
+    const deadline = AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT_MS);
     const signal = options.signal
-      ? AbortSignal.any([controller.signal, options.signal])
-      : controller.signal;
+      ? AbortSignal.any([deadline, options.signal])
+      : deadline;
     try {
       const response = await fetch(url, {
         headers: { ...mediaDownloadHeaders(options.mediaSource), ...(options.range ? { range: options.range } : {}) },
@@ -78,8 +77,6 @@ export async function fetchRemoteMedia(
     } catch (error) {
       if (options.signal?.aborted) throw options.signal.reason;
       lastError = error;
-    } finally {
-      clearTimeout(timer);
     }
   }
   throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
@@ -100,7 +97,7 @@ export async function createTranscribableAudioFileFromNode(
     await pipeline(source, createWriteStream(inputPath));
     const durationSeconds = await extractAudioFile(inputPath, filePath);
     const sizeBytes = (await stat(/* turbopackIgnore: true */ filePath)).size;
-    if (!sizeBytes) throw new Error("ffmpeg 抽取的音频为空。");
+    if (!sizeBytes) throw new AudioUnavailableError("ffmpeg 抽取的音频为空。");
     if (sizeBytes > maxBytes) {
       throw new AudioTranscriptionLimitError(limits.sizeLimitMessage ?? "转写的音频大小不能超过 2GB，暂不能提取。");
     }
@@ -230,23 +227,6 @@ async function runFfmpeg(args: string[], operation: string): Promise<void> {
 
 export function resolveFfmpegPath(): string {
   return process.env.FFMPEG_PATH?.trim() || resolveBundledFfmpegPath();
-}
-
-/** Confirms that a stored audio object can be opened and its first audio frame decoded. */
-export async function probeTranscribableAudioFromUrl(
-  sourceUrl: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  await runFfmpegProcess({
-    binary: resolveFfmpegPath(),
-    args: [
-      "-hide_banner", "-loglevel", "error", "-nostdin", "-i", sourceUrl,
-      "-map", "0:a:0", "-frames:a", "1", "-f", "null", "-",
-    ],
-    operation: "OSS 原声音频探测",
-    signal,
-    timeoutMs: FFMPEG_AUDIO_PROBE_TIMEOUT_MS,
-  });
 }
 
 function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {

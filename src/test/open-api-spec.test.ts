@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OPEN_API_BASE_PATH, OPEN_API_ENDPOINTS } from "@/lib/open-api/spec";
+import { OPEN_API_ENDPOINTS } from "@/lib/open-api/spec";
 
 type JsonRecord = Record<string, unknown>;
 type MediaExample = JsonRecord & { downloads?: { audioUrl?: unknown; videoUrl?: unknown } };
@@ -18,10 +18,6 @@ describe("Open API documentation contract", () => {
         }
       }
     }
-  });
-
-  it("keeps the public base path stable", () => {
-    expect(OPEN_API_BASE_PATH).toBe("/api/open");
   });
 
   it("keeps platform-specific media examples paired with responses", () => {
