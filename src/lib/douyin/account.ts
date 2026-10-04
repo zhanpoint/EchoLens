@@ -1,5 +1,5 @@
 import { readUserSettings, upsertUserSetting } from "@/lib/user-settings";
-import { createDouyinWebClient, DouyinApiError, normalizeCookie } from "./web-client";
+import { createDouyinWebClient, isDouyinCredentialError, normalizeCookie, type DouyinClientOptions } from "./web-client";
 
 type StoredDouyinSettings = {
   credentialCheckedAt?: unknown;
@@ -33,11 +33,11 @@ export async function readDouyinCredentialState(userId: string): Promise<DouyinC
   return { checkedAt, cookie, status };
 }
 
-export async function validateDouyinCredential(cookie: string): Promise<void> {
-  await createDouyinWebClient(cookie).verifyAuthenticatedSession(1);
+export async function validateDouyinCredential(cookie: string, options: DouyinClientOptions = {}): Promise<void> {
+  await createDouyinWebClient(cookie, options).verifyAuthenticatedSession(1);
 }
 
-export async function validateAndStoreDouyinCredential(userId: string, cookie: string): Promise<DouyinCredentialState> {
+export async function validateAndStoreDouyinCredential(userId: string, cookie: string, options: DouyinClientOptions = {}): Promise<DouyinCredentialState> {
   const normalized = normalizeCookie(cookie);
   if (!normalized) {
     const state = { checkedAt: null, cookie: "", status: "missing" } as const;
@@ -45,14 +45,12 @@ export async function validateAndStoreDouyinCredential(userId: string, cookie: s
     return state;
   }
   try {
-    await validateDouyinCredential(normalized);
+    await validateDouyinCredential(normalized, options);
     const state = { checkedAt: Date.now(), cookie: normalized, status: "valid" } as const;
     await writeDouyinCredentialState(userId, state);
     return state;
   } catch (error) {
-    if (error instanceof DouyinApiError &&
-        error.code !== "UPSTREAM_ERROR" &&
-        error.code !== "ACCESS_BLOCKED") {
+    if (isDouyinCredentialError(error)) {
       await writeDouyinCredentialState(userId, {
         checkedAt: Date.now(),
         cookie: normalized,

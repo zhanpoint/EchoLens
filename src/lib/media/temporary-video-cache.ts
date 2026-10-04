@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { Readable } from "node:stream";
-import { fetchRemoteMedia, muxVideoAndAudioToFile, type MediaSourcePlatform } from "@/lib/media/audio";
+import { mediaDownloadHeaders, muxVideoAndAudioToFile, type MediaSourcePlatform } from "@/lib/media/audio";
+import { downloadMediaFile } from "./range-downloader";
 
 type CacheEntry = {
   cleanup: () => Promise<void>;
@@ -116,20 +116,25 @@ async function createEntryUnbounded(
   audioUrls: readonly string[],
   mediaSource: MediaSourcePlatform,
 ): Promise<CacheEntry> {
-  const [video, audio] = await Promise.all([
-    fetchRemoteMedia(videoUrls, { mediaSource }),
-    fetchRemoteMedia(audioUrls, { mediaSource }),
-  ]);
+  const controller = new AbortController();
+  const downloads = [
+    { name: "video.m4s", urls: videoUrls },
+    { name: "audio.m4s", urls: audioUrls },
+  ].map((input) => downloadMediaFile({
+    ...input,
+    headers: mediaDownloadHeaders(mediaSource),
+    maxBytes: MAX_FILE_BYTES,
+    signal: controller.signal,
+  }).catch((error) => { controller.abort(error); throw error; }));
+  const results = await Promise.allSettled(downloads);
   try {
-    const declaredBytes = [video, audio]
-      .map((response) => Number(response.headers.get("content-length")) || 0)
-      .reduce((total, value) => total + value, 0);
-    if (declaredBytes > MAX_FILE_BYTES * 2) {
-      throw new Error("DASH 音视频输入超过临时缓存上限。");
-    }
+    const files = results.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
     const file = await muxVideoAndAudioToFile(
-      Readable.fromWeb(video.body! as import("node:stream/web").ReadableStream<Uint8Array>),
-      Readable.fromWeb(audio.body! as import("node:stream/web").ReadableStream<Uint8Array>),
+      files[0].filePath,
+      files[1].filePath,
       { maxAudioBytes: MAX_FILE_BYTES, maxVideoBytes: MAX_FILE_BYTES },
     );
     return {
@@ -141,7 +146,7 @@ async function createEntryUnbounded(
       sizeBytes: file.sizeBytes,
     };
   } finally {
-    await Promise.allSettled([video.body?.cancel(), audio.body?.cancel()]);
+    await Promise.allSettled(results.map((result) => result.status === "fulfilled" ? result.value.cleanup() : undefined));
   }
 }
 

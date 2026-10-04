@@ -68,7 +68,7 @@ export async function deleteUserFeedback(id: string): Promise<boolean> {
     "DELETE FROM user_feedback WHERE id = $1 RETURNING id",
     [id],
   );
-  return row !== null;
+  return Boolean(row);
 }
 
 export async function updateUserFeedbackStatus(

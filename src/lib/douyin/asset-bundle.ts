@@ -22,6 +22,7 @@ type AssetInput = { id: string; kind: DouyinKind; videoQuality?: DownloadVideoQu
 const REVALIDATED_CACHE_CONTROL = "no-cache";
 const ASR_AUDIO_OBJECT_NAME = "audio.m4a";
 const AUDIO_UPLOAD_ATTEMPTS = 5;
+const originalAudioTasks = new Map<string, Promise<OriginalAudioAsset>>();
 
 class InvalidOriginalAudioError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -39,12 +40,16 @@ export async function prepareDouyinOriginalAudio(
   metadata: DouyinWorkMetadata,
 ): Promise<OriginalAudioAsset> {
   const objectKey = douyinOriginalAudioObjectKey(input);
-  return await ensureOriginalAudioFromSources(
+  const existing = originalAudioTasks.get(objectKey);
+  if (existing) return existing;
+  const task = ensureOriginalAudioFromSources(
     objectKey,
     metadata.audioUrls ?? [],
     metadata.videoUrls ?? [],
     metadata.durationSeconds,
-  );
+  ).finally(() => originalAudioTasks.delete(objectKey));
+  originalAudioTasks.set(objectKey, task);
+  return task;
 }
 
 async function ensureOriginalAudioFromSources(

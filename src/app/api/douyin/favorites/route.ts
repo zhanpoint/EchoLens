@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     return cookie;
   }
   try {
-    const snapshot = await collectDouyinFavorites({ cookie });
+    const snapshot = await collectDouyinFavorites({ cookie }, { signal: request.signal });
     return NextResponse.json({ ...snapshot, refreshedAt: Date.now() });
   } catch (error) {
     if (error instanceof DouyinApiError) {

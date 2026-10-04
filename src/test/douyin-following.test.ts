@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "./douyin-transport-test-utils";
 import { collectDouyinFollowingUsers } from "@/lib/douyin/following";
 
-vi.mock("@/lib/douyin/ms-token", () => ({
-  resolveMsToken: vi.fn(async () => "mock-ms-token"),
-}));
 
 afterEach(() => vi.restoreAllMocks());
 

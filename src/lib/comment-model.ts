@@ -3,18 +3,12 @@ export type CommentAuthor = {
   name: string;
 };
 
-export type CommentReply = {
+export type Comment = {
   author: CommentAuthor;
   id: string;
   likeCount: number;
   publishedAt: number;
   text: string;
-};
-
-export type Comment = CommentReply & {
-  replies: CommentReply[];
-  replyCount: number;
-  replyPageHasMore: boolean;
 };
 
 export type CommentsPayload = {

@@ -248,8 +248,7 @@ describe("user settings route", () => {
 
   it("persists only supported AI model selections", async () => {
     const models = {
-      asrE1: "qwen3-asr-flash-filetrans-2025-11-17",
-      asrE2: "fun-asr-2025-11-07",
+      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-plus",
       transcriptPostprocess: "qwen3.7-plus",
       summary: "qwen3.5-flash",

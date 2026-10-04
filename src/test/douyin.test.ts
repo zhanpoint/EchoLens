@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "./douyin-transport-test-utils";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,11 +9,13 @@ import { buildAuthorUrl, collectWorkMetadata, parseWorkMetadata } from "../lib/d
 import { estimateMediaProcessingDurationSeconds } from "../lib/douyin/cache-estimate";
 import {
   createTranscribableAudioFileFromNode,
+  fetchRemoteMedia,
+  muxVideoAndAudioToFile,
   probeTranscribableAudioFromUrl,
   resolveBundledFfmpegPath,
   resolveFfmpegPath,
 } from "../lib/media/audio";
-import { classifyDouyinUrl, extractFirstUrl, resolveDouyinInput } from "../lib/douyin/url";
+import { classifyDouyinUrl, extractFirstUrl, resolveDouyinUrl } from "../lib/douyin/url";
 import { getFeatureLabel } from "../types/douyin";
 
 afterEach(() => {
@@ -33,6 +36,17 @@ function sharePageHtml(videoInfoRes: unknown): string {
 }
 
 describe("douyin url utilities", () => {
+  it("stops CDN fallback immediately when a media request is canceled", async () => {
+    const controller = new AbortController();
+    const reason = new Error("download canceled");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
+    await expect(fetchRemoteMedia(["https://cdn.example/one", "https://cdn.example/two"], { signal: controller.signal })).rejects.toBe(reason);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("extracts the first url from shared text", () => {
     expect(extractFirstUrl("复制这条链接 https://v.douyin.com/abc123/ 打开抖音")).toBe(
       "https://v.douyin.com/abc123/",
@@ -73,7 +87,7 @@ describe("douyin url utilities", () => {
   it("redirects direct work urls before classifying them", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
 
-    await expect(resolveDouyinInput("https://www.douyin.com/video/7649250336875613449")).resolves.toMatchObject({
+    await expect(resolveDouyinUrl("https://www.douyin.com/video/7649250336875613449")).resolves.toMatchObject({
       finalUrl: "https://www.douyin.com/video/7649250336875613449",
       kind: "video",
       id: "7649250336875613449",
@@ -90,7 +104,7 @@ describe("douyin url utilities", () => {
       },
     }));
 
-    await expect(resolveDouyinInput("https://v.douyin.com/XO1jdgGD8SY/")).resolves.toEqual({
+    await expect(resolveDouyinUrl("https://v.douyin.com/XO1jdgGD8SY/")).resolves.toEqual({
       inputUrl: "https://v.douyin.com/XO1jdgGD8SY/",
       finalUrl: "https://www.douyin.com/video/7637528968758324707",
       kind: "video",
@@ -316,6 +330,13 @@ describe("douyin url utilities", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     expect(String(vi.mocked(globalThis.fetch).mock.calls[0][0])).toContain("aid=6383");
     expect(String(vi.mocked(globalThis.fetch).mock.calls[1][0])).toContain("aid=1128");
+  });
+
+  it("stops an authenticated gateway failure without trying another aid or anonymous HTML", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("blocked", { status: 403 }));
+    await expect(collectWorkMetadata({ finalUrl: "https://www.douyin.com/video/700005", id: "700005", kind: "video" }, { credentialCookie: "sessionid=valid" }))
+      .rejects.toMatchObject({ code: "ACCESS_BLOCKED" });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("keeps the credential valid when the official self profile check succeeds", async () => {
@@ -548,6 +569,31 @@ describe("douyin url utilities", () => {
 });
 
 describe("audio transcription preparation", () => {
+  it("muxes seekable input files directly and leaves their lifetime to the caller", { timeout: 15_000 }, async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "echolens-mux-test-"));
+    const videoPath = path.join(directory, "video.mp4");
+    const audioPath = path.join(directory, "audio.m4a");
+    try {
+      await runFfmpeg(resolveBundledFfmpegPath(), [
+        "-y", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1", "-c:v", "mpeg4", videoPath,
+      ]);
+      await runFfmpeg(resolveBundledFfmpegPath(), [
+        "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1", "-c:a", "aac", audioPath,
+      ]);
+      const file = await muxVideoAndAudioToFile(videoPath, audioPath);
+      try {
+        expect(file.sizeBytes).toBeGreaterThan(0);
+        await expect(probeTranscribableAudioFromUrl(file.filePath)).resolves.toBeUndefined();
+      } finally {
+        await file.cleanup();
+      }
+      expect((await fs.stat(videoPath)).size).toBeGreaterThan(0);
+      expect((await fs.stat(audioPath)).size).toBeGreaterThan(0);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("uses the bundled ffmpeg package", () => {
     expect(resolveBundledFfmpegPath()).toContain(path.join("node_modules", "@ffmpeg-installer"));
   });

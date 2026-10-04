@@ -134,10 +134,10 @@ export async function POST(request: Request, context: RouteContext) {
         }
         const credentialRequired = douyinCredentialRequired || bilibiliCredentialRequired;
         send({
-          code: credentialRequired ? "CREDENTIAL_INVALID" : "COMMENTS_UPSTREAM_ERROR",
+          code: credentialRequired ? "CREDENTIAL_INVALID" : error instanceof DouyinApiError ? error.code : "COMMENTS_UPSTREAM_ERROR",
           error: credentialRequired
             ? `${source === "bilibili" ? "Bilibili" : "抖音"}账号访问凭证已失效，请前往设置更新后重试。`
-            : "评论采集失败，请稍后重试。",
+            : error instanceof DouyinApiError ? error.message : "评论采集失败，请稍后重试。",
           type: "error",
         });
       }).finally(() => {

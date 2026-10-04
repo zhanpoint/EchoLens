@@ -31,10 +31,7 @@ vi.mock("@/lib/dashscope/asr", () => ({
       super("平台转录剩余额度不足，无法转录当前音频。请前往设置，配置正确且可用的自定义 API Key 后继续使用。");
     }
   },
-  getDashScopeAsrModelForProfile: vi.fn((profile: "e1" | "e2", models: { asrE1: string; asrE2: string }) =>
-    profile === "e1" ? models.asrE1 : models.asrE2,
-  ),
-  refreshDashScopeAsrJob: vi.fn(),
+  getDashScopeAsrModel: vi.fn((duration: number, models: { asrE1: string }) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asrE1),
   refreshDashScopeAsrJobWithOptions: vi.fn(),
   transcribeDashScopeAsr: vi.fn(),
 }));
@@ -44,27 +41,24 @@ vi.mock("@/lib/dashscope/user-credential", () => ({
     apiKey: "test-user-key",
     customApiKey: "test-user-key",
     customModels: {
-      asrE1: "qwen3-asr-flash-filetrans",
-      asrE2: "fun-asr",
+      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
-      transcriptPostprocess: "deepseek-v4-flash",
-      summary: "deepseek-v4-flash",
+      transcriptPostprocess: "deepseek-v4.1-flash",
+      summary: "deepseek-v4.1-flash",
     },
     isCustomApiKey: true,
     models: {
-      asrE1: "qwen3-asr-flash-filetrans",
-      asrE2: "fun-asr",
+      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
-      transcriptPostprocess: "deepseek-v4-flash",
-      summary: "deepseek-v4-flash",
+      transcriptPostprocess: "deepseek-v4.1-flash",
+      summary: "deepseek-v4.1-flash",
     },
     platformApiKey: "platform-key",
     platformModels: {
-      asrE1: "qwen3-asr-flash-filetrans",
-      asrE2: "fun-asr",
+      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
-      transcriptPostprocess: "deepseek-v4-flash",
-      summary: "deepseek-v4-flash",
+      transcriptPostprocess: "deepseek-v4.1-flash",
+      summary: "deepseek-v4.1-flash",
     },
   })),
 }));
@@ -164,14 +158,14 @@ describe("douyin transcribe route", () => {
         objectKey: "echolens/media/video/7649250336875613449/audio.m4a",
         signedUrl: "https://oss.example.com/server-signed-audio.m4a",
       },
-      { model: "fun-asr", profile: "e3" },
+      { model: "qwen-audio-3.1-asr-flash" },
       {
         apiKey: "test-user-key",
         clientJobId: "client-job-1",
         credentialSource: "custom",
         historyContext: historyContext(),
         postprocess: {
-          model: "deepseek-v4-flash",
+          model: "deepseek-v4.1-flash",
           onStart: expect.any(Function),
         },
         signal: expect.any(AbortSignal),
@@ -200,10 +194,10 @@ describe("douyin transcribe route", () => {
     }));
   });
 
-  it("passes Fun-ASR enhancement options", async () => {
+  it("passes E1 speaker separation options", async () => {
     const response = await POST(transcribeRequest({
       diarizationEnabled: true,
-      model: "e2",
+      model: "e1",
       speakerCount: 1,
     }));
 
@@ -212,14 +206,14 @@ describe("douyin transcribe route", () => {
       "user-1",
       "video:7649250336875613449",
       expect.any(Object),
-      { diarizationEnabled: true, model: "fun-asr", profile: "e2", speakerCount: 1 },
+      { diarizationEnabled: true, model: "qwen-audio-3.1-asr-flash", speakerCount: 1 },
       {
         apiKey: "test-user-key",
         clientJobId: "client-job-1",
         credentialSource: "custom",
         historyContext: historyContext(),
         postprocess: {
-          model: "deepseek-v4-flash",
+          model: "deepseek-v4.1-flash",
           onStart: expect.any(Function),
         },
         signal: expect.any(AbortSignal),
@@ -250,11 +244,11 @@ describe("douyin transcribe route", () => {
       "user-1",
       "video:7649250336875613449",
       expect.any(Object),
-      { model: "fun-asr", profile: "e3" },
+      { model: "qwen-audio-3.1-asr-flash" },
       expect.objectContaining({
         apiKey: "platform-key",
         credentialSource: "platform",
-        postprocess: { model: "deepseek-v4-flash", onStart: expect.any(Function) },
+        postprocess: { model: "deepseek-v4.1-flash", onStart: expect.any(Function) },
       }),
     );
     expect(transcribeDashScopeAsrMock.mock.calls[1]?.[4]).toHaveProperty("clientJobId", "client-job-1:platform");
@@ -278,32 +272,6 @@ describe("douyin transcribe route", () => {
     }));
   });
 
-  it("passes E1 inverse text normalization only for the Qwen Filetrans model", async () => {
-    const response = await POST(transcribeRequest({
-      enableItn: true,
-      model: "e1",
-    }));
-
-    expect(response.status).toBe(200);
-    expect(transcribeDashScopeAsrMock).toHaveBeenCalledWith(
-      "user-1",
-      "video:7649250336875613449",
-      expect.any(Object),
-      { enableItn: true, model: "qwen3-asr-flash-filetrans", profile: "e1" },
-      {
-        apiKey: "test-user-key",
-        clientJobId: "client-job-1",
-        credentialSource: "custom",
-        historyContext: historyContext(),
-        postprocess: {
-          model: "deepseek-v4-flash",
-          onStart: expect.any(Function),
-        },
-        signal: expect.any(AbortSignal),
-        title: "测试作品",
-      },
-    );
-  });
 
   it("passes caption context from the owned history session", async () => {
     readTranscriptHistoryRecordMock.mockResolvedValueOnce({
@@ -325,12 +293,12 @@ describe("douyin transcribe route", () => {
       "user-1",
       "video:7649250336875613449",
       expect.any(Object),
-      { model: "fun-asr", profile: "e3" },
+      { model: "qwen-audio-3.1-asr-flash" },
       expect.objectContaining({
         historyContext: expect.objectContaining({
           work: expect.objectContaining({ caption: "Claude Fable 5 回归" }),
         }),
-        postprocess: { model: "deepseek-v4-flash", onStart: expect.any(Function) },
+        postprocess: { model: "deepseek-v4.1-flash", onStart: expect.any(Function) },
       }),
     );
   });
@@ -364,7 +332,7 @@ describe("douyin transcribe route", () => {
       postprocess: {
         onStart: expect.any(Function),
       },
-      postprocessModels: { custom: "deepseek-v4-flash", platform: "deepseek-v4-flash" },
+      postprocessModels: { custom: "deepseek-v4.1-flash", platform: "deepseek-v4.1-flash" },
       signal: expect.any(AbortSignal),
     });
     expect(upsertTranscriptHistoryRecordMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -419,6 +387,22 @@ describe("douyin transcribe route", () => {
     await response.text();
 
     expect(cancelDashScopeAsrJobMock).toHaveBeenCalledWith("user-1", "provider-job-1");
+  });
+
+  it("cancels upstream work when only the SSE response body is canceled", async () => {
+    let signal: AbortSignal | undefined;
+    let resolveSubmission: ((value: Awaited<ReturnType<typeof transcribeDashScopeAsr>>) => void) | undefined;
+    transcribeDashScopeAsrMock.mockImplementation((_userId, _workKey, _audio, _options, config) => {
+      signal = config?.signal;
+      return new Promise((resolve) => { resolveSubmission = resolve; });
+    });
+    const response = await POST(transcribeRequest());
+    await vi.waitFor(() => expect(signal?.aborted).toBe(false));
+    await response.body!.cancel();
+    expect(signal?.aborted).toBe(true);
+    resolveSubmission?.({ historyContext: historyContext(), jobId: "provider-job-2", status: "running" });
+    await vi.waitFor(() => expect(cancelDashScopeAsrJobMock).toHaveBeenCalledWith("user-1", "provider-job-2"));
+    expect(upsertTranscriptHistoryRecordMock).not.toHaveBeenCalled();
   });
 
 });

@@ -15,6 +15,8 @@ import {
 } from "@/lib/douyin/url";
 import { markDouyinCredentialInvalid, readDouyinCredentialState } from "@/lib/douyin/account";
 import { DouyinMetadataError } from "@/lib/douyin/detail";
+import { DouyinApiError } from "@/lib/douyin/web-client";
+import { toDouyinApiErrorResponse } from "@/app/api/douyin/_credential";
 import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
 import {
   MediaRedirectError,
@@ -73,7 +75,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ sameAsCurrent: true });
       }
 
-      const work = await enrichDouyinWork(resolvedWork, user.id);
+      const work = await enrichDouyinWork(resolvedWork, user.id, request.signal);
       return await persistWork({
         historyRecordId: parsed.data.historyRecordId,
         userId: user.id,
@@ -90,6 +92,7 @@ export async function POST(request: Request) {
       userId: user.id,
     });
   } catch (error) {
+    if (error instanceof DouyinApiError) return toDouyinApiErrorResponse(error, user.id);
     if (error instanceof NetworkRetryExhaustedError) {
       return NextResponse.json(
         { code: NETWORK_RETRY_ERROR_CODE, error: NETWORK_RETRY_ERROR_MESSAGE },
@@ -150,14 +153,14 @@ async function resolveAndPersistBilibili(input: {
   });
 }
 
-async function enrichDouyinWork(work: DouyinWorkIdentity, userId: string): Promise<ResolvedDouyinWork> {
+async function enrichDouyinWork(work: DouyinWorkIdentity, userId: string, signal: AbortSignal): Promise<ResolvedDouyinWork> {
   const credentialState = await readDouyinCredentialState(userId);
   const credentialCookie = credentialState.status === "valid" ? credentialState.cookie : "";
   let metadataLease: Awaited<ReturnType<typeof acquireWorkMetadata>>;
   try {
-    metadataLease = await acquireWorkMetadata(work, undefined, undefined, credentialCookie);
+    metadataLease = await acquireWorkMetadata(work, undefined, undefined, credentialCookie, signal);
   } catch (error) {
-    if (error instanceof NetworkRetryExhaustedError || error instanceof DouyinMetadataError) throw error;
+    if (signal.aborted || error instanceof DouyinApiError || error instanceof NetworkRetryExhaustedError || error instanceof DouyinMetadataError) throw error;
     throw new InvalidMediaLinkError(INVALID_MEDIA_LINK_MESSAGE);
   }
 

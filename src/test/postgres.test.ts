@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closePostgresPoolForTest,
   ensurePostgresSchema,
@@ -20,6 +20,29 @@ afterEach(async () => {
 });
 
 describe("postgres storage", () => {
+  it("skips completed transcript migrations after process initialization is reset", async () => {
+    const statements: string[] = [];
+    const release = vi.fn();
+    const connect = vi.spyOn(pool, "connect").mockResolvedValue({
+      query: async (sql: string) => {
+        statements.push(sql);
+        return { rows: sql.startsWith("SELECT version") ? [{ version: "already-applied" }] : [] };
+      },
+      release,
+    });
+    try {
+      setPostgresPoolForTest(pool);
+      await ensurePostgresSchema();
+      expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(4);
+      expect(statements.some((sql) => sql.startsWith("UPDATE transcript_history_records"))).toBe(false);
+      expect(statements.some((sql) => sql.startsWith("ALTER TABLE transcript_history_records"))).toBe(false);
+      expect(statements.some((sql) => sql.startsWith("DROP TABLE"))).toBe(false);
+      expect(release).toHaveBeenCalledTimes(4);
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
   it("creates the application schema before queries run", async () => {
     const row = await queryRow<{ table_name: string }>(
       `SELECT table_name
@@ -80,6 +103,8 @@ describe("postgres storage", () => {
        VALUES ('legacy-history', 'user-1', '旧作品标题', '旧会话名称')`,
     );
     await pool.query("CREATE TABLE douyin_favorites_cache (user_id text PRIMARY KEY, payload jsonb)");
+    await pool.query("CREATE TABLE app_schema_migrations (version text PRIMARY KEY)");
+    await pool.query("INSERT INTO app_schema_migrations (version) VALUES ('transcript-schema-v3-session-name')");
 
     await ensurePostgresSchema();
     await ensurePostgresSchema();
@@ -110,7 +135,7 @@ describe("postgres storage", () => {
     expect(columnNames).not.toContain("original_title");
     expect(columnNames).not.toContain("display_title");
     await expect(pool.query(
-      "SELECT version FROM app_schema_migrations WHERE version = 'transcript-schema-v3-session-name'",
-    )).resolves.toMatchObject({ rows: [{ version: "transcript-schema-v3-session-name" }] });
+      "SELECT version FROM app_schema_migrations WHERE version = 'transcript-schema-v5-incremental-history'",
+    )).resolves.toMatchObject({ rows: [{ version: "transcript-schema-v5-incremental-history" }] });
   });
 });

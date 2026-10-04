@@ -22,23 +22,6 @@ export type OssObjectInfo = {
   metadata: Readonly<Record<string, string>>;
 };
 
-export async function putOssObject(input: {
-  body: Uint8Array;
-  contentType: string;
-  objectKey: string;
-}): Promise<void> {
-  const config = readConfig();
-  const response = await signedRequest(config, input.objectKey, {
-    body: input.body,
-    contentType: input.contentType,
-    method: "PUT",
-  });
-  await response.body?.cancel();
-  if (!response.ok) {
-    throw new Error(`OSS 上传对象失败：HTTP ${response.status}`);
-  }
-}
-
 export async function putOssStream(input: {
   body: ReadableStream<Uint8Array>;
   cacheControl?: string;
@@ -65,12 +48,6 @@ export async function deleteOssObjects(objectKeys: readonly string[]): Promise<v
     const response = await signedRequest(readConfig(), objectKey, { method: "DELETE" });
     await response.body?.cancel();
   }));
-}
-
-export async function ossObjectExists(objectKey: string): Promise<boolean> {
-  const response = await signedRequest(readConfig(), objectKey, { method: "HEAD" });
-  await response.body?.cancel();
-  return response.ok;
 }
 
 export async function getOssObjectInfo(objectKey: string): Promise<OssObjectInfo | null> {
@@ -157,7 +134,7 @@ async function signedRequest(
   config: OssConfig,
   objectKey: string,
   input: {
-    body?: Uint8Array | ReadableStream<Uint8Array>;
+    body?: ReadableStream<Uint8Array>;
     cacheControl?: string;
     contentLength?: number;
     contentType?: string;
@@ -191,8 +168,7 @@ async function signedRequest(
       authorization,
       date,
       ...metadataHeaders,
-      ...(input.contentLength !== undefined ? { "content-length": String(input.contentLength) } :
-        input.body instanceof Uint8Array ? { "content-length": String(input.body.byteLength) } : {}),
+      ...(input.contentLength !== undefined ? { "content-length": String(input.contentLength) } : {}),
       ...(contentType ? { "content-type": contentType } : {}),
       ...(input.cacheControl ? { "cache-control": input.cacheControl } : {}),
     },

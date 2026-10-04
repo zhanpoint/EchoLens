@@ -71,14 +71,14 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
     path: "/transcripts/transcribe",
     title: "转录音频",
     description: "将抖音或 Bilibili 视频中的音频转写为文本。",
-    codeComments: ["input：一个抖音或 Bilibili 分享链接", "model：可选 e1、e2 或 e3"],
-    requestDescription: "input 为一个抖音或 Bilibili 分享链接；model 可选 e1、e2 或 e3。",
+    codeComments: ["input：一个抖音或 Bilibili 分享链接", "model：可选 e1"],
+    requestDescription: "input 为一个抖音或 Bilibili 分享链接；model 可选 e1。",
     responseDescription: "JSON。返回媒体信息和转录结果。",
     transport: "json",
     variants: [
       {
         label: "抖音",
-        request: { input: "https://v.douyin.com/example", model: "e2" },
+        request: { input: "https://v.douyin.com/example", model: "e1" },
         response: {
           media: {
             source: "douyin",
@@ -92,14 +92,14 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
           },
           transcript: {
             text: "示例转录文本",
-            model: "qwen3-asr-flash-filetrans",
+            model: "qwen-audio-3.1-asr-flash-filetrans",
             segments: [{ startSeconds: 0, endSeconds: 3.2, text: "示例转录文本" }],
           },
         },
       },
       {
         label: "Bilibili",
-        request: { input: "https://b23.tv/example", model: "e2" },
+        request: { input: "https://b23.tv/example", model: "e1" },
         response: {
           media: {
             source: "bilibili",
@@ -113,7 +113,7 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
           },
           transcript: {
             text: "示例转录文本",
-            model: "qwen3-asr-flash-filetrans",
+            model: "qwen-audio-3.1-asr-flash-filetrans",
             segments: [{ startSeconds: 0, endSeconds: 3.2, text: "示例转录文本" }],
           },
         },

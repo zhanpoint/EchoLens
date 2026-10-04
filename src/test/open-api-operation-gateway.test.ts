@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/dashscope/asr", () => ({
   AsrQuotaExceededError: class AsrQuotaExceededError extends Error {},
-  getDashScopeAsrModelForProfile: vi.fn((profile: string, models: Record<string, string>) => models[`asr${profile.toUpperCase()}`]),
+  getDashScopeAsrModel: vi.fn((duration: number, models: Record<string, string>) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asrE1),
   PLATFORM_ASR_QUOTA_SECONDS: 3_600,
   transcribeDashScopeAsrOnce: mocks.transcribeDashScopeAsrOnce,
 }));
@@ -29,8 +29,6 @@ import { createOpenTranscription } from "@/lib/open-api/operation-gateway";
 
 const models = {
   asrE1: "asr-e1",
-  asrE2: "asr-e2",
-  asrE3: "asr-e3",
   summary: "summary",
   transcriptPostprocess: "postprocess",
   translation: "translation",
@@ -60,7 +58,7 @@ describe("Open API one-shot transcription", () => {
     });
     mocks.transcribeDashScopeAsrOnce.mockResolvedValue({
       result: {
-        asrModel: "asr-e2",
+        asrModel: "qwen-audio-3.1-asr-flash",
         content: "转录正文",
         ok: true,
         transcriptSegments: [{ startSeconds: 0, endSeconds: 1, text: "转录正文" }],
@@ -69,7 +67,7 @@ describe("Open API one-shot transcription", () => {
 
     const response = await createOpenTranscription({
       input: "https://v.douyin.com/example",
-      model: "e2",
+      model: "e1",
       userId: "user-1",
     });
 
@@ -80,7 +78,7 @@ describe("Open API one-shot transcription", () => {
         title: "作品",
       },
       transcript: {
-        model: "asr-e2",
+        model: "qwen-audio-3.1-asr-flash",
         segments: [{ startSeconds: 0, endSeconds: 1, text: "转录正文" }],
         text: "转录正文",
       },

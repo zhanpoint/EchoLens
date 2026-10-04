@@ -24,7 +24,7 @@ registerTool(
   "转录抖音或 Bilibili 视频音频，可选择转录模型。",
   {
     input: z.string().min(1).describe("抖音或 Bilibili 分享链接/BV 号"),
-    model: z.enum(["e1", "e2", "e3"]).optional().describe("转录模型档位；不传则使用 EchoLens 默认档位"),
+    model: z.literal("e1").optional().describe("转录模型档位；不传则使用 EchoLens 默认档位"),
   },
   async (input) => getClient().transcribe(input),
 );

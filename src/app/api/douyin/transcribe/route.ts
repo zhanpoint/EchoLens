@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
+import { createJsonSseResponse } from "@/lib/http/sse-response";
 import { z } from "zod";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   cancelDashScopeAsrJob,
   AsrQuotaExceededError,
-  getDashScopeAsrModelForProfile,
+  getDashScopeAsrModel,
   refreshDashScopeAsrJobWithOptions,
   transcribeDashScopeAsr,
   type DashScopeAsrJobResult,
-  type DashScopeAsrModelProfile,
+  type DashScopeAsrOptions,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
 import { DEFAULT_DASHSCOPE_ASR_PROFILE, type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
@@ -31,21 +32,8 @@ import { buildWorkKey, mediaSourceFromWorkKey } from "@/lib/media/source";
 
 export const runtime = "nodejs";
 
-const E1_ASR_PROFILE: DashScopeAsrModelProfile = "e1";
-const E2_ASR_PROFILE: DashScopeAsrModelProfile = "e2";
-const E3_ASR_PROFILE: DashScopeAsrModelProfile = "e3";
 const CLIENT_JOB_ID_MAX_LENGTH = 128;
 const FALLBACK_JOB_ID_SUFFIX = ":platform";
-
-const SensitiveWordListSchema = z.object({
-  word_list: z.array(z.string().trim().min(1)),
-}).strict();
-
-const SpecialWordFilterSchema = z.object({
-  filter_with_empty: SensitiveWordListSchema.optional(),
-  filter_with_signed: SensitiveWordListSchema.optional(),
-  system_reserved_filter: z.boolean().optional(),
-}).strict();
 
 const WorkSchema = TranscribeWorkSchema;
 
@@ -53,9 +41,7 @@ const TranscribeSchema = z.object({
   clientJobId: z.string().min(1).max(CLIENT_JOB_ID_MAX_LENGTH).optional(),
   historyRecordId: z.string().min(1).max(128),
   diarizationEnabled: z.boolean().optional(),
-  enableItn: z.boolean().optional(),
-  model: z.enum([E1_ASR_PROFILE, E2_ASR_PROFILE, E3_ASR_PROFILE]).optional(),
-  specialWordFilter: SpecialWordFilterSchema.optional(),
+  model: z.literal(DEFAULT_DASHSCOPE_ASR_PROFILE).optional(),
   speakerCount: z.coerce.number().int().min(1).max(10).optional(),
 }).strict();
 
@@ -123,9 +109,9 @@ export async function POST(request: Request) {
 
     const dashScope = await readDashScopeUserConfig(user.id);
     const preferredModels = dashScope.customApiKey ? dashScope.customModels : dashScope.platformModels;
-    const asrOptions = buildAsrOptions(parsed.data, preferredModels);
+    const asrOptions = buildAsrOptions(parsed.data, preferredModels, audio.durationSeconds);
     return streamTranscribeOperation(
-      async ({ onPostprocessStart }) => {
+      async ({ onPostprocessStart, signal }) => {
           const submit = (
             source: "custom" | "platform",
             models: EchoLensDashScopeModelIds,
@@ -139,7 +125,7 @@ export async function POST(request: Request) {
               objectKey: audioObjectKey,
               signedUrl: audio.url,
             },
-            buildAsrOptions(parsed.data, models),
+            buildAsrOptions(parsed.data, models, audio.durationSeconds),
             {
               apiKey,
               credentialSource: source,
@@ -152,7 +138,7 @@ export async function POST(request: Request) {
                 model: models.transcriptPostprocess,
                 onStart: onPostprocessStart,
               },
-              signal: request.signal,
+              signal,
               title: work.caption,
             },
           );
@@ -211,7 +197,7 @@ export async function GET(request: Request) {
 
   const dashScope = await readDashScopeUserConfig(user.id);
   return streamTranscribeOperation(
-    ({ onPostprocessStart }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
+    ({ onPostprocessStart, signal }) => refreshDashScopeAsrJobWithOptions(user.id, parsed.data.jobId, {
         apiKeys: {
           custom: dashScope.customApiKey,
           platform: dashScope.platformApiKey,
@@ -223,7 +209,7 @@ export async function GET(request: Request) {
           custom: dashScope.customModels.transcriptPostprocess,
           platform: dashScope.platformModels.transcriptPostprocess,
         },
-        signal: request.signal,
+        signal,
       }),
     {
       userId: user.id,
@@ -260,7 +246,7 @@ export async function DELETE(request: Request) {
 }
 
 function streamTranscribeOperation(
-  run: (input: { onPostprocessStart: () => void }) => Promise<DashScopeAsrJobResult | null>,
+  run: (input: { onPostprocessStart: () => void; signal: AbortSignal }) => Promise<DashScopeAsrJobResult | null>,
   options: {
     fallbackAsrModel?: DashScopeAsrModel;
     userId?: string;
@@ -269,110 +255,81 @@ function streamTranscribeOperation(
   signal?: AbortSignal,
   onAbort?: (result: DashScopeAsrJobResult | null) => Promise<void>,
 ): Response {
-  const encoder = new TextEncoder();
-  let closed = false;
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const close = () => {
-        if (!closed) {
-          closed = true;
-          controller.close();
-        }
-      };
-      const abort = () => close();
-      signal?.addEventListener("abort", abort, { once: true });
-      const send = (event: TranscribeStreamEvent) => {
-        if (closed || signal?.aborted) {
-          return;
-        }
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      };
+  return createJsonSseResponse<TranscribeStreamEvent>(signal, async ({ send, signal: operationSignal }) => {
+    try {
+      let postprocessStarted = false;
+      const result = await run({
+        signal: operationSignal,
+        onPostprocessStart: () => {
+          if (!postprocessStarted) {
+            postprocessStarted = true;
+            send({ type: "postprocess_start", work: options.work });
+          }
+        },
+      });
+      if (operationSignal.aborted) {
+        await onAbort?.(result);
+        return;
+      }
 
-      try {
-        let postprocessStarted = false;
-        const result = await run({
-          onPostprocessStart: () => {
-            if (!postprocessStarted) {
-              postprocessStarted = true;
-              send({ type: "postprocess_start", work: options.work });
-            }
-          },
-        });
-        if (signal?.aborted) {
-          await onAbort?.(result);
-          return;
-        }
-
-        if (!result) {
-          send({ type: "error", error: "转录任务不存在或已过期。", status: "failed", work: options.work });
-          return;
-        }
-        if (result.status === "running") {
-          send({ type: "running", jobId: result.jobId, status: "running", work: options.work });
-          return;
-        }
-        if (!result.result.ok) {
-          send({
-            type: "error",
-            code: result.result.code,
-            error: result.result.detail,
-            status: result.status === "canceled" ? "canceled" : "failed",
-            work: options.work,
-          });
-          return;
-        }
-
-        const resultItem = transcriptionResult(result.result, options.fallbackAsrModel);
-        const historyContext = result.historyContext;
-        const historyRecord = resultItem.content && historyContext && options.userId
-          ? await saveTranscriptHistory({
-              result: resultItem,
-              userId: options.userId,
-              context: historyContext,
-            })
-          : undefined;
-
-        send({
-          type: "done",
-          historyRecord,
-          results: [resultItem],
-          status: "successed",
-          work: options.work ?? historyContext?.work,
-        });
-      } catch (error) {
-        if (signal?.aborted) {
-          return;
-        }
-        if (error instanceof AsrQuotaExceededError) {
-          send({
-            type: "error",
-            error: error.message,
-            status: "failed",
-            work: options.work,
-          });
-          return;
-        }
-
-        logServerError("douyin.transcribe.stream", error);
+      if (!result) {
+        send({ type: "error", error: "转录任务不存在或已过期。", status: "failed", work: options.work });
+        return;
+      }
+      if (result.status === "running") {
+        send({ type: "running", jobId: result.jobId, status: "running", work: options.work });
+        return;
+      }
+      if (!result.result.ok) {
         send({
           type: "error",
-          error: "转录失败，请稍后重试。",
+          code: result.result.code,
+          error: result.result.detail,
+          status: result.status === "canceled" ? "canceled" : "failed",
+          work: options.work,
+        });
+        return;
+      }
+
+      const resultItem = transcriptionResult(result.result, options.fallbackAsrModel);
+      const historyContext = result.historyContext;
+      const historyRecord = resultItem.content && historyContext && options.userId
+        ? await saveTranscriptHistory({
+            result: resultItem,
+            userId: options.userId,
+            context: historyContext,
+          })
+        : undefined;
+
+      send({
+        type: "done",
+        historyRecord,
+        results: [resultItem],
+        status: "successed",
+        work: options.work ?? historyContext?.work,
+      });
+    } catch (error) {
+      if (operationSignal.aborted) {
+        return;
+      }
+      if (error instanceof AsrQuotaExceededError) {
+        send({
+          type: "error",
+          error: error.message,
           status: "failed",
           work: options.work,
         });
-      } finally {
-        signal?.removeEventListener("abort", abort);
-        close();
+        return;
       }
-    },
-  });
 
-  return new Response(stream, {
-    headers: {
-      "cache-control": "no-cache, no-transform",
-      "content-type": "text/event-stream; charset=utf-8",
-      "x-accel-buffering": "no",
-    },
+      logServerError("douyin.transcribe.stream", error);
+      send({
+        type: "error",
+        error: "转录失败，请稍后重试。",
+        status: "failed",
+        work: options.work,
+      });
+    }
   });
 }
 
@@ -413,36 +370,11 @@ async function saveTranscriptHistory(input: {
   });
 }
 
-function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLensDashScopeModelIds) {
-  const profile = input.model ?? DEFAULT_DASHSCOPE_ASR_PROFILE;
-  const model = getDashScopeAsrModelForProfile(profile, models);
-  const supportsSpeakerFeatures = profile === E2_ASR_PROFILE || profile === E3_ASR_PROFILE;
-
-  const options: {
-    diarizationEnabled?: boolean;
-    enableItn?: boolean;
-    model: DashScopeAsrModel;
-    profile: DashScopeAsrModelProfile;
-    specialWordFilter?: z.infer<typeof SpecialWordFilterSchema>;
-    speakerCount?: number;
-  } = { model, profile };
-
-  if (input.enableItn && (profile === E1_ASR_PROFILE || profile === E3_ASR_PROFILE)) {
-    options.enableItn = true;
-  }
-
-  if (input.diarizationEnabled && supportsSpeakerFeatures) {
-    options.diarizationEnabled = true;
-    if (input.speakerCount) {
-      options.speakerCount = input.speakerCount;
-    }
-  }
-
-  if (input.specialWordFilter && profile === E2_ASR_PROFILE) {
-    options.specialWordFilter = input.specialWordFilter;
-  }
-
-  return options;
+function buildAsrOptions(input: z.infer<typeof TranscribeSchema>, models: EchoLensDashScopeModelIds, durationSeconds?: number): DashScopeAsrOptions {
+  return {
+    model: getDashScopeAsrModel(durationSeconds, models),
+    ...(input.diarizationEnabled ? { diarizationEnabled: true, speakerCount: input.speakerCount } : {}),
+  };
 }
 
 function buildWorkCacheKey(work: { id: string; kind: string; source?: "bilibili" | "douyin" }): string {

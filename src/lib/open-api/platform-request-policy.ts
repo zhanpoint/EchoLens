@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { setTimeout as sleepWithSignal } from "node:timers/promises";
+import { awaitWithSignal } from "@/lib/http/abort";
 
 export type OpenApiPlatform = "bilibili" | "douyin";
 
@@ -10,11 +12,14 @@ type PlatformSchedule = {
 type PlatformPolicyOptions = {
   now?: () => number;
   random?: () => number;
-  sleep?: (milliseconds: number) => Promise<void>;
+  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 };
 
 const COOLDOWN_MS = 5 * 60_000;
-const REQUEST_LIMITS: Record<OpenApiPlatform, { intervalMs: number; jitterMs: number }> = {
+const REQUEST_LIMITS: Record<
+  OpenApiPlatform,
+  { intervalMs: number; jitterMs: number }
+> = {
   bilibili: { intervalMs: 1_000, jitterMs: 1_000 },
   douyin: { intervalMs: 500, jitterMs: 500 },
 };
@@ -30,7 +35,7 @@ export class OpenApiPlatformCooldownError extends Error {
 }
 
 export type OpenApiPlatformRequestPolicy = {
-  beforeRequest(platform: OpenApiPlatform): Promise<void>;
+  beforeRequest(platform: OpenApiPlatform, signal?: AbortSignal): Promise<void>;
   observeResponse(platform: OpenApiPlatform, response: Response): void;
   observePayload(platform: OpenApiPlatform, payload: unknown): void;
 };
@@ -65,42 +70,55 @@ export function createOpenApiPlatformRequestPolicy(
     const normalizedUserId = userId.trim();
     if (!normalizedUserId) throw new Error("Open API 请求缺少用户身份。");
 
-    function cooldown(platform: OpenApiPlatform): OpenApiPlatformCooldownError | undefined {
+    function cooldown(
+      platform: OpenApiPlatform,
+    ): OpenApiPlatformCooldownError | undefined {
       const key = cooldownKey(platform, normalizedUserId);
       const until = blockedUntil.get(key) ?? 0;
       if (until <= now()) {
         blockedUntil.delete(key);
         return undefined;
       }
-      return new OpenApiPlatformCooldownError(platform, Math.ceil((until - now()) / 1_000));
+      return new OpenApiPlatformCooldownError(
+        platform,
+        Math.ceil((until - now()) / 1_000),
+      );
     }
 
     function block(platform: OpenApiPlatform): never {
-      blockedUntil.set(cooldownKey(platform, normalizedUserId), now() + COOLDOWN_MS);
+      blockedUntil.set(
+        cooldownKey(platform, normalizedUserId),
+        now() + COOLDOWN_MS,
+      );
       throw cooldown(platform)!;
     }
 
     return {
-      async beforeRequest(platform) {
+      async beforeRequest(platform, signal) {
+        signal?.throwIfAborted();
         const blocked = cooldown(platform);
         if (blocked) throw blocked;
 
         const schedule = scheduleFor(platform);
         const limit = REQUEST_LIMITS[platform];
         const scheduled = schedule.tail.then(async () => {
+          signal?.throwIfAborted();
           const cooldownError = cooldown(platform);
           if (cooldownError) throw cooldownError;
-          const waitMs = Math.max(0, schedule.nextRequestAt - now()) + random() * limit.jitterMs;
-          if (waitMs) await sleep(waitMs);
+          const waitMs =
+            Math.max(0, schedule.nextRequestAt - now()) +
+            random() * limit.jitterMs;
+          if (waitMs) await awaitWithSignal(sleep(waitMs, signal), signal);
+          signal?.throwIfAborted();
           const delayedCooldownError = cooldown(platform);
           if (delayedCooldownError) throw delayedCooldownError;
           schedule.nextRequestAt = now() + limit.intervalMs;
         });
         schedule.tail = scheduled.catch(() => undefined);
-        await scheduled;
+        await awaitWithSignal(scheduled, signal);
       },
       observeResponse(platform, response) {
-        if (response.status === 403) block(platform);
+        if (response.status === 403 || response.status === 429) block(platform);
       },
       observePayload(platform, payload) {
         if (hasRiskSignal(payload)) block(platform);
@@ -111,13 +129,35 @@ export function createOpenApiPlatformRequestPolicy(
   return { forUser };
 }
 
-export const openApiPlatformRequestPolicy = createOpenApiPlatformRequestPolicy();
+export const openApiPlatformRequestPolicy =
+  createOpenApiPlatformRequestPolicy();
 
 function hasRiskSignal(payload: unknown): boolean {
-  const text = typeof payload === "string" ? payload : JSON.stringify(payload) ?? "";
-  return /captcha|verify|安全验证|验证码|访问过于频繁|请求过于频繁|风控|"(?:code|status_code)"\s*:\s*-?(?:412|352|10000)\b/u.test(text);
+  if (typeof payload === "string") {
+    try {
+      return hasRiskSignal(JSON.parse(payload));
+    } catch {
+      return /captcha|安全验证|验证码|访问过于频繁|请求过于频繁/u.test(payload);
+    }
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    return false;
+  const envelope = payload as Record<string, unknown>;
+  // Inspect the API control envelope, never authors, captions or nested business data.
+  // Success payloads legitimately contain custom_verify / enterprise_verify fields.
+  if (envelope.verify_ticket) return true;
+  const code = Number(envelope.status_code ?? envelope.code ?? 0);
+  if (code === 0) return false;
+  if ([412, 352, 10000].includes(Math.abs(code))) return true;
+  const message = envelope.status_msg ?? envelope.message ?? envelope.msg;
+  return (
+    typeof message === "string" &&
+    /captcha|verify|安全验证|验证码|访问过于频繁|请求过于频繁|风控/u.test(
+      message,
+    )
+  );
 }
 
-async function delay(milliseconds: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  await sleepWithSignal(milliseconds, undefined, { signal });
 }

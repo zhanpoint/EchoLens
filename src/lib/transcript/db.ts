@@ -1,4 +1,5 @@
 import type { TranscribeHistoryContext } from "@/lib/douyin/transcribe-request";
+import type { ProviderResult } from "@/lib/ai/provider-result";
 import { TranscribeHistoryContextSchema } from "@/lib/douyin/transcribe-schema";
 import { execute, queryRow, queryRows, withTransaction, type DbExecutor } from "@/lib/storage/postgres";
 
@@ -9,6 +10,7 @@ type StoredAsrTaskRow = {
   error_detail: string | null;
   history_record_id: string | null;
   history_work: unknown;
+  result: Extract<ProviderResult, { ok: true }> | null;
   id: string;
   model: string;
   object_key: string;
@@ -71,6 +73,7 @@ export type StoredAsrTask = {
   credentialSource: AsrCredentialSource;
   errorDetail?: string;
   historyContext?: StoredAsrHistoryContext;
+  result?: Extract<ProviderResult, { ok: true }>;
   id: string;
   model: string;
   objectKey: string;
@@ -126,18 +129,20 @@ export type TranscriptCustomPrompt = {
   userId: string;
 };
 
-const HISTORY_RECORD_COLUMNS = `
+const HISTORY_METADATA_COLUMNS = `
   id, user_id, work_key, work_id, work_kind, input_url, final_url,
   author_name, author_url, avatar_url, caption, cover_url, session_name,
   duration_seconds, dubbing_url, video_url, dash_video_url, media_quality,
   original_audio, source_metadata_refreshed_at, source_urls_expires_at,
-  transcript_content, transcript_segments, created_at, updated_at, pinned_at
+  created_at, updated_at, pinned_at
 `;
+const HISTORY_RECORD_COLUMNS = `${HISTORY_METADATA_COLUMNS}, transcript_content, transcript_segments`;
+const HISTORY_LIST_COLUMNS = `${HISTORY_METADATA_COLUMNS}, ''::text AS transcript_content, NULL::jsonb AS transcript_segments`;
 
 const ASR_TASK_COLUMNS = `
   id, user_id, work_key, cache_key, task_id, object_key, model, credential_source,
   audio_duration_seconds, history_record_id, history_work,
-  status, error_detail, updated_at
+  status, error_detail, result, updated_at
 `;
 
 export async function insertAsrTask(input: {
@@ -276,13 +281,20 @@ export async function markAsrTaskRunning(id: string): Promise<void> {
   );
 }
 
-export async function markAsrTaskSucceeded(id: string): Promise<boolean> {
+export async function checkpointAsrTaskResult(id: string, result: Extract<ProviderResult, { ok: true }>): Promise<boolean> {
+  return (await execute(
+    "UPDATE transcript_asr_tasks SET result = $2::jsonb, updated_at = $3 WHERE id = $1 AND status = 'running'",
+    [id, JSON.stringify(result), Date.now()],
+  )) > 0;
+}
+
+export async function markAsrTaskSucceeded(id: string, result?: Extract<ProviderResult, { ok: true }>): Promise<boolean> {
   const now = Date.now();
   const rowCount = await execute(
     `UPDATE transcript_asr_tasks
-     SET status = 'succeeded', updated_at = $1
+     SET status = 'succeeded', updated_at = $1, result = $3::jsonb
      WHERE id = $2 AND status = 'running'`,
-    [now, id],
+    [now, id, result ? JSON.stringify(result) : null],
   );
   return rowCount > 0;
 }
@@ -563,7 +575,7 @@ export async function listTranscriptHistoryRecords(input: {
   const query = input.query?.trim();
   const rows = query
     ? await queryRows<TranscriptHistoryRecordRow>(
-        `SELECT ${HISTORY_RECORD_COLUMNS}
+        `SELECT ${HISTORY_LIST_COLUMNS}
          FROM transcript_history_records
          WHERE user_id = $1 AND session_name ILIKE $2
          ORDER BY pinned_at IS NULL, updated_at DESC
@@ -571,7 +583,7 @@ export async function listTranscriptHistoryRecords(input: {
         [input.userId, `%${query}%`, limit],
       )
     : await queryRows<TranscriptHistoryRecordRow>(
-        `SELECT ${HISTORY_RECORD_COLUMNS}
+        `SELECT ${HISTORY_LIST_COLUMNS}
          FROM transcript_history_records
          WHERE user_id = $1
          ORDER BY pinned_at IS NULL, updated_at DESC
@@ -698,22 +710,6 @@ export async function listTranscriptHistorySummaries(input: {
   return rows.map(mapTranscriptHistorySummary);
 }
 
-export async function readTranscriptHistorySummary(input: {
-  historyRecordId: string;
-  id: string;
-  userId: string;
-}): Promise<TranscriptHistorySummary | null> {
-  const row = await queryRow<TranscriptHistorySummaryRow>(
-    `SELECT summary.id, summary.prompt_id, summary.prompt_title, summary.content, summary.created_at
-     FROM transcript_history_summaries summary
-     JOIN transcript_history_records history ON history.id = summary.history_record_id
-     WHERE history.user_id = $1 AND summary.history_record_id = $2 AND summary.id = $3
-     LIMIT 1`,
-    [input.userId, input.historyRecordId, input.id],
-  );
-  return row ? mapTranscriptHistorySummary(row) : null;
-}
-
 export async function deleteTranscriptHistorySummary(input: {
   historyRecordId: string;
   id: string;
@@ -809,20 +805,6 @@ export async function deleteTranscriptCustomPrompt(input: {
   return rowCount > 0;
 }
 
-export async function readTranscriptCustomPrompt(input: {
-  id: string;
-  userId: string;
-}): Promise<TranscriptCustomPrompt | null> {
-  const row = await queryRow<TranscriptCustomPromptRow>(
-    `SELECT id, user_id, title, description, prompt, created_at, updated_at
-     FROM transcript_custom_prompts
-     WHERE user_id = $1 AND id = $2
-     LIMIT 1`,
-    [input.userId, input.id],
-  );
-  return row ? mapTranscriptCustomPrompt(row) : null;
-}
-
 function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
   return {
     audioDurationSeconds: row.audio_duration_seconds ?? 0,
@@ -830,6 +812,7 @@ function mapAsrTask(row: StoredAsrTaskRow): StoredAsrTask {
     credentialSource: row.credential_source,
     errorDetail: row.error_detail ?? undefined,
     historyContext: mapAsrHistoryContext(row),
+    result: row.result ?? undefined,
     id: row.id,
     model: row.model,
     objectKey: row.object_key,

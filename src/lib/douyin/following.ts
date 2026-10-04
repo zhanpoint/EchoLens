@@ -1,5 +1,5 @@
 import { cleanText, readDouyinAvatarUrl } from "./media";
-import { createDouyinWebClient, DOUYIN_BASE_URL, DouyinApiError } from "./web-client";
+import { createDouyinWebClient, DOUYIN_BASE_URL, DouyinApiError, type DouyinClientOptions } from "./web-client";
 
 export type DouyinFollowingUser = {
   avatarUrl: string;
@@ -15,8 +15,8 @@ export type DouyinFollowingUser = {
 
 const MAX_FOLLOWING_USERS = 5_000;
 
-export async function collectDouyinFollowingUsers(cookie: string): Promise<DouyinFollowingUser[]> {
-  const client = createDouyinWebClient(cookie);
+export async function collectDouyinFollowingUsers(cookie: string, options: DouyinClientOptions = {}): Promise<DouyinFollowingUser[]> {
+  const client = createDouyinWebClient(cookie, options);
   const self = await client.getSelfProfile();
   const secUid = readString(self.sec_uid ?? self.secUid);
   if (!secUid) {

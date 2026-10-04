@@ -4,9 +4,10 @@ import {
   DOUYIN_BASE_URL,
   DouyinApiError,
   type DouyinWebClient,
+  type DouyinClientOptions,
 } from "./web-client";
 
-export { DouyinApiError, normalizeCookie } from "./web-client";
+export { DouyinApiError } from "./web-client";
 
 export type DouyinFavoriteVideo = {
   author: string;
@@ -82,8 +83,9 @@ const PAGE_SIZE = 20;
 
 export async function collectDouyinFavorites(
   settings: DouyinFavoriteSettings,
+  options: DouyinClientOptions = {},
 ): Promise<DouyinFavoritesSnapshot> {
-  const client = createDouyinWebClient(settings.cookie);
+  const client = createDouyinWebClient(settings.cookie, options);
   const self = await client.getSelfProfile();
   const secUid = readString(self.sec_uid ?? self.secUid);
   if (!secUid) {
@@ -292,7 +294,6 @@ async function requestFavoriteVideos(
     {
       body: { count: PAGE_SIZE, cursor: maxCursor },
       method: "POST",
-      referer: "https://www.douyin.com/user/self?showTab=favorite_collection",
     },
   );
   return normalizePagedResponse(payload, ["aweme_list"]);

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createJsonSseResponse } from "@/lib/http/sse-response";
 import { z } from "zod";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import {
@@ -76,64 +77,50 @@ function streamTranslations(
   apiKey?: string,
   signal?: AbortSignal,
 ): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: TranslateEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-
-      try {
-        for (const item of items) {
-          send({ type: "segment_start", key: item.key });
-        }
-
-        if (items.length === 1) {
-          const item = items[0];
-          const result = await streamQwenMtText({
-            apiKey,
-            model,
-            text: item.text,
-            options,
-            onDelta: (delta) => send({ type: "delta", key: item.key, value: delta }),
-            onReset: () => send({ type: "replace", key: item.key, value: "" }),
-            signal,
-          });
-
-          if (result.ok) {
-            send({ type: "segment_done", key: item.key, value: result.content });
-          } else {
-            send({ type: "segment_error", key: item.key, error: result.detail, code: result.code });
-          }
-        } else {
-          const results = await translateQwenMtTextItems({ apiKey, items, model, options, signal });
-          for (const result of results) {
-            if (result.ok) {
-              send({ type: "segment_done", key: result.key, value: result.content });
-            } else {
-              send({ type: "segment_error", key: result.key, error: result.detail, code: result.code });
-            }
-          }
-        }
-
-        send({ type: "done" });
-      } catch (error) {
-        logServerError("douyin.translate", error);
-        const networkFailure = error instanceof NetworkRetryExhaustedError;
-        send({
-          type: "error",
-          error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "翻译失败，请稍后重试。",
-          ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
-        });
-      } finally {
-        controller.close();
+  return createJsonSseResponse<TranslateEvent>(signal, async ({ send, signal: operationSignal }) => {
+    try {
+      for (const item of items) {
+        send({ type: "segment_start", key: item.key });
       }
-    },
-  });
 
-  return new Response(stream, {
-    headers: {
-      "cache-control": "no-cache, no-transform",
-      "content-type": "text/event-stream; charset=utf-8",
-      "x-accel-buffering": "no",
-    },
+      if (items.length === 1) {
+        const item = items[0];
+        const result = await streamQwenMtText({
+          apiKey,
+          model,
+          text: item.text,
+          options,
+          onDelta: (delta) => send({ type: "delta", key: item.key, value: delta }),
+          onReset: () => send({ type: "replace", key: item.key, value: "" }),
+          signal: operationSignal,
+        });
+
+        if (result.ok) {
+          send({ type: "segment_done", key: item.key, value: result.content });
+        } else {
+          send({ type: "segment_error", key: item.key, error: result.detail, code: result.code });
+        }
+      } else {
+        const results = await translateQwenMtTextItems({ apiKey, items, model, options, signal: operationSignal });
+        for (const result of results) {
+          if (result.ok) {
+            send({ type: "segment_done", key: result.key, value: result.content });
+          } else {
+            send({ type: "segment_error", key: result.key, error: result.detail, code: result.code });
+          }
+        }
+      }
+
+      send({ type: "done" });
+    } catch (error) {
+      if (operationSignal.aborted) return;
+      logServerError("douyin.translate", error);
+      const networkFailure = error instanceof NetworkRetryExhaustedError;
+      send({
+        type: "error",
+        error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "翻译失败，请稍后重试。",
+        ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
+      });
+    }
   });
 }

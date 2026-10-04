@@ -112,6 +112,7 @@ describe("douyin prepare route", () => {
 
     expect(mocks.acquireWorkMetadata).toHaveBeenCalledWith(
       expect.objectContaining(work), "720p", undefined, "sessionid=valid",
+      expect.any(AbortSignal),
     );
   });
 

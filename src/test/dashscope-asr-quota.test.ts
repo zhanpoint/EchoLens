@@ -58,7 +58,7 @@ describe("DashScope ASR lifetime platform quota", () => {
         objectKey: "echolens/media/video/1/audio.m4a",
         signedUrl: "https://oss.example.com/test.m4a",
       },
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
     )).rejects.toBeInstanceOf(AsrQuotaExceededError);
 
     expect(globalThis.fetch).not.toHaveBeenCalled();
@@ -70,7 +70,7 @@ describe("DashScope ASR lifetime platform quota", () => {
       cacheKey: "cache-1",
       credentialSource: "platform",
       id: "job-running",
-      model: "fun-asr",
+      model: "qwen-audio-3.1-asr-flash-filetrans",
       objectKey: "echolens/media/video/1/audio.m4a",
       status: "running",
       taskId: "dashscope-task-1",
@@ -87,14 +87,14 @@ describe("DashScope ASR lifetime platform quota", () => {
         objectKey: "echolens/media/video/1/audio.m4a",
         signedUrl: "https://oss.example.com/test.m4a",
       },
-      { diarizationEnabled: true, model: "fun-asr", profile: "e2", speakerCount: 2 },
+      { diarizationEnabled: true, model: "qwen-audio-3.1-asr-flash-filetrans", speakerCount: 2 },
     )).resolves.toEqual({
       jobId: "job-running",
       status: "running",
     });
 
     expect(readRunningAsrTaskMock).toHaveBeenCalledWith({
-      cacheKey: expect.stringMatching(/^platform:fun-asr:asr-v6:/),
+      cacheKey: expect.stringMatching(/^platform:qwen-audio-3.1-asr-flash-filetrans:asr-v6:/),
       userId: "user-1",
     });
     expect(reserveAsrTaskMock).not.toHaveBeenCalled();
@@ -110,19 +110,19 @@ describe("DashScope ASR lifetime platform quota", () => {
         objectKey: "echolens/media/video/1/audio.m4a",
         signedUrl: "https://oss.example.com/test.m4a",
       },
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
     )).resolves.toMatchObject({
       jobId: expect.any(String),
       status: "running",
     });
 
     expect(readRunningAsrTaskMock).toHaveBeenCalledWith({
-      cacheKey: expect.stringMatching(/^platform:qwen3-asr-flash-filetrans:asr-v6:/),
+      cacheKey: expect.stringMatching(/^platform:qwen-audio-3.1-asr-flash-filetrans:asr-v6:/),
       userId: "user-1",
     });
     expect(reserveAsrTaskMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        cacheKey: expect.stringMatching(/^platform:qwen3-asr-flash-filetrans:asr-v6:/),
+        cacheKey: expect.stringMatching(/^platform:qwen-audio-3.1-asr-flash-filetrans:asr-v6:/),
         credentialSource: "platform",
         objectKey: "echolens/media/video/1/audio.m4a",
         userId: "user-1",
@@ -140,7 +140,7 @@ describe("DashScope ASR lifetime platform quota", () => {
         ...asrAudio(),
         durationSeconds: 5 * 60 * 60,
       },
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
       { apiKey: "custom-key", credentialSource: "custom" },
     );
 
@@ -164,7 +164,7 @@ describe("DashScope ASR lifetime platform quota", () => {
       "user-1",
       "video:1",
       asrAudio(),
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
     );
     await vi.runAllTimersAsync();
 
@@ -180,7 +180,7 @@ describe("DashScope ASR lifetime platform quota", () => {
       "user-1",
       "video:1",
       asrAudio(),
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
     )).resolves.toMatchObject({
       status: "failed",
       result: {
@@ -201,7 +201,7 @@ describe("DashScope ASR lifetime platform quota", () => {
       cacheKey: "cache-1",
       credentialSource: "platform",
       id: "client-job-1",
-      model: "qwen3-asr-flash-filetrans",
+      model: "qwen-audio-3.1-asr-flash-filetrans",
       objectKey: "echolens/media/video/1/audio.m4a",
       status: "running",
       taskId: "provider-task-1",
@@ -214,7 +214,7 @@ describe("DashScope ASR lifetime platform quota", () => {
       "user-1",
       "video:1",
       asrAudio(),
-      { model: "qwen3-asr-flash-filetrans", profile: "e1" },
+      { model: "qwen-audio-3.1-asr-flash-filetrans" },
       { clientJobId: "client-job-1" },
     )).resolves.toEqual({ jobId: "client-job-1", status: "running" });
 

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { awaitWithSignal } from "@/lib/http/abort";
 import {
   collectWorkMetadata,
   type CompleteDouyinWorkMetadata,
@@ -12,6 +14,7 @@ import type { DouyinWorkIdentity } from "@/types/douyin";
 
 type MetadataWork = Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">;
 type MetadataEntry = {
+  controller: AbortController;
   cleanupTimer?: ReturnType<typeof setTimeout>;
   lastAccessedAt: number;
   metadata?: CompleteDouyinWorkMetadata;
@@ -24,7 +27,8 @@ export type WorkMetadataLease = {
   release: () => void;
 };
 
-const entries = new Map<string, MetadataEntry>();
+const internalEntries = new Map<string, MetadataEntry>();
+const policyEntries = new WeakMap<OpenApiPlatformRequestPolicy, Map<string, MetadataEntry>>();
 const METADATA_HANDOFF_TTL_MS = 30_000;
 const MAX_METADATA_ENTRIES = 128;
 
@@ -33,20 +37,26 @@ export async function acquireWorkMetadata(
   videoQuality: DownloadVideoQuality = DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   requestPolicy?: OpenApiPlatformRequestPolicy,
   credentialCookie = "",
+  signal?: AbortSignal,
 ): Promise<WorkMetadataLease> {
-  const authKey = credentialCookie ? "authenticated" : "anonymous";
-  const key = `${work.kind}:${work.id}:${videoQuality}:${requestPolicy ? "open-api" : "internal"}:${authKey}`;
+  signal?.throwIfAborted();
+  const entries = requestPolicy ? entriesForPolicy(requestPolicy) : internalEntries;
+  const authKey = createHash("sha256").update(credentialCookie.trim()).digest("hex");
+  const key = `${work.kind}:${work.id}:${videoQuality}:${authKey}`;
   let entry = entries.get(key);
   if (!entry) {
+    const controller = new AbortController();
     entry = {
+      controller,
       lastAccessedAt: Date.now(),
       references: 0,
-      result: collectWorkMetadata(work, { credentialCookie, requestPolicy, videoQuality }),
+      result: collectWorkMetadata(work, { credentialCookie, requestPolicy, videoQuality, signal: controller.signal }),
     };
     entries.set(key, entry);
-    trimMetadataEntries(key);
-    void entry.result.catch(() => {
-      if (entries.get(key) === entry) entries.delete(key);
+    trimMetadataEntries(entries, key);
+    const created = entry;
+    void entry.result.then((metadata) => { created.metadata = metadata; }, () => {
+      if (entries.get(key) === created) entries.delete(key);
     });
   }
   if (entry.cleanupTimer) {
@@ -57,24 +67,32 @@ export async function acquireWorkMetadata(
   entry.references += 1;
 
   try {
-    const metadata = await entry.result;
-    entry.metadata = metadata;
+    const metadata = await awaitWithSignal(entry.result, signal);
     let released = false;
     return {
       metadata,
       release() {
         if (released) return;
         released = true;
-        releaseEntry(key, entry);
+        releaseEntry(entries, key, entry);
       },
     };
   } catch (error) {
-    releaseEntry(key, entry);
+    releaseEntry(entries, key, entry);
     throw error;
   }
 }
 
-function trimMetadataEntries(protectedKey: string): void {
+function entriesForPolicy(policy: OpenApiPlatformRequestPolicy): Map<string, MetadataEntry> {
+  let entries = policyEntries.get(policy);
+  if (!entries) {
+    entries = new Map();
+    policyEntries.set(policy, entries);
+  }
+  return entries;
+}
+
+function trimMetadataEntries(entries: Map<string, MetadataEntry>, protectedKey: string): void {
   if (entries.size <= MAX_METADATA_ENTRIES) return;
   const removable = [...entries.entries()]
     .filter(([key, entry]) => key !== protectedKey && entry.references === 0)
@@ -87,9 +105,14 @@ function trimMetadataEntries(protectedKey: string): void {
   }
 }
 
-function releaseEntry(key: string, entry: MetadataEntry): void {
+function releaseEntry(entries: Map<string, MetadataEntry>, key: string, entry: MetadataEntry): void {
   entry.references = Math.max(0, entry.references - 1);
   if (entries.get(key) !== entry || entry.references > 0 || entry.cleanupTimer) return;
+  if (!entry.metadata) {
+    entries.delete(key);
+    entry.controller.abort();
+    return;
+  }
   entry.cleanupTimer = setTimeout(() => {
     if (entry.references > 0 || entries.get(key) !== entry) return;
     entries.delete(key);

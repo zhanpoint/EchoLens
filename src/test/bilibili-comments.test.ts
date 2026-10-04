@@ -14,23 +14,10 @@ describe("bilibili comments collector", () => {
     mocks.request.mockReset();
   });
 
-  it("collects all top-level pages and only the first reply page", async () => {
+  it("collects only top-level pages and deduplicates IDs", async () => {
     const progress = vi.fn();
     mocks.request.mockImplementation(async (endpoint: string, params: Record<string, string | number>) => {
-      if (endpoint.endsWith("/reply/reply")) {
-        expect(params).toMatchObject({ oid: "42", pn: "1", ps: "20", root: "100", type: "1" });
-        return {
-          data: {
-            replies: [{
-              content: { message: "子评论" },
-              ctime: 10,
-              like: 2,
-              member: { mid: "3", uname: "回复者" },
-              rpid_str: "101",
-            }],
-          },
-        };
-      }
+      expect(endpoint).toBe("https://api.bilibili.com/x/v2/reply/wbi/main");
       const { offset } = JSON.parse(String(params.pagination_str)) as { offset: string };
       if (!offset) {
         return {
@@ -64,16 +51,39 @@ describe("bilibili comments collector", () => {
     const result = await collectBilibiliComments({ aid: 42, cookie: "SESSDATA=test", onProgress: progress });
 
     expect(result.comments.map(({ id }) => id)).toEqual(["100", "same", "200"]);
-    expect(result.comments[0]).toMatchObject({
+    expect(result.comments[0]).toEqual({
       author: { id: "1", name: "作者" },
+      id: "100",
       likeCount: 4,
       publishedAt: 9_000,
-      replies: [{ id: "101", text: "子评论" }],
-      replyCount: 2,
-      replyPageHasMore: true,
       text: "顶层评论",
     });
+    expect(mocks.request).toHaveBeenCalledTimes(2);
     expect(progress).toHaveBeenLastCalledWith({ commentCount: 3, page: 2 });
+  });
+
+  it("stops when the pagination offset cannot advance", async () => {
+    mocks.request.mockResolvedValue({
+      data: {
+        cursor: { is_end: false, pagination_reply: { next_offset: "next" } },
+        replies: [{ rpid_str: "100", content: { message: "评论" } }],
+      },
+    });
+    await expect(collectBilibiliComments({ aid: 42, cookie: "SESSDATA=test" }))
+      .resolves.toMatchObject({ commentCount: 1 });
+    expect(mocks.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an incomplete snapshot when a later comment page fails", async () => {
+    mocks.request.mockResolvedValueOnce({
+      data: {
+        cursor: { is_end: false, pagination_reply: { next_offset: "next" } },
+        replies: [{ rpid_str: "100", content: { message: "评论" } }],
+      },
+    }).mockRejectedValueOnce(new Error("page unavailable"));
+    await expect(collectBilibiliComments({ aid: 42, cookie: "SESSDATA=test" }))
+      .rejects.toThrow("page unavailable");
+    expect(mocks.request).toHaveBeenCalledTimes(2);
   });
 
   it("requires a valid aid and cookie before requesting upstream", async () => {

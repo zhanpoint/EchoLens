@@ -92,9 +92,6 @@ function payload(text: string, collectedAt: number): DouyinCommentsPayload {
       id: "comment",
       likeCount: 3,
       publishedAt: 1,
-      replies: [],
-      replyCount: 0,
-      replyPageHasMore: false,
       text,
     }],
   };

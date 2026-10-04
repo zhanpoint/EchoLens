@@ -151,6 +151,14 @@ describe("transcript comment route", () => {
     expect(mocks.markCredentialInvalid).toHaveBeenCalledWith("user-1");
     expect(mocks.upsert).not.toHaveBeenCalled();
   });
+  it("reports a temporary SDK failure without invalidating the credential", async () => {
+    mocks.collect.mockRejectedValueOnce(new DouyinApiError("请检查网络后继续。", "BROWSER_SESSION_UNAVAILABLE"));
+    const response = await POST(new Request("https://echolens.test/api/transcript-history/history-1/comments", { method: "POST" }), { params: Promise.resolve({ id: "history-1" }) });
+    const body = await response.text();
+    expect(body).toContain('"code":"BROWSER_SESSION_UNAVAILABLE"');
+    expect(body).toContain("请检查网络后继续。");
+    expect(mocks.markCredentialInvalid).not.toHaveBeenCalled();
+  });
 
   it("does not expose another user's history", async () => {
     mocks.readHistory.mockResolvedValueOnce(null);

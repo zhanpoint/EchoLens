@@ -8,17 +8,3 @@ export type TranscribeHistoryContext = {
   historyRecordId: string;
   work: TranscribeWorkPayload;
 };
-
-export function buildTranscribeWorkPayload(work: ResolvedDouyinWork): TranscribeWorkPayload {
-  return {
-    authorName: work.authorName,
-    authorUrl: work.authorUrl,
-    caption: work.caption,
-    durationSeconds: work.durationSeconds,
-    finalUrl: work.finalUrl,
-    id: work.id,
-    inputUrl: work.inputUrl,
-    kind: work.kind,
-    source: work.source,
-  };
-}

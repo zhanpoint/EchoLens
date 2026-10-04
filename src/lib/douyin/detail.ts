@@ -1,5 +1,5 @@
 import { cleanText, uniqueMediaReferences } from "./media";
-import { createDouyinWebClient, DouyinApiError } from "./web-client";
+import { createDouyinWebClient, DouyinApiError, isDouyinCredentialError, type DouyinClientOptions } from "./web-client";
 import {
   DEFAULT_DOWNLOAD_VIDEO_QUALITY,
   type DownloadVideoQuality,
@@ -82,19 +82,16 @@ export async function collectWorkMetadata(
   } = {},
 ): Promise<CompleteDouyinWorkMetadata> {
   const videoQuality = options.videoQuality ?? DEFAULT_DOWNLOAD_VIDEO_QUALITY;
-  let apiFailure: unknown;
   const apiPayload = options.credentialCookie
-    ? await collectWebApiPayload(work, options.credentialCookie).catch((error: unknown) => {
-        if (error instanceof DouyinApiError &&
-            (error.code === "INVALID_COOKIE" || error.code === "LOGIN_REQUIRED")) {
+    ? await collectWebApiPayload(work, options.credentialCookie, options).catch((error: unknown) => {
+        if (isDouyinCredentialError(error)) {
           throw new DouyinMetadataError(
             "抖音账号访问凭证已失效，请前往设置更新 Cookie 后重试。",
             "credential_invalid",
             error,
           );
         }
-        apiFailure = error;
-        return null;
+        throw error;
       })
     : null;
   const apiMetadata = parseWorkMetadata(apiPayload, work.id, work.kind, videoQuality);
@@ -111,36 +108,33 @@ export async function collectWorkMetadata(
       ? `抖音作品核心信息不完整，缺少：${missingFields.join("、")}。`
       : "抖音公开分享页未返回完整作品信息，请先在设置中配置有效的抖音 Cookie 后重试。",
     options.credentialCookie ? "incomplete_metadata" : "credential_required",
-    apiFailure,
   );
 }
 
 async function collectWebApiPayload(
   work: Pick<DouyinWorkIdentity, "finalUrl" | "id" | "kind">,
   credentialCookie: string,
+  options: DouyinClientOptions,
 ): Promise<unknown> {
-  const client = createDouyinWebClient(credentialCookie);
+  const client = createDouyinWebClient(credentialCookie, options);
   let loginError: DouyinApiError | undefined;
-  let requestError: unknown;
   for (const aid of DETAIL_AID_CANDIDATES) {
     try {
       const payload = await client.request(
         "/aweme/v1/web/aweme/detail/",
         { ...client.query(), aid, aweme_id: work.id },
         3,
-        { referer: work.finalUrl },
       );
       if (payload.aweme_detail) return payload;
     } catch (error) {
       if (error instanceof DouyinApiError && error.code === "LOGIN_REQUIRED") {
         loginError = error;
       } else {
-        requestError = error;
+        throw error;
       }
     }
   }
   if (loginError) await client.verifyAuthenticatedSession(1);
-  if (requestError) throw requestError;
   return null;
 }
 
@@ -151,7 +145,7 @@ async function collectSharePagePayload(
     signal?: AbortSignal;
   },
 ): Promise<unknown> {
-  await options.requestPolicy?.beforeRequest("douyin");
+  await options.requestPolicy?.beforeRequest("douyin", options.signal);
   const response = await fetchWithRetry(buildSharePageUrl(work), {
     cache: "no-store",
     headers: buildSharePageHeaders(),
@@ -175,8 +169,9 @@ async function collectSharePagePayload(
   }
 
   const text = await response.text();
-  options.requestPolicy?.observePayload("douyin", text);
-  return parseSharePagePayload(text, work);
+  const payload = parseSharePagePayload(text, work);
+  if (payload) options.requestPolicy?.observePayload("douyin", payload);
+  return payload;
 }
 
 function hasCompleteMetadata(metadata: DouyinWorkMetadata): metadata is CompleteDouyinWorkMetadata {

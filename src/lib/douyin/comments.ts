@@ -1,21 +1,12 @@
 import type { DouyinWebClient } from "./web-client";
 import type {
-  Comment as DouyinComment,
-  CommentAuthor as DouyinCommentAuthor,
+  Comment,
+  CommentAuthor,
   CommentCollectionProgress,
-  CommentReply as DouyinCommentReply,
   CommentsPayload,
 } from "@/lib/comment-model";
 
 const PAGE_SIZE = 20;
-const REPLY_CONCURRENCY = 4;
-
-export type {
-  DouyinComment,
-  DouyinCommentAuthor,
-  DouyinCommentReply,
-  CommentCollectionProgress,
-};
 
 export type DouyinCommentsPayload = CommentsPayload & {
   awemeId: string;
@@ -36,35 +27,25 @@ export async function collectDouyinComments({
   client: DouyinWebClient;
   onProgress?: (progress: CommentCollectionProgress) => void;
 }): Promise<DouyinCommentsPayload> {
-  const comments: DouyinComment[] = [];
+  const comments: Comment[] = [];
   const seenIds = new Set<string>();
   let cursor = 0;
   let pageNumber = 0;
   let page = await requestCommentPage(client, awemeId, cursor);
 
   while (page.items.length > 0) {
-    const uniqueItems = page.items.filter((item) => {
-      const id = readIdentifier(item.cid, item.comment_id);
-      if (!id || seenIds.has(id)) return false;
-      seenIds.add(id);
-      return true;
-    });
-    const canAdvance = page.hasMore && page.nextCursor !== cursor;
-    const nextPage = canAdvance
-      ? requestCommentPage(client, awemeId, page.nextCursor)
-      : null;
-    const normalized = await mapConcurrent(
-      uniqueItems,
-      REPLY_CONCURRENCY,
-      (item) => normalizeCommentWithReplies(client, awemeId, item),
-    );
-    comments.push(...normalized);
+    for (const item of page.items) {
+      const comment = normalizeComment(item);
+      if (!comment.id || seenIds.has(comment.id)) continue;
+      seenIds.add(comment.id);
+      comments.push(comment);
+    }
     pageNumber += 1;
     onProgress?.({ commentCount: comments.length, page: pageNumber });
 
-    if (!nextPage) break;
+    if (!page.hasMore || page.nextCursor === cursor) break;
     cursor = page.nextCursor;
-    page = await nextPage;
+    page = await requestCommentPage(client, awemeId, cursor);
   }
 
   return {
@@ -94,43 +75,7 @@ async function requestCommentPage(
   return normalizePage(payload);
 }
 
-async function normalizeCommentWithReplies(
-  client: DouyinWebClient,
-  awemeId: string,
-  item: Record<string, unknown>,
-): Promise<DouyinComment> {
-  const comment = normalizeComment(item);
-  if (comment.replyCount <= 0) return comment;
-
-  const payload = await client.request("/aweme/v1/web/comment/list/reply/", {
-    ...client.query(),
-    comment_id: comment.id,
-    count: PAGE_SIZE,
-    cursor: 0,
-    item_id: awemeId,
-  });
-  const page = normalizePage(payload);
-  return {
-    ...comment,
-    replies: page.items.map(normalizeReply).filter((reply) => reply.id),
-    replyPageHasMore: page.hasMore,
-  };
-}
-
-function normalizeComment(item: Record<string, unknown>): DouyinComment {
-  return {
-    author: normalizeAuthor(readRecord(item.user)),
-    id: readIdentifier(item.cid, item.comment_id),
-    likeCount: readInteger(item.digg_count, item.like_count),
-    publishedAt: readTimestamp(item.create_time, item.ctime),
-    replies: [],
-    replyCount: readInteger(item.reply_comment_total, item.reply_count),
-    replyPageHasMore: false,
-    text: readString(item.text, item.content),
-  };
-}
-
-function normalizeReply(item: Record<string, unknown>): DouyinCommentReply {
+function normalizeComment(item: Record<string, unknown>): Comment {
   return {
     author: normalizeAuthor(readRecord(item.user)),
     id: readIdentifier(item.cid, item.comment_id),
@@ -140,7 +85,7 @@ function normalizeReply(item: Record<string, unknown>): DouyinCommentReply {
   };
 }
 
-function normalizeAuthor(user: Record<string, unknown>): DouyinCommentAuthor {
+function normalizeAuthor(user: Record<string, unknown>): CommentAuthor {
   return {
     id: readIdentifier(user.sec_uid, user.secUid, user.uid, user.id),
     name: readString(user.nickname, user.name) || "抖音用户",
@@ -157,25 +102,6 @@ function normalizePage(payload: Record<string, unknown>): PagedComments {
     items,
     nextCursor: readInteger(root.cursor, root.max_cursor),
   };
-}
-
-async function mapConcurrent<T, R>(
-  items: T[],
-  concurrency: number,
-  mapper: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  await Promise.all(Array.from(
-    { length: Math.min(concurrency, items.length) },
-    async () => {
-      while (nextIndex < items.length) {
-        const index = nextIndex++;
-        results[index] = await mapper(items[index]);
-      }
-    },
-  ));
-  return results;
 }
 
 function readRecord(value: unknown, fallback: unknown = {}): Record<string, unknown> {

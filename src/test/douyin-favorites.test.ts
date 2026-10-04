@@ -1,20 +1,33 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "./douyin-transport-test-utils";
 import {
   collectDouyinFavorites,
   DouyinApiError,
-  normalizeCookie,
 } from "@/lib/douyin/favorites";
 import { validateDouyinCredential } from "@/lib/douyin/account";
-
-vi.mock("@/lib/douyin/ms-token", () => ({
-  resolveMsToken: vi.fn(async () => "mock-ms-token"),
-}));
+import { normalizeCookie } from "@/lib/douyin/web-client";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("douyin favorites", () => {
+  it("fails a collection when a later page reports a business error", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/aweme/v1/web/user/profile/self/") {
+        return new Response(JSON.stringify({ status_code: 0, user: { sec_uid: "self" } }));
+      }
+      const cursor = new URLSearchParams(String(init?.body)).get("cursor");
+      return new Response(JSON.stringify(cursor === "0"
+        ? { status_code: 0, aweme_list: [{ aweme_id: "123" }], has_more: 1, cursor: 20 }
+        : { status_code: 2154, aweme_list: [], has_more: 0 }));
+    });
+    await expect(collectDouyinFavorites({ cookie: "sessionid=session; msToken=token" }))
+      .rejects.toMatchObject({ code: "UPSTREAM_ERROR", details: { upstreamCode: 2154 } });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("normalizes cookie spacing", () => {
     expect(normalizeCookie(" sessionid=abc ; ; msToken=token ")).toBe("sessionid=abc; msToken=token");
   });
@@ -24,7 +37,6 @@ describe("douyin favorites", () => {
       const url = new URL(String(input));
       const headers = init?.headers as Record<string, string>;
       expect(headers.cookie).toBe("sessionid=abc; msToken=token");
-      expect(url.searchParams.get("a_bogus") ?? url.searchParams.get("X-Bogus")).toBeTruthy();
 
       if (url.pathname === "/aweme/v1/web/user/profile/self/") {
         return new Response(JSON.stringify({

@@ -9,11 +9,13 @@ export async function* readSseJsonStream<T>(
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let completed = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
+        completed = true;
         break;
       }
 
@@ -23,7 +25,7 @@ export async function* readSseJsonStream<T>(
       for (const event of events) {
         if (isSseDoneEvent(event)) {
           options.onDone?.();
-          continue;
+          return;
         }
         const payload = parseSseJsonPayload<T>(event);
         if (payload) {
@@ -42,6 +44,7 @@ export async function* readSseJsonStream<T>(
       yield payload;
     }
   } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildDashScopeAsrParameters,
   cancelDashScopeAsrJob,
-  getDashScopeAsrModelForProfile,
+  getDashScopeAsrModel,
   parseDashScopeTranscriptPayload,
-  refreshDashScopeAsrJob,
   refreshDashScopeAsrJobWithOptions,
 } from "@/lib/dashscope/asr";
+import { DEFAULT_DASHSCOPE_MODELS, readEnvironmentDashScopeModelIds } from "@/lib/dashscope/model-config";
 import {
   markAsrTaskFailed,
   markAsrTaskCanceled,
@@ -21,7 +21,6 @@ vi.mock("@/lib/dashscope/user-credential", () => ({
 
 vi.mock("@/lib/transcript/db", () => ({
   deleteAsrTask: vi.fn(async () => true),
-  insertAsrTask: vi.fn(),
   markAsrTaskFailed: vi.fn(),
   markAsrTaskCanceled: vi.fn(),
   markAsrTaskRunning: vi.fn(),
@@ -45,6 +44,20 @@ describe("dashscope ASR transcript parsing", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("loads the current model configuration without obsolete E2 or E3 environment variables", () => {
+    vi.stubEnv("DASHSCOPE_ASR_MODEL_E1", DEFAULT_DASHSCOPE_MODELS.asrE1);
+    vi.stubEnv("DASHSCOPE_TRANSLATION_MODEL", DEFAULT_DASHSCOPE_MODELS.translation);
+    vi.stubEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL", DEFAULT_DASHSCOPE_MODELS.transcriptPostprocess);
+    vi.stubEnv("DASHSCOPE_SUMMARY_MODEL", DEFAULT_DASHSCOPE_MODELS.summary);
+    vi.stubEnv("DASHSCOPE_ASR_MODEL_E2", undefined);
+    vi.stubEnv("DASHSCOPE_ASR_MODEL_E3", undefined);
+    try {
+      expect(readEnvironmentDashScopeModelIds()).toEqual(DEFAULT_DASHSCOPE_MODELS);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("parses transcript text and sentence timestamps", () => {
@@ -135,68 +148,26 @@ describe("dashscope ASR transcript parsing", () => {
   });
 
   it("builds diarization parameters only when enabled", () => {
-    expect(buildDashScopeAsrParameters(e2Options())).toEqual({ channel_id: [0] });
-    expect(buildDashScopeAsrParameters(e2Options({ diarizationEnabled: true }))).toEqual({
+    expect(buildDashScopeAsrParameters(e1Options())).toEqual({ channel_id: [0] });
+    expect(buildDashScopeAsrParameters(e1Options({ diarizationEnabled: true }))).toEqual({
       channel_id: [0],
       diarization_enabled: true,
     });
-    expect(buildDashScopeAsrParameters(e2Options({ diarizationEnabled: true, speakerCount: 3 }))).toEqual({
+    expect(buildDashScopeAsrParameters(e1Options({ diarizationEnabled: true, speakerCount: 3 }))).toEqual({
       channel_id: [0],
       diarization_enabled: true,
       speaker_count: 3,
     });
   });
 
-  it("serializes special_word_filter as the DashScope REST parameter string", () => {
-    const specialWordFilter = {
-      filter_with_empty: { word_list: ["开始", "发生"] },
-      filter_with_signed: { word_list: ["测试"] },
-      system_reserved_filter: true,
-    };
 
-    expect(buildDashScopeAsrParameters(e2Options({ specialWordFilter }))).toEqual({
-      channel_id: [0],
-      special_word_filter: JSON.stringify(specialWordFilter),
-    });
-  });
 
-  it("builds Qwen Filetrans async parameters with sentence-level timestamps", () => {
-    expect(buildDashScopeAsrParameters(e1Options())).toEqual({
-      enable_words: false,
-    });
-    expect(buildDashScopeAsrParameters(e1Options({ enableItn: true }))).toEqual({
-      enable_itn: true,
-      enable_words: false,
-    });
-  });
 
-  it("rejects special_word_filter for Qwen Filetrans", () => {
-    expect(() =>
-      buildDashScopeAsrParameters({
-        ...e1Options(),
-        specialWordFilter: {
-          system_reserved_filter: true,
-        },
-      }),
-    ).toThrow("不支持敏感词过滤");
-  });
-
-  it("does not include unsupported enhancement parameters for Qwen Filetrans", () => {
-    expect(() =>
-      buildDashScopeAsrParameters({
-        ...e1Options(),
-        diarizationEnabled: true,
-        specialWordFilter: {
-          filter_with_signed: { word_list: ["测试"] },
-          system_reserved_filter: true,
-        },
-      }),
-    ).toThrow("不支持说话人分离");
-  });
 
   it("uses the default EchoLens ASR models", () => {
-    expect(getDashScopeAsrModelForProfile("e1")).toBe("qwen3-asr-flash-filetrans");
-    expect(getDashScopeAsrModelForProfile("e2")).toBe("fun-asr");
+    expect(getDashScopeAsrModel(undefined)).toBe("qwen-audio-3.1-asr-flash-filetrans");
+    expect(getDashScopeAsrModel(300)).toBe("qwen-audio-3.1-asr-flash");
+    expect(getDashScopeAsrModel(300.01)).toBe("qwen-audio-3.1-asr-flash-filetrans");
   });
 });
 
@@ -204,6 +175,7 @@ describe("dashscope ASR polling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.DASHSCOPE_API_KEY = "key";
+    markAsrTaskSucceededMock.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -211,8 +183,14 @@ describe("dashscope ASR polling", () => {
     vi.restoreAllMocks();
   });
 
-  it("refreshes a running ASR task from DashScope task status polling", async () => {
-    readAsrTaskMock.mockResolvedValue(task({ model: "qwen3-asr-flash-filetrans" }));
+  it.each([false, true])("refreshes ASR polling and reuses concurrent completion (%s)", async (concurrent) => {
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
+    if (concurrent) {
+      markAsrTaskSucceededMock.mockResolvedValue(false);
+      readAsrTaskMock.mockResolvedValueOnce(task({ model: "qwen-audio-3.1-asr-flash-filetrans" })).mockResolvedValue({
+        ...task({ model: "qwen-audio-3.1-asr-flash-filetrans" }), status: "succeeded", result: { ok: true, content: "轮询转录文本。" },
+      });
+    }
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
         new Response(JSON.stringify({
@@ -246,7 +224,7 @@ describe("dashscope ASR polling", () => {
         }),
       );
 
-    await expect(refreshDashScopeAsrJob("user-1", "job-1")).resolves.toMatchObject({
+    await expect(refreshDashScopeAsrJobWithOptions("user-1", "job-1")).resolves.toMatchObject({
       result: { content: "轮询转录文本。", ok: true },
       status: "successed",
     });
@@ -256,11 +234,11 @@ describe("dashscope ASR polling", () => {
       "https://ws-bj7z459a8sb534fo.ap-southeast-1.maas.aliyuncs.com/api/v1/tasks/task-1",
       expect.objectContaining({ method: "GET" }),
     );
-    expect(markAsrTaskSucceededMock).toHaveBeenCalledWith("job-1");
+    expect(markAsrTaskSucceededMock).toHaveBeenCalledWith("job-1", expect.objectContaining({ ok: true }));
   });
 
   it("cancels the provider task and removes its canceled database record", async () => {
-    readAsrTaskMock.mockResolvedValue(task({ model: "qwen3-asr-flash-filetrans" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
 
     await expect(cancelDashScopeAsrJob("user-1", "job-1")).resolves.toBe(true);
@@ -274,7 +252,7 @@ describe("dashscope ASR polling", () => {
     "SUCCESS_WITH_NO_VALID_FRAGMENT",
   ])("maps %s to a friendly no-speech result without postprocessing", async (providerCode) => {
     const onPostprocessStart = vi.fn();
-    readAsrTaskMock.mockResolvedValue(task({ model: "fun-asr" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
       output: {
         code: providerCode,
@@ -302,7 +280,7 @@ describe("dashscope ASR polling", () => {
 
   it("uses the fixed compatible endpoint for required postprocessing", async () => {
     readAsrTaskMock.mockResolvedValue(task({
-      model: "qwen3-asr-flash-filetrans",
+      model: "qwen-audio-3.1-asr-flash-filetrans",
       caption: "中文作品标题",
     }));
     const fetchMock = vi.spyOn(globalThis, "fetch")
@@ -348,7 +326,7 @@ describe("dashscope ASR polling", () => {
     expect(requestBody.messages?.[0]?.content).toContain("中文作品标题");
   });
   it("keeps the successful raw ASR result when postprocessing returns invalid output", async () => {
-    readAsrTaskMock.mockResolvedValue(task({ model: "fun-asr" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({
         output: {
@@ -366,22 +344,22 @@ describe("dashscope ASR polling", () => {
         "data: [DONE]\n\n",
       ].join(""), { status: 200 }));
 
-    await expect(refreshDashScopeAsrJob("user-1", "job-1")).resolves.toMatchObject({
+    await expect(refreshDashScopeAsrJobWithOptions("user-1", "job-1")).resolves.toMatchObject({
       result: {
-        asrModel: "fun-asr",
+        asrModel: "qwen-audio-3.1-asr-flash-filetrans",
         content: "原始转录仍然可用",
         ok: true,
       },
       status: "successed",
     });
-    expect(markAsrTaskSucceededMock).toHaveBeenCalledWith("job-1");
+    expect(markAsrTaskSucceededMock).toHaveBeenCalledWith("job-1", expect.objectContaining({ ok: true }));
     expect(markAsrTaskFailedMock).not.toHaveBeenCalled();
   });
 
   it("recovers when the fifth task-status query succeeds", async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
-    readAsrTaskMock.mockResolvedValue(task({ model: "fun-asr" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new Error("fetch failed"))
       .mockRejectedValueOnce(new Error("fetch failed"))
@@ -391,7 +369,7 @@ describe("dashscope ASR polling", () => {
         output: { task_status: "RUNNING" },
       }), { status: 200 }));
 
-    const refresh = refreshDashScopeAsrJob("user-1", "job-1");
+    const refresh = refreshDashScopeAsrJobWithOptions("user-1", "job-1");
     await vi.runAllTimersAsync();
 
     await expect(refresh).resolves.toEqual({ jobId: "job-1", status: "running" });
@@ -401,10 +379,10 @@ describe("dashscope ASR polling", () => {
   it("returns the unified network error after five task-status query failures", async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
-    readAsrTaskMock.mockResolvedValue(task({ model: "fun-asr" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed"));
 
-    const refresh = refreshDashScopeAsrJob("user-1", "job-1");
+    const refresh = refreshDashScopeAsrJobWithOptions("user-1", "job-1");
     await vi.runAllTimersAsync();
 
     await expect(refresh).resolves.toMatchObject({
@@ -422,7 +400,7 @@ describe("dashscope ASR polling", () => {
   it("retries transcript-result downloads without repeating the task query", async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
-    readAsrTaskMock.mockResolvedValue(task({ model: "qwen3-asr-flash-filetrans" }));
+    readAsrTaskMock.mockResolvedValue(task({ model: "qwen-audio-3.1-asr-flash-filetrans" }));
     const resultUrl = "https://dashscope.example.com/retry-result.json";
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -445,7 +423,7 @@ describe("dashscope ASR polling", () => {
         "data: [DONE]\n\n",
       ].join(""), { status: 200 }));
 
-    const refresh = refreshDashScopeAsrJob("user-1", "job-1");
+    const refresh = refreshDashScopeAsrJobWithOptions("user-1", "job-1");
     await vi.runAllTimersAsync();
 
     await expect(refresh).resolves.toMatchObject({
@@ -459,12 +437,9 @@ describe("dashscope ASR polling", () => {
 });
 
 function e1Options(input: Partial<Parameters<typeof buildDashScopeAsrParameters>[0]> = {}) {
-  return { model: "qwen3-asr-flash-filetrans", profile: "e1" as const, ...input };
+  return { model: "qwen-audio-3.1-asr-flash-filetrans", ...input };
 }
 
-function e2Options(input: Partial<Parameters<typeof buildDashScopeAsrParameters>[0]> = {}) {
-  return { model: "fun-asr", profile: "e2" as const, ...input };
-}
 
 function task(input: { caption?: string; model: string }): StoredAsrTask {
   return {

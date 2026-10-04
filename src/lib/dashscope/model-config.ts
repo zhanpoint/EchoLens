@@ -1,5 +1,5 @@
 const CHAT_MODEL_OPTIONS = [
-  "deepseek-v4-flash",
+  "deepseek-v4.1-flash",
   "qwen3.7-plus",
   "qwen3.7-plus-2026-05-26",
   "qwen3.6-plus",
@@ -12,16 +12,7 @@ const CHAT_MODEL_OPTIONS = [
 
 export const DASHSCOPE_MODEL_OPTIONS = {
   asrE1: [
-    "qwen3-asr-flash-filetrans",
-    "qwen3-asr-flash-filetrans-2025-11-17",
-  ],
-  asrE2: [
-    "fun-asr",
-    "fun-asr-2025-11-07",
-    "fun-asr-2025-08-25",
-  ],
-  asrE3: [
-    "qwen-audio-3.0-asr-flash-filetrans",
+    "qwen-audio-3.1-asr-flash-filetrans",
   ],
   translation: [
     "qwen-mt-flash",
@@ -36,26 +27,22 @@ export type DashScopeModelPurpose = keyof typeof DASHSCOPE_MODEL_OPTIONS;
 export type DashScopeModelId<Purpose extends DashScopeModelPurpose = DashScopeModelPurpose> =
   (typeof DASHSCOPE_MODEL_OPTIONS)[Purpose][number];
 
-export type EchoLensDashScopeModelIds = Omit<Record<DashScopeModelPurpose, string>, "asrE3"> & {
-  asrE3?: string;
-};
+export type EchoLensDashScopeModelIds = Record<DashScopeModelPurpose, string>;
 
-export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e3" as const;
+export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e1" as const;
+export const DASHSCOPE_ASR_FLASH_MODEL = "qwen-audio-3.1-asr-flash";
+export const DASHSCOPE_ASR_FLASH_MAX_SECONDS = 300;
 
 export const DEFAULT_DASHSCOPE_MODELS: EchoLensDashScopeModelIds = {
-  asrE1: "qwen3-asr-flash-filetrans",
-  asrE2: "fun-asr",
-  asrE3: "qwen-audio-3.0-asr-flash-filetrans",
+  asrE1: "qwen-audio-3.1-asr-flash-filetrans",
   translation: "qwen-mt-flash",
-  transcriptPostprocess: "deepseek-v4-flash",
-  summary: "deepseek-v4-flash",
+  transcriptPostprocess: "deepseek-v4.1-flash",
+  summary: "deepseek-v4.1-flash",
 };
 
 export function readEnvironmentDashScopeModelIds(): EchoLensDashScopeModelIds {
   return {
     asrE1: readRequiredEnv("DASHSCOPE_ASR_MODEL_E1"),
-    asrE2: readRequiredEnv("DASHSCOPE_ASR_MODEL_E2"),
-    asrE3: readRequiredEnv("DASHSCOPE_ASR_MODEL_E3"),
     translation: readRequiredEnv("DASHSCOPE_TRANSLATION_MODEL"),
     transcriptPostprocess: readRequiredEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL"),
     summary: readRequiredEnv("DASHSCOPE_SUMMARY_MODEL"),
@@ -63,9 +50,7 @@ export function readEnvironmentDashScopeModelIds(): EchoLensDashScopeModelIds {
 }
 
 export const DASHSCOPE_MODEL_METADATA: Record<DashScopeModelPurpose, { label: string }> = {
-  asrE1: { label: "E1 模型" },
-  asrE2: { label: "E2 模型" },
-  asrE3: { label: "E3 模型" },
+  asrE1: { label: "E1 语音识别模型" },
   translation: { label: "翻译模型" },
   transcriptPostprocess: { label: "转录后处理模型" },
   summary: { label: "AI 总结模型" },

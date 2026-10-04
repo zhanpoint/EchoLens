@@ -1,9 +1,9 @@
-import { buildDashScopeAsrParameters, type DashScopeAsrModelProfile } from "@/lib/dashscope/asr";
+import { buildDashScopeAsrParameters, buildDashScopeFlashRequest, parseDashScopeFlashTranscriptPayload } from "@/lib/dashscope/asr";
 import {
   DASHSCOPE_FIXED_BASE_URL,
   DASHSCOPE_FIXED_COMPATIBLE_BASE_URL,
 } from "@/lib/dashscope/fixed-config";
-import type { DashScopeModelPurpose, EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { DASHSCOPE_ASR_FLASH_MODEL, type DashScopeModelPurpose, type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
 import { buildPublicOssObjectUrl } from "@/lib/oss/object-store";
 
 const ASR_TEST_TIMEOUT_MS = 30_000;
@@ -14,7 +14,7 @@ const CREDENTIAL_TEST_AUDIO_OBJECT_KEY = "echolens/tests/api-key-probe.m4a";
 
 type CredentialTestAudio = { objectKey: string; signedUrl: string };
 type TestDefinition =
-  | { id: string; kind: "asr"; profile: DashScopeAsrModelProfile; purpose: DashScopeModelPurpose }
+  | { id: string; kind: "asr"; purpose: DashScopeModelPurpose }
   | { id: string; kind: "chat" | "translation"; purpose: DashScopeModelPurpose };
 
 export type DashScopeCredentialTestResult =
@@ -34,7 +34,7 @@ export async function testDashScopeCredential(
   const tests = new Map<string, Promise<void>>();
   const results = await Promise.all(definitions.map(async (definition) => {
     try {
-      const cacheKey = `${definition.kind}:${definition.kind === "asr" ? definition.profile : ""}:${definition.id}`;
+      const cacheKey = `${definition.kind}:${definition.id}`;
       let test = tests.get(cacheKey);
       if (!test) {
         test = definition.kind === "asr"
@@ -57,29 +57,20 @@ export async function testDashScopeCredential(
       } satisfies DashScopeCredentialTestResult;
     }
   }));
-  return { ok: results.every((result) => result.ok), results };
+  const grouped = new Map<DashScopeModelPurpose, DashScopeCredentialTestResult>();
+  for (const result of results) {
+    const previous = grouped.get(result.purpose);
+    const id = previous ? `${previous.id} / ${result.id}` : result.id;
+    const failure = previous && !previous.ok ? previous : !result.ok ? result : null;
+    grouped.set(result.purpose, failure ? { ...failure, id } : { ...result, id });
+  }
+  return { ok: results.every((result) => result.ok), results: [...grouped.values()] };
 }
 
 function readTestDefinitions(models: EchoLensDashScopeModelIds, purpose?: DashScopeModelPurpose): TestDefinition[] {
   const definitions: TestDefinition[] = [
-    {
-      id: models.asrE1,
-      kind: "asr",
-      profile: "e1",
-      purpose: "asrE1",
-    },
-    {
-      id: models.asrE2,
-      kind: "asr",
-      profile: "e2",
-      purpose: "asrE2",
-    },
-    {
-      id: models.asrE3 ?? "qwen-audio-3.0-asr-flash-filetrans",
-      kind: "asr",
-      profile: "e3",
-      purpose: "asrE3",
-    },
+    { id: models.asrE1, kind: "asr", purpose: "asrE1" },
+    { id: DASHSCOPE_ASR_FLASH_MODEL, kind: "asr", purpose: "asrE1" },
     {
       id: models.translation,
       kind: "translation",
@@ -107,14 +98,21 @@ async function testAsrModel(
   if (!audio) {
     throw new Error("ASR 测试音频未配置。");
   }
-  const profile = definition.profile;
+  if (definition.id === DASHSCOPE_ASR_FLASH_MODEL) {
+    const payload = await fetchJson(`${DASHSCOPE_FIXED_BASE_URL}/services/aigc/multimodal-generation/generation`, {
+      apiKey, body: buildDashScopeFlashRequest(audio.signedUrl, { model: definition.id }),
+      method: "POST", timeoutMs: ASR_TEST_TIMEOUT_MS,
+    });
+    if (!parseDashScopeFlashTranscriptPayload(payload)) throw new Error("ASR 测试未返回可识别语音。");
+    return;
+  }
 
   const payload = await fetchJson(`${DASHSCOPE_FIXED_BASE_URL}/services/audio/asr/transcription`, {
     apiKey,
     body: {
-      input: profile === "e2" ? { file_urls: [audio.signedUrl] } : { file_url: audio.signedUrl },
+      input: { file_urls: [audio.signedUrl] },
       model: definition.id,
-      parameters: buildDashScopeAsrParameters({ model: definition.id, profile }),
+      parameters: buildDashScopeAsrParameters({ model: definition.id }),
     },
     headers: { "x-dashscope-async": "enable" },
     method: "POST",

@@ -57,10 +57,6 @@ export function classifyDouyinUrl(value: string): Pick<
   throw new DouyinResolveError("请粘贴抖音视频作品链接。", "unsupported_type");
 }
 
-export async function resolveDouyinInput(input: string): Promise<DouyinWorkIdentity> {
-  return resolveDouyinUrl(extractFirstUrl(input));
-}
-
 export async function resolveDouyinUrl(
   inputUrl: string,
   options: { finalUrl?: string } = {},

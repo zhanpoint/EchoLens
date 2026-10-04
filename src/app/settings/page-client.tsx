@@ -82,6 +82,7 @@ import {
   DASHSCOPE_MODEL_METADATA,
   DASHSCOPE_MODEL_OPTIONS,
   DEFAULT_DASHSCOPE_MODELS,
+  DASHSCOPE_ASR_FLASH_MODEL,
   normalizeDashScopeModelIds,
   type DashScopeModelPurpose,
   type EchoLensDashScopeModelIds,
@@ -792,7 +793,7 @@ function AiCredentialPanel({
       setIsVisible(false);
       setFeedback({
         message: isConfigured
-          ? "五类所选模型测试通过，API Key 已加密保存。"
+          ? "所选模型测试通过，API Key 已加密保存。"
           : "自定义 API Key 已移除。",
         tone: "success",
       });
@@ -1029,7 +1030,13 @@ function AiCredentialPanel({
                         </button>
                       </div>
                     </div>
-                    <Select
+                    {purpose === "asrE1" ? (
+                      <div className="mt-2 rounded-md border border-white/10 bg-black/25 px-2.5 py-2">
+                        <code className="block break-words text-[11px] text-cyan">{selectedModel}</code>
+                        <code className="mt-1 block break-words text-[11px] text-cyan">{DASHSCOPE_ASR_FLASH_MODEL}</code>
+                        <p className="mt-1 text-[11px] text-muted-foreground">按音频时长自动选择；5 分钟以内使用 flash。</p>
+                      </div>
+                    ) : <Select
                       value={selectedModel}
                       onValueChange={(model) => void saveModel(purpose, model)}
                       disabled={!isLoaded || isSaving || savingPurpose !== undefined || isTesting}
@@ -1055,7 +1062,7 @@ function AiCredentialPanel({
                           </SelectItem>
                         ))}
                       </SelectContent>
-                    </Select>
+                    </Select>}
                     {modelTest !== undefined && modelTest !== "testing" && !modelTest.ok ? (
                       <p className="mt-1 text-[11px] text-rose-400">
                         {modelTest.detail}
@@ -1117,10 +1124,10 @@ function AiCredentialPanel({
             </GuideDisclosure>
             <GuideDisclosure title="3. 授权模型并设置空间限流">
               <ol className="grid list-decimal gap-1 pl-4">
-                <li>在 EchoLens 业务空间打开“模型列表”，逐一搜索本页列出的四个模型。</li>
+                <li>在 EchoLens 业务空间打开“模型列表”，逐一搜索左侧配置的模型；E1 的长、短音频两个型号都需授权。</li>
                 <li>在每个模型的“模型调用”列打开授权。这里只需要调用权限，不需要开启模型训练或部署权限。</li>
                 <li>在“当前空间限流”中分别可选设置请求数限流和 Token 限流。按账号总配额和预计并发分配，并保留突发流量余量。</li>
-                <li>保存后再次确认四个模型均显示“已授权”。默认业务空间无法限制模型调用和设置空间限流，这是必须使用非默认空间的原因。</li>
+                <li>保存后再次确认所用模型均显示“已授权”。默认业务空间无法限制模型调用和设置空间限流，这是必须使用非默认空间的原因。</li>
               </ol>
               <GuideLink href="https://help.aliyun.com/zh/model-studio/permission-management-overview">查看业务空间、模型权限与限流官方说明</GuideLink>
               <GuideLink href={ALIBABA_SINGAPORE_MODEL_DOCS}>查看新加坡模型官方文档</GuideLink>
@@ -1129,7 +1136,7 @@ function AiCredentialPanel({
               <ol className="grid list-decimal gap-1 pl-4">
                 <li>保持地域为新加坡，进入“API Key”，点击“创建 API Key”。</li>
                 <li>“归属业务空间”选择 <code className="text-cyan">EchoLens</code>，描述可填写“EchoLens 本地调用”。</li>
-                <li>“权限”选择“自定义”。在可访问模型中只勾选本页列出的四个模型，不要把 Key 创建到默认业务空间。</li>
+                <li>“权限”选择“自定义”。在可访问模型中勾选左侧配置的模型，包含 E1 的两个型号，不要把 Key 创建到默认业务空间。</li>
                 <li>有固定出口 IP 时配置 IP 白名单；出口不固定时保留控制台默认值，避免误拦截。</li>
                 <li>确认并创建，立即复制完整 Key。关闭弹窗后通常无法再次查看完整明文。</li>
               </ol>
@@ -1140,7 +1147,7 @@ function AiCredentialPanel({
               <ol className="grid list-decimal gap-1 pl-4">
                 <li>地域显示“新加坡”，地址包含 <code className="text-cyan">ap-southeast-1</code>。</li>
                 <li>Key 归属 EchoLens 非默认业务空间。</li>
-                <li>空间已授权四个固定模型并设置限流，Key 的自定义模型范围也包含同样四个模型。</li>
+                <li>空间已授权所用模型并设置限流，Key 的自定义模型范围也包含同样的型号。</li>
                 <li>把 Key 粘贴到左侧并保存，不要通过聊天、截图或日志分享 Key。</li>
               </ol>
             </GuideDisclosure>
@@ -2089,7 +2096,7 @@ export function SettingsPage({
             >
               <ArrowLeft className="size-5" strokeWidth={2} aria-hidden="true" />
             </Link>
-            <h1 className="truncate text-xl font-semibold text-foreground">设置</h1>
+            <h1 className="truncate text-lg font-semibold text-foreground">设置</h1>
           </div>
         </header>
 
@@ -2099,7 +2106,7 @@ export function SettingsPage({
               <button
                 type="button"
                 onClick={() => setActiveSection("aiCredential")}
-                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "aiCredential" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] font-medium transition-colors ${activeSection === "aiCredential" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
                 aria-current={activeSection === "aiCredential" ? "page" : undefined}
               >
                 <KeyRound className="size-4" aria-hidden="true" />
@@ -2108,7 +2115,7 @@ export function SettingsPage({
               <button
                 type="button"
                 onClick={() => setActiveSection("apiTokens")}
-                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "apiTokens" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] font-medium transition-colors ${activeSection === "apiTokens" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
                 aria-current={activeSection === "apiTokens" ? "page" : undefined}
               >
                 <ShieldCheck className="size-4" aria-hidden="true" />
@@ -2117,7 +2124,7 @@ export function SettingsPage({
               <button
                 type="button"
                 onClick={() => setActiveSection("douyin")}
-                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] font-medium transition-colors ${activeSection === "douyin" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
                 aria-current={activeSection === "douyin" ? "page" : undefined}
               >
                 <UserRound className="size-4" aria-hidden="true" />
@@ -2126,7 +2133,7 @@ export function SettingsPage({
               <button
                 type="button"
                 onClick={() => setActiveSection("download")}
-                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-semibold transition-colors ${activeSection === "download" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
+                className={`flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] font-medium transition-colors ${activeSection === "download" ? "bg-cyan/[0.1] text-cyan" : "text-muted-foreground hover:bg-white/[0.045] hover:text-foreground"}`}
                 aria-current={activeSection === "download" ? "page" : undefined}
               >
                 <Download className="size-4" aria-hidden="true" />

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { createEchoLensClient, EchoLensClientError, normalizeBaseUrl } from "../../echolens-agent-client/index.mjs";
 
-const VALID_MODELS = new Set(["e1", "e2", "e3"]);
 const args = process.argv.slice(2);
 const flags = readFlags(args);
 const [scope, action, ...rest] = flags.positionals;
@@ -30,8 +29,8 @@ async function runCommand(scope, action, rest, flags) {
   }
   if (scope === "transcript" && action === "transcribe") {
     const model = readOption(rest, "--model");
-    if (model && !VALID_MODELS.has(model)) {
-      throw new EchoLensClientError("--model 仅支持 e1、e2 或 e3。", {
+    if (model && model !== "e1") {
+      throw new EchoLensClientError("--model 仅支持 e1。", {
         code: "ECHOLENS_CLI_INVALID_INPUT",
         status: 400,
       });
@@ -122,7 +121,7 @@ function help() {
     },
     commands: [
       "echolens media resolve --input <url-or-bv> --json",
-      "echolens transcript transcribe --input <url-or-bv> --model e2 --json",
+      "echolens transcript transcribe --input <url-or-bv> --model e1 --json",
       "echolens mcp config --base-url http://localhost:3000 --json",
     ],
   };

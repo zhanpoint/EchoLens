@@ -85,6 +85,25 @@ describe("fetchWithRetry", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("keeps caller cancellation connected after response headers arrive", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      return new Response(new ReadableStream({
+        start(stream) {
+          init?.signal?.addEventListener("abort", () => stream.error(init.signal?.reason), { once: true });
+        },
+      }));
+    });
+    const response = await fetchWithRetry("https://example.com", {
+      signal: controller.signal,
+      retry: { timeoutMs: 10_000 },
+    });
+    const text = response.text();
+    controller.abort(new Error("caller canceled"));
+    await expect(text).rejects.toThrow("caller canceled");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("can retry explicit HTTP failures without replaying transport failures", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed"));
 

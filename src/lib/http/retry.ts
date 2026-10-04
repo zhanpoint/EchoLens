@@ -140,12 +140,12 @@ function fetchOnce(
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const abortExternal = () => controller.abort();
-  externalSignal?.addEventListener("abort", abortExternal, { once: true });
+  const signal = externalSignal
+    ? AbortSignal.any([controller.signal, externalSignal])
+    : controller.signal;
 
-  return fetch(url, { ...init, signal: controller.signal }).finally(() => {
+  return fetch(url, { ...init, signal }).finally(() => {
     clearTimeout(timeout);
-    externalSignal?.removeEventListener("abort", abortExternal);
   });
 }
 

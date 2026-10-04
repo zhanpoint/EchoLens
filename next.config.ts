@@ -7,6 +7,9 @@ const localDevOrigins = Object.values(networkInterfaces())
   .map((address) => address.address);
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    root: __dirname,
+  },
   images: {
     remotePatterns: [
       { hostname: "www.bilibili.com", pathname: "/favicon.ico", protocol: "https" },
@@ -14,7 +17,10 @@ const nextConfig: NextConfig = {
     ],
   },
   output: "standalone",
-  serverExternalPackages: ["@ffmpeg-installer/ffmpeg"],
+  serverExternalPackages: ["playwright"],
+  outputFileTracingIncludes: {
+    "/api/**": ["./node_modules/@ffmpeg-installer/**/*", "./node_modules/playwright/**/*", "./node_modules/playwright-core/**/*"],
+  },
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
   allowedDevOrigins: localDevOrigins,

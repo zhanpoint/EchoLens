@@ -1,12 +1,12 @@
 import type { ProviderResult } from "@/lib/ai/provider-result";
 import {
   AsrQuotaExceededError,
-  getDashScopeAsrModelForProfile,
+  getDashScopeAsrModel,
   PLATFORM_ASR_QUOTA_SECONDS,
   transcribeDashScopeAsrOnce,
   type DashScopeAsrModelProfile,
 } from "@/lib/dashscope/asr";
-import { DEFAULT_DASHSCOPE_ASR_PROFILE, type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
 import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
 import { resolveOpenTranscriptionMedia } from "@/lib/open-api/media-resource";
 import {
@@ -24,12 +24,11 @@ export async function createOpenTranscription(input: {
     readDashScopeUserConfig(input.userId),
     resolveOpenTranscriptionMedia({ input: input.input, userId: input.userId }),
   ]);
-  const profile = input.model ?? DEFAULT_DASHSCOPE_ASR_PROFILE;
   let outcome = config.customApiKey
     ? await transcribeDashScopeAsrOnce(
         input.userId,
         media.audioUrl,
-        { model: getDashScopeAsrModelForProfile(profile, config.customModels), profile },
+        { model: getDashScopeAsrModel(media.durationSeconds, config.customModels) },
         {
           apiKey: config.customApiKey,
           postprocess: { model: config.customModels.transcriptPostprocess },
@@ -45,7 +44,6 @@ export async function createOpenTranscription(input: {
       apiKey: config.platformApiKey,
       durationSeconds: media.durationSeconds,
       models: config.platformModels,
-      profile,
       signal: input.signal,
       signedUrl: media.audioUrl,
       title: media.title,
@@ -77,7 +75,6 @@ async function transcribeWithPlatformQuota(input: {
   apiKey?: string;
   durationSeconds: number;
   models: EchoLensDashScopeModelIds;
-  profile: DashScopeAsrModelProfile;
   signal?: AbortSignal;
   signedUrl: string;
   title: string;
@@ -97,7 +94,7 @@ async function transcribeWithPlatformQuota(input: {
     const outcome = await transcribeDashScopeAsrOnce(
       input.userId,
       input.signedUrl,
-      { model: getDashScopeAsrModelForProfile(input.profile, input.models), profile: input.profile },
+      { model: getDashScopeAsrModel(input.durationSeconds, input.models) },
       {
         apiKey: input.apiKey,
         postprocess: { model: input.models.transcriptPostprocess },

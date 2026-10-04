@@ -82,6 +82,20 @@ describe("original-audio OSS pipeline", () => {
     expect(mocks.probeTranscribableAudioFromUrl).toHaveBeenCalledOnce();
   });
 
+  it("shares audio preparation across concurrent requests and releases failed tasks for retry", async () => {
+    mocks.getOssObjectInfo.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(prepareDouyinOriginalAudio(input, metadata)).rejects.toThrow("storage unavailable");
+
+    const results = await Promise.all(Array.from({ length: 10 }, () => prepareDouyinOriginalAudio(input, metadata)));
+    expect(results.every((result) => result.objectKey === results[0].objectKey)).toBe(true);
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledOnce();
+    expect(mocks.putOssStream).toHaveBeenCalledOnce();
+    expect(mocks.probeTranscribableAudioFromUrl).toHaveBeenCalledOnce();
+
+    await prepareDouyinOriginalAudio(input, metadata);
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledOnce();
+  });
+
   it("falls back to streaming progressive video through FFmpeg when DASH audio is missing", async () => {
     await expect(prepareDouyinOriginalAudio(
       input,

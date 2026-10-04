@@ -2,15 +2,11 @@ import type {
   Comment,
   CommentAuthor,
   CommentCollectionProgress,
-  CommentReply,
   CommentsPayload,
 } from "@/lib/comment-model";
 import { BilibiliApiError, requestBilibiliWbiJson } from "./client";
 
 const MAIN_COMMENTS_URL = "https://api.bilibili.com/x/v2/reply/wbi/main";
-const REPLIES_URL = "https://api.bilibili.com/x/v2/reply/reply";
-const PAGE_SIZE = 20;
-const REPLY_CONCURRENCY = 4;
 
 export type BilibiliCommentsPayload = CommentsPayload & {
   aid: number;
@@ -40,16 +36,12 @@ export async function collectBilibiliComments(input: {
 
   while (true) {
     const page = await requestMainCommentPage(input.aid, input.cookie, offset);
-    const uniqueItems = page.items.filter((item) => {
-      const id = readIdentifier(item.rpid_str, item.rpid);
-      if (!id || seenIds.has(id)) return false;
-      seenIds.add(id);
-      return true;
-    });
-    const normalized = await mapConcurrent(uniqueItems, REPLY_CONCURRENCY, (item) => (
-      normalizeCommentWithReplies(input.aid, input.cookie, item)
-    ));
-    comments.push(...normalized);
+    for (const item of page.items) {
+      const comment = normalizeComment(item);
+      if (!comment.id || seenIds.has(comment.id)) continue;
+      seenIds.add(comment.id);
+      comments.push(comment);
+    }
     pageNumber += 1;
     input.onProgress?.({ commentCount: comments.length, page: pageNumber });
 
@@ -83,38 +75,7 @@ async function requestMainCommentPage(aid: number, cookie: string, offset: strin
   };
 }
 
-async function normalizeCommentWithReplies(
-  aid: number,
-  cookie: string,
-  item: Record<string, unknown>,
-): Promise<Comment> {
-  const comment = normalizeComment(item);
-  if (comment.replyCount <= 0) return comment;
-
-  const url = new URL(REPLIES_URL);
-  for (const [key, value] of Object.entries({ oid: aid, pn: 1, ps: PAGE_SIZE, root: comment.id, type: 1 })) {
-    url.searchParams.set(key, String(value));
-  }
-  const payload = await requestBilibiliWbiJson(url.origin + url.pathname, Object.fromEntries(url.searchParams), cookie);
-  const data = readRecord(payload.data);
-  const replies = readRecords(data.replies).map(normalizeReply).filter((reply) => reply.id);
-  return {
-    ...comment,
-    replies,
-    replyPageHasMore: comment.replyCount > replies.length,
-  };
-}
-
 function normalizeComment(item: Record<string, unknown>): Comment {
-  return {
-    ...normalizeReply(item),
-    replies: [],
-    replyCount: readInteger(item.count, item.rcount),
-    replyPageHasMore: false,
-  };
-}
-
-function normalizeReply(item: Record<string, unknown>): CommentReply {
   return {
     author: normalizeAuthor(readRecord(item.member)),
     id: readIdentifier(item.rpid_str, item.rpid),
@@ -129,18 +90,6 @@ function normalizeAuthor(member: Record<string, unknown>): CommentAuthor {
     id: readIdentifier(member.mid),
     name: readString(member.uname) || "Bilibili 用户",
   };
-}
-
-async function mapConcurrent<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await mapper(items[index]);
-    }
-  }));
-  return results;
 }
 
 function readRecord(value: unknown): Record<string, unknown> {

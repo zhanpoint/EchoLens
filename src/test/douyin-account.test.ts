@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "./douyin-transport-test-utils";
 import { insertUser } from "@/lib/auth/db";
 import {
   markDouyinCredentialInvalid,
@@ -43,6 +44,14 @@ describe("douyin credential state", () => {
       status: "valid",
     });
     await expect(readDouyinCredentialState("credential-user")).resolves.toEqual(valid);
+
+    // A rejected request says nothing about whether the submitted login expired.
+    for (const status of [403, 429, 503]) {
+      vi.mocked(globalThis.fetch).mockResolvedValue(new Response("temporary", { status }));
+      await expect(validateAndStoreDouyinCredential("credential-user", "sessionid=candidate"))
+        .rejects.toMatchObject({ code: status === 403 ? "ACCESS_BLOCKED" : status === 429 ? "RATE_LIMITED" : "UPSTREAM_ERROR" });
+      await expect(readDouyinCredentialState("credential-user")).resolves.toEqual(valid);
+    }
 
     await markDouyinCredentialInvalid("credential-user");
     await expect(readDouyinCredentialState("credential-user")).resolves.toMatchObject({

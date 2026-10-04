@@ -9,6 +9,7 @@ import {
   type HistoryAssetKind,
 } from "@/lib/transcript/assets";
 import { DouyinMetadataError } from "@/lib/douyin/detail";
+import { DouyinApiError } from "@/lib/douyin/web-client";
 import { acquireWorkMetadata } from "@/lib/douyin/metadata-coordinator";
 import {
   NETWORK_RETRY_ERROR_CODE,
@@ -67,9 +68,9 @@ export async function POST(request: Request) {
   const credentialState = await readDouyinCredentialState(user.id);
   const credentialCookie = credentialState.status === "valid" ? credentialState.cookie : "";
 
-  return createJsonSseResponse<PrepareEvent>(request.signal, async ({ send }) => {
+  return createJsonSseResponse<PrepareEvent>(request.signal, async ({ send, signal }) => {
     try {
-      const lease = await acquireWorkMetadata(parsed.data, videoQuality, undefined, credentialCookie);
+      const lease = await acquireWorkMetadata(parsed.data, videoQuality, undefined, credentialCookie, signal);
       try {
         const snapshot = createDouyinResourceSnapshot(lease.metadata, videoQuality);
         const history = await updateTranscriptHistoryRecordMetadata(
@@ -123,15 +124,17 @@ export async function POST(request: Request) {
       logServerError("douyin.prepare.metadata", error);
       const networkFailure = error instanceof NetworkRetryExhaustedError;
       const metadataFailure = error instanceof DouyinMetadataError;
+      const apiFailure = error instanceof DouyinApiError;
       if (metadataFailure && error.code === "credential_invalid") {
         await markDouyinCredentialInvalid(user.id);
       }
       send({
         ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
         ...(metadataFailure ? { code: error.code } : {}),
+        ...(apiFailure ? { code: error.code } : {}),
         error: networkFailure
           ? NETWORK_RETRY_ERROR_MESSAGE
-          : metadataFailure
+          : metadataFailure || apiFailure
             ? error.message
             : "作品信息加载失败，请稍后重试。",
         type: "error",

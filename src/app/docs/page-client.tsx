@@ -73,7 +73,7 @@ const createSkillMarkdown = () => [
   "",
   "1. 只需要媒体信息时，调用媒体解析接口。",
   "2. 需要文本、字幕、笔记或摘要时，直接调用音频转录接口。",
-  "3. 转录模型默认使用 `e2`，除非用户明确指定 `e1` 或 `e3`。",
+  "3. 转录统一使用 `e1`；不超过 5 分钟使用 flash，长音频使用 flash-filetrans。",
   "4. 返回简洁结果：标题、作者、来源、转录文本和必要链接。",
   "",
   "## 请求示例",
@@ -93,7 +93,7 @@ const createSkillMarkdown = () => [
   "curl -X POST \"$ECHOLENS_BASE_URL/api/open/transcripts/transcribe\" \\",
   "  -H \"Authorization: Bearer $ECHOLENS_API_TOKEN\" \\",
   "  -H \"Content-Type: application/json\" \\",
-  "  -d '{\"input\":\"https://v.douyin.com/...\",\"model\":\"e2\"}'",
+  "  -d '{\"input\":\"https://v.douyin.com/...\",\"model\":\"e1\"}'",
   "```",
   "",
   "## 输出要求",
@@ -482,7 +482,7 @@ function CliDocs() {
       </DocSection>
       <DocSection id="cli-commands" title="常用命令">
         <p>先用 <code className="text-cyan">help</code> 检查安装，再按需执行媒体解析或转录。<code className="text-cyan">mcp config</code> 会输出可复制到 Agent 的 MCP 配置。</p>
-        <CodeBlock language="bash" code={`npx -y echolens help\nnpx -y echolens media resolve --input "https://www.bilibili.com/video/BV..." --json\nnpx -y echolens transcript transcribe --input "https://v.douyin.com/..." --model e2 --json\nnpx -y echolens mcp config --base-url "$ECHOLENS_BASE_URL" --json`} />
+        <CodeBlock language="bash" code={`npx -y echolens help\nnpx -y echolens media resolve --input "https://www.bilibili.com/video/BV..." --json\nnpx -y echolens transcript transcribe --input "https://v.douyin.com/..." --model e1 --json\nnpx -y echolens mcp config --base-url "$ECHOLENS_BASE_URL" --json`} />
       </DocSection>
     </div>
   );

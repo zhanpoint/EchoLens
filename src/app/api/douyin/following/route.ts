@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     return cookie;
   }
   try {
-    const users = await collectDouyinFollowingUsers(cookie);
+    const users = await collectDouyinFollowingUsers(cookie, { signal: request.signal });
     return NextResponse.json({ refreshedAt: Date.now(), users });
   } catch (error) {
     if (error instanceof DouyinApiError) {

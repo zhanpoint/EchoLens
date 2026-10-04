@@ -9,7 +9,6 @@ import {
   markAsrTaskSucceeded,
   readAsrTask,
   readPlatformAsrQuotaUsageSeconds,
-  readTranscriptHistorySummary,
   reserveAsrTask,
   readTranscriptHistoryRecord,
   deleteTranscriptHistoryRecord,
@@ -134,6 +133,22 @@ describe("transcript db ASR quota and audio cache", () => {
       sessionName: "作品 100",
       transcriptContent: "重试后的最新结果",
       workKey: "video:100",
+    });
+  });
+
+  it("loads history metadata without transferring transcript bodies and keeps full details accessible", async () => {
+    const transcriptContent = "长转写正文".repeat(10_000);
+    await upsertTranscriptHistoryRecord(historyInput({ id: "history-large", workId: "large", transcriptContent }));
+    for (const query of [undefined, "large"]) {
+      const records = await listTranscriptHistoryRecords({ userId: "user-1", query });
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ caption: "作品 large", transcriptContent: "" });
+      expect(records[0].transcriptSegments).toBeUndefined();
+      expect(JSON.stringify(records).length).toBeLessThan(2_000);
+    }
+    await expect(readTranscriptHistoryRecord({ id: "history-large", userId: "user-1" })).resolves.toMatchObject({
+      transcriptContent,
+      transcriptSegments: [{ endSeconds: 1, startSeconds: 0, text: transcriptContent }],
     });
   });
 
@@ -324,11 +339,6 @@ describe("transcript db ASR quota and audio cache", () => {
       historyRecordId: "history-a",
       userId: "user-2",
     })).resolves.toEqual([]);
-    await expect(readTranscriptHistorySummary({
-      historyRecordId: "history-a",
-      id: "summary-1",
-      userId: "user-2",
-    })).resolves.toBeNull();
     await expect(deleteTranscriptHistorySummary({
       historyRecordId: "history-a",
       id: "summary-1",

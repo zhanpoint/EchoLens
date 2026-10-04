@@ -1,6 +1,7 @@
 export type JsonSseWriter<T> = {
   isClosed: () => boolean;
   send: (event: T) => void;
+  signal: AbortSignal;
 };
 
 export function createJsonSseResponse<T>(
@@ -8,34 +9,49 @@ export function createJsonSseResponse<T>(
   run: (writer: JsonSseWriter<T>) => Promise<void>,
 ): Response {
   const encoder = new TextEncoder();
+  const operation = new AbortController();
   let closed = false;
+  let detach = () => {};
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const close = () => {
         if (closed) return;
         closed = true;
-        try {
-          controller.close();
-        } catch {
-          // The consumer can close while background preparation is finishing.
-        }
+        controller.close();
+        detach();
       };
+      const abort = () => {
+        operation.abort(signal?.reason);
+        close();
+      };
+      detach = () => signal?.removeEventListener("abort", abort);
       const writer: JsonSseWriter<T> = {
         isClosed: () => closed,
+        signal: operation.signal,
         send(event) {
-          if (closed || signal?.aborted) return;
-          try {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-          } catch {
-            closed = true;
-          }
+          if (closed) return;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
         },
       };
-      signal?.addEventListener("abort", close, { once: true });
-      void run(writer).finally(close);
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
+      void (async () => {
+        operation.signal.throwIfAborted();
+        await run(writer);
+      })().then(close, (error: unknown) => {
+        if (!closed) {
+          closed = true;
+          controller.error(error);
+        }
+      }).finally(detach);
     },
-    cancel() {
+    cancel(reason) {
       closed = true;
+      operation.abort(reason);
+      detach();
     },
   });
   return new Response(stream, {

@@ -24,6 +24,7 @@ import {
   Info,
   KeyRound,
   Languages,
+  Layers3,
   Link2,
   LogIn,
   LogOut,
@@ -80,7 +81,7 @@ import {
 } from "@/types/douyin";
 import type { CommentsPayload } from "@/lib/comment-model";
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
-import { DEFAULT_DASHSCOPE_ASR_PROFILE } from "@/lib/dashscope/model-config";
+import { DEFAULT_DASHSCOPE_ASR_PROFILE, DASHSCOPE_ASR_FLASH_MAX_SECONDS } from "@/lib/dashscope/model-config";
 import { clearProgressStartedAt, estimateMediaProcessingDurationSeconds, readProgressStartedAt } from "@/lib/douyin/cache-estimate";
 import {
   mergeWorkMetadata,
@@ -229,10 +230,8 @@ type LiveTranscribeSession = {
   workKey: string;
 };
 type DouyinWorkflowSession = {
-  asrModel: AsrModelId;
   createdAt: number;
   sessionName: string;
-  emptyFilterWords: string;
   error: string | null;
   errorCode?: string;
   historyRecordId: string;
@@ -240,14 +239,9 @@ type DouyinWorkflowSession = {
   isResolving: boolean;
   isResultProcessing: boolean;
   lastResolvedInput: string;
-  qwenAsrItnEnabled: boolean;
   results: ExtractionResult[];
-  signedFilterWords: string;
   speakerCount: string;
   speakerDiarizationEnabled: boolean;
-  specialWordFilterEnabled: boolean;
-  specialWordFilterPanelOpen: boolean;
-  systemReservedFilter: boolean;
   work: ResolvedDouyinWork | null;
 };
 type SidebarEntry = {
@@ -329,26 +323,13 @@ type SpeakerOption = {
   id: string;
   label: string;
 };
-type AsrModelId = "e1" | "e2" | "e3";
-type AsrModelOption = {
-  description: string;
-  id: AsrModelId;
-  label: string;
-};
+
 
 type SpeakerEditorTarget = {
   segmentKey: string;
   speakerId?: string;
 };
-type SpecialWordFilterRequest = {
-  filter_with_empty?: {
-    word_list: string[];
-  };
-  filter_with_signed?: {
-    word_list: string[];
-  };
-  system_reserved_filter: boolean;
-};
+
 type SubtitleCue = {
   endSeconds: number;
   emotion?: string;
@@ -1002,7 +983,6 @@ const SPEAKER_COUNT_MIN = 1;
 const SPEAKER_COUNT_MAX = 10;
 const SUBTITLE_MAX_CHARS_PER_CUE = 84;
 const SUBTITLE_MAX_LINE_LENGTH = 42;
-const ASR_MODEL_PANEL_WIDTH = 220;
 const TRANSCRIBE_POLL_INTERVAL_MS = 1_000;
 const TRANSCRIBE_POLL_TIMEOUT_MS = 10 * 60_000;
 const RESULT_PANEL_BODY_CLASS = "content-scroll h-[min(65dvh,36rem)] min-h-[20rem] overflow-auto sm:h-[36rem]";
@@ -1046,23 +1026,6 @@ const TRANSLATION_SETTING_HELP: Record<"domains" | "terms" | "tm", string> = {
   tm:
     "需要模型遵循特定翻译风格或句式时，可通过 tm_list 字段提供“源文-译文”句对作为参考。模型将在当次翻译任务中模仿这些示例的风格，适合维护大型文档集的术语一致性，或沿用企业已有的写作规范。",
 };
-const ASR_MODEL_OPTIONS: AsrModelOption[] = [
-  {
-    description: "适合多语言、背景噪声、音乐/说唱、远场和混叠语音等复杂通用场景。",
-    id: "e1",
-    label: "E1模型",
-  },
-  {
-    description: "适合中文、方言、古诗词、正式文本和需要说话人分离或敏感词过滤的场景。",
-    id: "e2",
-    label: "E2模型",
-  },
-  {
-    description: "全球第一的最强大的中文ASR模型，支持说话人分离和情感识别。",
-    id: "e3",
-    label: "E3模型",
-  },
-];
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
@@ -1095,24 +1058,17 @@ function createWorkflowSessionId(): string {
 
 function createWorkflowSession(historyRecordId = createWorkflowSessionId()): DouyinWorkflowSession {
   return {
-    asrModel: DEFAULT_DASHSCOPE_ASR_PROFILE,
     createdAt: Date.now(),
     sessionName: "",
-    emptyFilterWords: "",
     error: null,
     historyRecordId,
     input: "",
     isResolving: false,
     isResultProcessing: false,
     lastResolvedInput: "",
-    qwenAsrItnEnabled: false,
     results: [],
-    signedFilterWords: "",
     speakerCount: "",
     speakerDiarizationEnabled: false,
-    specialWordFilterEnabled: false,
-    specialWordFilterPanelOpen: false,
-    systemReservedFilter: true,
     work: null,
   };
 }
@@ -1308,20 +1264,13 @@ export default function HomePage() {
   const userMenuRef = useRef<HTMLDivElement>(null);
   const activeSession = workflowSessions[activeSessionId] ?? initialSession;
   const {
-    asrModel,
-    emptyFilterWords,
     error,
     errorCode,
     input: committedInput,
     isResolving,
-    qwenAsrItnEnabled,
     results,
-    signedFilterWords,
     speakerCount,
     speakerDiarizationEnabled,
-    specialWordFilterEnabled,
-    specialWordFilterPanelOpen,
-    systemReservedFilter,
     work,
   } = activeSession;
   const input = inputDraft?.sessionId === activeSessionId ? inputDraft.value : committedInput;
@@ -1376,15 +1325,8 @@ export default function HomePage() {
       [field]: resolveStateAction(action, session[field]),
     }));
   }
-  const setAsrModel: Dispatch<SetStateAction<AsrModelId>> = (action) => setActiveSessionField("asrModel", action);
-  const setEmptyFilterWords: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("emptyFilterWords", action);
-  const setQwenAsrItnEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("qwenAsrItnEnabled", action);
-  const setSignedFilterWords: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("signedFilterWords", action);
   const setSpeakerCount: Dispatch<SetStateAction<string>> = (action) => setActiveSessionField("speakerCount", action);
   const setSpeakerDiarizationEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("speakerDiarizationEnabled", action);
-  const setSpecialWordFilterEnabled: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("specialWordFilterEnabled", action);
-  const setSpecialWordFilterPanelOpen: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("specialWordFilterPanelOpen", action);
-  const setSystemReservedFilter: Dispatch<SetStateAction<boolean>> = (action) => setActiveSessionField("systemReservedFilter", action);
   const closeUserMenu = useCallback(() => {
     setUserMenuOpen(false);
   }, []);
@@ -1615,22 +1557,11 @@ export default function HomePage() {
     (Number.isInteger(parsedSpeakerCount) &&
       parsedSpeakerCount >= SPEAKER_COUNT_MIN &&
       parsedSpeakerCount <= SPEAKER_COUNT_MAX);
-  const effectiveSpeakerCount = speakerDiarizationEnabled && parsedSpeakerCount !== undefined && hasValidSpeakerCount
+  const effectiveSpeakerCount = speakerDiarizationEnabled && Boolean(work?.durationSeconds && work.durationSeconds > DASHSCOPE_ASR_FLASH_MAX_SECONDS) && parsedSpeakerCount !== undefined && hasValidSpeakerCount
     ? parsedSpeakerCount
     : undefined;
-  const supportsQwenAsrOptions = asrModel === "e1" || asrModel === "e3";
-  const supportsAsrEnhancementOptions = asrModel === "e2" || asrModel === "e3";
-  const signedFilterWordList = parseSpecialWordInput(signedFilterWords);
-  const emptyFilterWordList = parseSpecialWordInput(emptyFilterWords);
-  const specialWordFilter = specialWordFilterEnabled && asrModel === "e2"
-    ? buildSpecialWordFilterRequest({
-        emptyWords: emptyFilterWordList,
-        signedWords: signedFilterWordList,
-        systemReservedFilter,
-      })
-    : undefined;
-  const canStartTranscribe = canTranscribe &&
-    (!speakerDiarizationEnabled || !supportsAsrEnhancementOptions || hasValidSpeakerCount);
+  const supportsSpeakerCount = Boolean(work?.durationSeconds && work.durationSeconds > DASHSCOPE_ASR_FLASH_MAX_SECONDS);
+  const canStartTranscribe = canTranscribe && (!speakerDiarizationEnabled || !supportsSpeakerCount || hasValidSpeakerCount);
   const hasPendingTranscribeJob = Boolean(activeLiveSession?.jobId);
   const transcribeActionLabel = "转录";
   const canRunTranscribeAction = isOriginalAudioReady && (hasPendingTranscribeJob
@@ -1993,10 +1924,6 @@ export default function HomePage() {
     }
   }, [currentUser]);
 
-  function updateSpecialWordFilterEnabled(checked: boolean) {
-    setSpecialWordFilterEnabled(checked);
-    setSpecialWordFilterPanelOpen(checked);
-  }
 
   useEffect(() => {
     if (!currentUser) {
@@ -2009,14 +1936,6 @@ export default function HomePage() {
     return () => window.clearTimeout(timer);
   }, [currentUser, historySearchQuery, loadHistoryList]);
 
-  function updateAsrModel(model: AsrModelId) {
-    setAsrModel(model);
-    if (model !== "e2") {
-      setSpeakerDiarizationEnabled(false);
-      setSpecialWordFilterEnabled(false);
-      setSpecialWordFilterPanelOpen(false);
-    }
-  }
 
   useEffect(() => {
     let isActive = true;
@@ -2278,11 +2197,9 @@ export default function HomePage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           clientJobId,
-          diarizationEnabled: supportsAsrEnhancementOptions && speakerDiarizationEnabled,
-          ...(supportsQwenAsrOptions && qwenAsrItnEnabled ? { enableItn: true } : {}),
+          diarizationEnabled: speakerDiarizationEnabled,
           historyRecordId,
-          model: asrModel,
-          specialWordFilter,
+          model: DEFAULT_DASHSCOPE_ASR_PROFILE,
           speakerCount: effectiveSpeakerCount,
         }),
         signal: controller.signal,
@@ -2953,54 +2870,12 @@ export default function HomePage() {
                   </>
                 ) : undefined
               }
-              actionSlot={
-                activeKind === "video" && supportsAsrEnhancementOptions ? (
-                  <SpeakerDiarizationSwitch
-                    checked={speakerDiarizationEnabled}
-                    disabled={isTranscribing}
-                    hasValidSpeakerCount={hasValidSpeakerCount}
-                    onCheckedChange={setSpeakerDiarizationEnabled}
-                    onSpeakerCountChange={setSpeakerCount}
-                    onSpecialWordFilterCheckedChange={(checked) => {
-                      updateSpecialWordFilterEnabled(checked);
-                      setSpecialWordFilterPanelOpen(checked);
-                    }}
-                    speakerCount={speakerCount}
-                    specialWordFilterEnabled={specialWordFilterEnabled}
-                    specialWordFilterPanel={
-                      specialWordFilterPanelOpen ? (
-                        <SpecialWordFilterPanel
-                          disabled={isTranscribing}
-                          emptyFilterWords={emptyFilterWords}
-                          onEmptyFilterWordsChange={setEmptyFilterWords}
-                          onClose={() => setSpecialWordFilterPanelOpen(false)}
-                          onSignedFilterWordsChange={setSignedFilterWords}
-                          onSystemReservedFilterChange={setSystemReservedFilter}
-                          signedFilterWords={signedFilterWords}
-                          systemReservedFilter={systemReservedFilter}
-                        />
-                      ) : undefined
-                    }
-                    supportsEnhancementOptions={supportsAsrEnhancementOptions}
-                    supportsSpecialWordFilter={asrModel === "e2"}
-                  />
-                ) : activeKind === "video" && supportsQwenAsrOptions ? (
-                  <QwenAsrItnSwitch
-                    checked={qwenAsrItnEnabled}
-                    disabled={isTranscribing}
-                    onCheckedChange={setQwenAsrItnEnabled}
-                  />
-                ) : undefined
-              }
-              modelSlot={
-                activeKind === "video" ? (
-                  <AsrModelSelect
-                    disabled={isTranscribing}
-                    model={asrModel}
-                    onChange={updateAsrModel}
-                  />
-                ) : undefined
-              }
+              actionSlot={activeKind === "video" ? (
+                <SpeakerDiarizationSwitch checked={speakerDiarizationEnabled} disabled={isTranscribing}
+                  hasValidSpeakerCount={hasValidSpeakerCount} onCheckedChange={setSpeakerDiarizationEnabled}
+                  onSpeakerCountChange={setSpeakerCount} speakerCount={speakerCount} supportsSpeakerCount={supportsSpeakerCount} />
+              ) : undefined}
+              modelSlot={activeKind === "video" ? <span className="text-xs text-muted-foreground" title="Qwen Audio 3.1：不超过 5 分钟使用 flash，长音频使用 flash-filetrans">E1</span> : undefined}
               quotaSlot={
                 currentUser ? <AsrQuotaIndicator quota={asrQuota} /> : undefined
               }
@@ -3253,8 +3128,11 @@ function TranscriptHistorySidebar({
           </div>
         </div>
       </div>
-      {douyinAccountServicesEnabled ? (
-        <div className="mt-4 border-t border-white/10 pt-2">
+        <Link href="/batch" prefetch={false} className="mt-4 flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08]">
+          <Layers3 className="size-4 shrink-0 text-primary" aria-hidden="true" />博主语料采集
+        </Link>
+        {douyinAccountServicesEnabled ? (
+        <div className="mt-1 border-t border-white/10 pt-1">
           <Link
             href="/douyin/favorites"
             prefetch={false}
@@ -3888,377 +3766,23 @@ function TranscribeControls({
   );
 }
 
-function SpeakerDiarizationSwitch({
-  checked,
-  disabled,
-  hasValidSpeakerCount,
-  onCheckedChange,
-  onSpeakerCountChange,
-  onSpecialWordFilterCheckedChange,
-  speakerCount,
-  specialWordFilterEnabled,
-  specialWordFilterPanel,
-  supportsEnhancementOptions,
-  supportsSpecialWordFilter,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  hasValidSpeakerCount: boolean;
-  onCheckedChange: (checked: boolean) => void;
-  onSpeakerCountChange: (speakerCount: string) => void;
-  onSpecialWordFilterCheckedChange: (checked: boolean) => void;
-  speakerCount: string;
-  specialWordFilterEnabled: boolean;
-  specialWordFilterPanel?: ReactNode;
-  supportsEnhancementOptions: boolean;
-  supportsSpecialWordFilter: boolean;
+function SpeakerDiarizationSwitch({ checked, disabled, hasValidSpeakerCount, onCheckedChange, onSpeakerCountChange, speakerCount, supportsSpeakerCount }: {
+  checked: boolean; disabled?: boolean; hasValidSpeakerCount: boolean;
+  onCheckedChange: (checked: boolean) => void; onSpeakerCountChange: (value: string) => void;
+  speakerCount: string; supportsSpeakerCount: boolean;
 }) {
-  function updateSpeakerCount(value: string) {
-    onSpeakerCountChange(value.replace(/\D/gu, ""));
-  }
-
-  function stepSpeakerCount(step: -1 | 1) {
-    const current = Number(speakerCount);
-    const base = Number.isInteger(current) ? current : SPEAKER_COUNT_MIN;
-    const next = Math.min(SPEAKER_COUNT_MAX, Math.max(SPEAKER_COUNT_MIN, base + step));
-    onSpeakerCountChange(String(next));
-  }
-
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-3">
-      <CompactSwitch
-        checked={checked}
-        disabled={disabled || !supportsEnhancementOptions}
-        label="识别说话人"
-        onChange={onCheckedChange}
-      />
-      {checked && supportsEnhancementOptions ? (
-        <label className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-[#9db4d8]">
-          <span className="shrink-0">人数</span>
-          <span
-            className={cn(
-              "flex h-6 w-14 overflow-hidden rounded border bg-black/20 transition",
-              hasValidSpeakerCount
-                ? "border-white/10 focus-within:border-cyan focus-within:ring-2 focus-within:ring-cyan/20"
-                : "border-amber/70 focus-within:border-amber focus-within:ring-2 focus-within:ring-amber/20",
-            )}
-          >
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              value={speakerCount}
-              disabled={disabled}
-              onChange={(event) => updateSpeakerCount(event.target.value)}
-              placeholder="自动"
-              aria-label="说话人人数"
-              aria-invalid={!hasValidSpeakerCount}
-              title="留空自动识别；填写时请输入 1 到 10 的整数。"
-              className="h-full min-w-0 flex-1 bg-transparent px-1 text-xs tabular-nums text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
-            />
-            <span className="flex w-4 shrink-0 flex-col border-l border-white/10">
-              <button
-                type="button"
-                disabled={disabled || speakerCount === String(SPEAKER_COUNT_MAX)}
-                onClick={() => stepSpeakerCount(1)}
-                className="flex h-3 items-center justify-center text-[#9db4d8] transition hover:bg-cyan/[0.12] hover:text-cyan disabled:cursor-not-allowed disabled:opacity-35"
-                aria-label="增加说话人人数"
-                title="增加人数"
-              >
-                <ChevronUp className="size-3" aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                disabled={disabled || speakerCount === String(SPEAKER_COUNT_MIN)}
-                onClick={() => stepSpeakerCount(-1)}
-                className="flex h-3 items-center justify-center border-t border-white/10 text-[#9db4d8] transition hover:bg-cyan/[0.12] hover:text-cyan disabled:cursor-not-allowed disabled:opacity-35"
-                aria-label="减少说话人人数"
-                title="减少人数"
-              >
-                <ChevronDown className="size-3" aria-hidden="true" />
-              </button>
-            </span>
-          </span>
+      <CompactSwitch checked={checked} disabled={disabled} label="识别说话人" onChange={onCheckedChange} />
+      {checked && supportsSpeakerCount ? (
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          人数
+          <input inputMode="numeric" value={speakerCount} disabled={disabled} placeholder="自动"
+            aria-label="说话人人数" aria-invalid={!hasValidSpeakerCount} title="留空自动识别；可填写 1 到 10 的整数。"
+            onChange={(event) => onSpeakerCountChange(event.target.value)}
+            className={cn("h-7 w-14 rounded border bg-background px-2 text-xs focus-visible:outline-2 focus-visible:outline-ring", hasValidSpeakerCount ? "border-input" : "border-amber")} />
         </label>
       ) : null}
-      {supportsSpecialWordFilter ? (
-        <span className="relative inline-flex shrink-0">
-          <CompactSwitch
-            checked={specialWordFilterEnabled}
-            disabled={disabled}
-            label="敏感词过滤"
-            onChange={onSpecialWordFilterCheckedChange}
-          />
-          {specialWordFilterPanel ? (
-            <div className="absolute left-full top-1/2 z-30 ml-2 w-[min(28rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] -translate-y-1/2">
-              {specialWordFilterPanel}
-            </div>
-          ) : null}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function QwenAsrItnSwitch({
-  checked,
-  disabled,
-  onCheckedChange,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <CompactSwitch
-        checked={checked}
-        disabled={disabled}
-        label="逆文本规范化"
-        onChange={onCheckedChange}
-      />
-      <ItnHelpTooltip />
-    </div>
-  );
-}
-
-function ItnHelpTooltip() {
-  return (
-    <span className="group relative inline-flex shrink-0">
-      <button
-        type="button"
-        className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition hover:bg-cyan/[0.08] hover:text-cyan focus-visible:bg-cyan/[0.08] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/25"
-        aria-label="逆文本规范化说明"
-      >
-        <AlertCircle className="size-3.5" aria-hidden="true" />
-      </button>
-      <span className="pointer-events-none absolute bottom-full left-0 z-40 mb-2 hidden w-72 rounded-md border border-white/10 bg-[#0e1420] p-3 text-left text-xs leading-5 text-[#d6e2f5] shadow-xl shadow-black/35 group-focus-within:block group-hover:block">
-        <span className="block text-muted-foreground">关闭：今天是二零二六年六月二十九日</span>
-        <span className="mt-1 block text-cyan">开启：今天是2026年6月29日</span>
-        <span className="mt-2 block text-muted-foreground">
-          适合会议、课程、新闻等正式内容；口播娱乐、歌词、方言梗或编号较多时建议关闭，避免数字被误改。
-        </span>
-      </span>
-    </span>
-  );
-}
-
-function AsrModelSelect({
-  disabled,
-  model,
-  onChange,
-}: {
-  disabled?: boolean;
-  model: AsrModelId;
-  onChange: (model: AsrModelId) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = ASR_MODEL_OPTIONS.find((option) => option.id === model) ?? ASR_MODEL_OPTIONS[0];
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-
-  function selectModel(nextModel: AsrModelId) {
-    onChange(nextModel);
-    setOpen(false);
-  }
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    function closeOnOutsidePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-      if (buttonRef.current?.contains(target) || panelRef.current?.contains(target)) {
-        return;
-      }
-      setOpen(false);
-    }
-
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    }
-
-    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    function updatePanelPosition() {
-      const button = buttonRef.current;
-      const panel = panelRef.current;
-      if (!button || !panel) {
-        return;
-      }
-
-      const buttonRect = button.getBoundingClientRect();
-      const panelRect = panel.getBoundingClientRect();
-      const viewportPadding = 8;
-      const gap = 8;
-      const width = Math.min(ASR_MODEL_PANEL_WIDTH, window.innerWidth - viewportPadding * 2);
-      const bottomSpace = window.innerHeight - buttonRect.bottom;
-      const topSpace = buttonRect.top;
-      const opensBelow = bottomSpace >= panelRect.height + gap || bottomSpace >= topSpace;
-      const preferredLeft = buttonRect.right - width;
-      const left = Math.min(
-        window.innerWidth - viewportPadding - width,
-        Math.max(viewportPadding, preferredLeft),
-      );
-      const preferredTop = opensBelow ? buttonRect.bottom + gap : buttonRect.top - gap - panelRect.height;
-      const top = Math.min(
-        window.innerHeight - viewportPadding - panelRect.height,
-        Math.max(viewportPadding, preferredTop),
-      );
-
-      panel.style.left = `${left}px`;
-      panel.style.top = `${top}px`;
-      panel.style.width = `${width}px`;
-      panel.style.visibility = "visible";
-    }
-
-    updatePanelPosition();
-    window.addEventListener("resize", updatePanelPosition);
-    window.addEventListener("scroll", updatePanelPosition, true);
-    return () => {
-      window.removeEventListener("resize", updatePanelPosition);
-      window.removeEventListener("scroll", updatePanelPosition, true);
-    };
-  }, [open]);
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        ref={buttonRef}
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-        className={cn(
-          "inline-flex h-8 w-[5.8rem] items-center justify-between gap-1.5 rounded-sm bg-transparent px-2 text-sm font-semibold transition",
-          selected.id === "e3"
-            ? "bg-amber/[0.08] text-amber shadow-[0_0_14px_rgb(245_158_11_/_0.12)] hover:bg-amber/[0.13] hover:text-amber-300"
-            : "border border-transparent text-foreground hover:text-cyan",
-          disabled && "cursor-not-allowed opacity-50",
-        )}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        title={selected.description}
-      >
-        <span className="min-w-0 flex-1 truncate">{selected.label}</span>
-        <ChevronDown className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      </button>
-      {open && typeof document !== "undefined"
-        ? createPortal(
-            <div
-              ref={panelRef}
-              className="content-scroll z-[120] max-h-[min(16rem,calc(100vh-1rem))] overflow-auto rounded-md bg-[#0e1420] p-1 text-left shadow-2xl shadow-black/40 ring-1 ring-white/8"
-              role="listbox"
-              style={{ position: "fixed", visibility: "hidden" }}
-            >
-              {ASR_MODEL_OPTIONS.map((option) => {
-                const selectedOption = option.id === model;
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => selectModel(option.id)}
-                    className={cn(
-                      "grid gap-0.5 rounded-md px-2.5 py-1.5 text-left transition",
-                      selectedOption
-                        ? option.id === "e3"
-                          ? "border border-amber/35 bg-amber/[0.12] text-amber"
-                          : "border border-cyan/20 bg-cyan/[0.1] text-cyan"
-                        : option.id === "e3"
-                          ? "border border-transparent text-amber/90 hover:border-amber/25 hover:bg-amber/[0.08]"
-                          : "border border-transparent text-foreground hover:bg-white/[0.06]",
-                    )}
-                    role="option"
-                    aria-selected={selectedOption}
-                  >
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold">{option.label}</span>
-                      {selectedOption ? <Check className="size-3.5 shrink-0" aria-hidden="true" /> : null}
-                    </span>
-                    <span className="text-xs leading-5 text-muted-foreground">{option.description}</span>
-                  </button>
-                );
-              })}
-            </div>,
-            document.body,
-          )
-        : null}
-    </div>
-  );
-}
-
-function SpecialWordFilterPanel({
-  disabled,
-  emptyFilterWords,
-  onClose,
-  onEmptyFilterWordsChange,
-  onSignedFilterWordsChange,
-  onSystemReservedFilterChange,
-  signedFilterWords,
-  systemReservedFilter,
-}: {
-  disabled?: boolean;
-  emptyFilterWords: string;
-  onClose: () => void;
-  onEmptyFilterWordsChange: (value: string) => void;
-  onSignedFilterWordsChange: (value: string) => void;
-  onSystemReservedFilterChange: (checked: boolean) => void;
-  signedFilterWords: string;
-  systemReservedFilter: boolean;
-}) {
-  return (
-    <div className="grid w-full max-w-md min-w-0 gap-2 rounded-md border border-cyan/25 bg-[#101722] p-2 shadow-xl shadow-black/30">
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <span className="text-xs font-semibold text-cyan">敏感词过滤配置</span>
-        <button
-          type="button"
-          onClick={onClose}
-          disabled={disabled}
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/10 hover:text-cyan active:scale-[0.94] disabled:cursor-not-allowed disabled:opacity-50"
-          aria-label="关闭敏感词过滤配置"
-          title="关闭"
-        >
-          <X className="size-3.5" aria-hidden="true" />
-        </button>
-      </div>
-      <SpecialWordTextarea
-        disabled={disabled}
-        label="替换词"
-        onChange={onSignedFilterWordsChange}
-        placeholder={'格式：输入需要替换为等长 * 的敏感词，逗号或换行分隔。\n例如 ["测试"]，「帮我测试一下」会变成「帮我**一下」。'}
-        value={signedFilterWords}
-      />
-      <SpecialWordTextarea
-        disabled={disabled}
-        label="移除词"
-        onChange={onEmptyFilterWordsChange}
-        placeholder={'格式：输入需要从结果中完全移除的敏感词，逗号或换行分隔。\n例如 ["开始"]，「比赛这就要开始了吗」会变成「比赛这就要了吗」。'}
-        value={emptyFilterWords}
-      />
-      <div className="flex min-w-0">
-        <CompactSwitch
-          checked={systemReservedFilter}
-          disabled={disabled}
-          label="是否同时启用系统预置敏感词表（与自定义词表叠加生效）"
-          onChange={onSystemReservedFilterChange}
-        />
-      </div>
     </div>
   );
 }
@@ -4309,54 +3833,8 @@ function CompactSwitch({
   );
 }
 
-function SpecialWordTextarea({
-  disabled,
-  label,
-  onChange,
-  placeholder,
-  value,
-}: {
-  disabled?: boolean;
-  label: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-  value: string;
-}) {
-  return (
-    <label className="grid min-w-0 gap-1 text-xs font-medium text-[#9db4d8]">
-      <span>{label}</span>
-      <textarea
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        rows={2}
-        placeholder={placeholder}
-        className="min-h-12 w-full resize-y rounded border border-white/12 bg-[#0b111b] px-2 py-1.5 text-xs leading-5 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-cyan focus:ring-2 focus:ring-cyan/20 disabled:cursor-not-allowed disabled:opacity-60"
-      />
-    </label>
-  );
-}
 
-function parseSpecialWordInput(value: string): string[] {
-  return [...new Set(
-    value
-      .split(/[\n,，;；]+/u)
-      .map((word) => word.trim())
-      .filter(Boolean),
-  )];
-}
 
-function buildSpecialWordFilterRequest(input: {
-  emptyWords: string[];
-  signedWords: string[];
-  systemReservedFilter: boolean;
-}): SpecialWordFilterRequest {
-  return {
-    ...(input.signedWords.length > 0 ? { filter_with_signed: { word_list: input.signedWords } } : {}),
-    ...(input.emptyWords.length > 0 ? { filter_with_empty: { word_list: input.emptyWords } } : {}),
-    system_reserved_filter: input.systemReservedFilter,
-  };
-}
 
 function WorkTitleRow({ title }: { title: string | undefined }) {
   const value = title ?? "未识别";
@@ -4975,26 +4453,6 @@ function CommentPreviewDialog({
                       <p className="mt-1.5 whitespace-pre-line break-words text-[13px] leading-5 text-foreground/90">
                         {comment.text || "[无文字内容]"}
                       </p>
-                      {comment.replies.length > 0 ? (
-                        <div className="mt-2.5 grid gap-1.5 border-l border-cyan/20 pl-3">
-                          {comment.replies.map((reply) => (
-                            <div key={reply.id} className="bg-white/[0.018] px-2.5 py-1.5">
-                              <div className="flex items-center justify-between gap-3 text-xs">
-                                <span className="truncate font-medium text-cyan">{reply.author.name}</span>
-                                <CommentLikeCount count={reply.likeCount} />
-                              </div>
-                              <p className="mt-1 whitespace-pre-line break-words text-[13px] leading-5 text-foreground/85">
-                                {reply.text || "[无文字内容]"}
-                              </p>
-                            </div>
-                          ))}
-                          {comment.replyPageHasMore ? (
-                            <p className="pt-0.5 text-[11px] text-muted-foreground">
-                              仅展示第一页回复，共 {comment.replyCount} 条
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : null}
                     </article>
                   ))}
                 </div>

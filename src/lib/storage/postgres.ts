@@ -1,4 +1,5 @@
 import { Pool, types, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
+import { BATCH_SCHEMA_STATEMENTS } from "@/lib/batch/schema";
 
 type Queryable = {
   query<T extends QueryResultRow = QueryResultRow>(
@@ -18,7 +19,7 @@ type GlobalWithPostgres = typeof globalThis & {
   __echolensPostgresSchemaVersion?: number;
 };
 
-const POSTGRES_SCHEMA_VERSION = 2;
+const POSTGRES_SCHEMA_VERSION = 6;
 
 const globalForPostgres = globalThis as GlobalWithPostgres;
 types.setTypeParser(20, (value) => Number(value));
@@ -147,21 +148,54 @@ async function migrateSchema(db: PooledQueryable): Promise<void> {
   for (const statement of CORE_SCHEMA_STATEMENTS) {
     await db.query(statement);
   }
-  await migrateTranscriptSchemaV3(db);
+  await migrateTranscriptHistorySchema(db);
   await migrateTranscriptSchemaV4(db);
+  await migrateBatchSchema(db);
 }
 
-const TRANSCRIPT_SCHEMA_V3_VERSION = "transcript-schema-v3-session-name";
+async function migrateBatchSchema(db: PooledQueryable): Promise<void> {
+  const migrations = [
+    ["transcript-schema-v6-durable-batches", BATCH_SCHEMA_STATEMENTS],
+    ["transcript-schema-v7-qwen-audio-31", [
+      "UPDATE transcript_batches SET model = 'e1' WHERE model <> 'e1'",
+      `UPDATE user_settings SET value = (value - 'asrE2' - 'asrE3') || '{"asrE1":"qwen-audio-3.1-asr-flash-filetrans","transcriptPostprocess":"deepseek-v4.1-flash","summary":"deepseek-v4.1-flash"}'::jsonb WHERE category = 'aiModels'`,
+    ]],
+  ] as const;
+  for (const [version, statements] of migrations) {
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [version]);
+      const applied = await client.query("SELECT version FROM app_schema_migrations WHERE version = $1", [version]);
+      if (!applied.rows.length) {
+        for (const statement of statements) await client.query(statement);
+        await client.query("INSERT INTO app_schema_migrations (version) VALUES ($1)", [version]);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  }
+}
 
-async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
+// The old v3 marker predates the current non-destructive legacy reconciliation.
+// Give this schema snapshot its own version so older installations upgrade once.
+const TRANSCRIPT_HISTORY_SCHEMA_VERSION = "transcript-schema-v5-incremental-history";
+
+async function migrateTranscriptHistorySchema(db: PooledQueryable): Promise<void> {
   const client = await db.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [TRANSCRIPT_SCHEMA_V3_VERSION]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [TRANSCRIPT_HISTORY_SCHEMA_VERSION]);
     const applied = await client.query<{ version: string }>(
       "SELECT version FROM app_schema_migrations WHERE version = $1",
-      [TRANSCRIPT_SCHEMA_V3_VERSION],
+      [TRANSCRIPT_HISTORY_SCHEMA_VERSION],
     );
+    if (applied.rows.length > 0) {
+      await client.query("COMMIT");
+      return;
+    }
     for (const statement of TRANSCRIPT_SCHEMA_BASE_STATEMENTS) {
       await client.query(statement);
     }
@@ -169,12 +203,10 @@ async function migrateTranscriptSchemaV3(db: PooledQueryable): Promise<void> {
     for (const statement of TRANSCRIPT_SCHEMA_FINALIZE_STATEMENTS) {
       await client.query(statement);
     }
-    if (applied.rows.length === 0) {
-      await client.query(
-        "INSERT INTO app_schema_migrations (version) VALUES ($1)",
-        [TRANSCRIPT_SCHEMA_V3_VERSION],
-      );
-    }
+    await client.query(
+      "INSERT INTO app_schema_migrations (version) VALUES ($1)",
+      [TRANSCRIPT_HISTORY_SCHEMA_VERSION],
+    );
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -259,14 +291,16 @@ async function migrateTranscriptSchemaV4(db: PooledQueryable): Promise<void> {
       "SELECT version FROM app_schema_migrations WHERE version = $1",
       [TRANSCRIPT_SCHEMA_V4_VERSION],
     );
+    if (applied.rows.length > 0) {
+      await client.query("COMMIT");
+      return;
+    }
     await client.query("DROP TABLE IF EXISTS transcript_history_assets");
     for (const statement of TRANSCRIPT_SCHEMA_V4_STATEMENTS) {
       await client.query(statement);
     }
     await migrateLegacyOriginalAudioColumn(client);
-    if (applied.rows.length === 0) {
-      await client.query("INSERT INTO app_schema_migrations (version) VALUES ($1)", [TRANSCRIPT_SCHEMA_V4_VERSION]);
-    }
+    await client.query("INSERT INTO app_schema_migrations (version) VALUES ($1)", [TRANSCRIPT_SCHEMA_V4_VERSION]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

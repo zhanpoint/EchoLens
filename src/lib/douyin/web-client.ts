@@ -1,14 +1,24 @@
-import { fetchWithRetry, exponentialRetryDelay } from "@/lib/http/retry";
-import { signABogusUrl } from "./abogus";
-import { resolveMsToken } from "./ms-token";
-import { signDouyinUrl } from "./xbogus";
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { exponentialRetryDelay } from "@/lib/http/retry";
+import {
+  openApiPlatformRequestPolicy,
+  OpenApiPlatformCooldownError,
+  type OpenApiPlatformRequestPolicy,
+} from "@/lib/open-api/platform-request-policy";
+import { DouyinPageBridgeError, requestDouyinPage } from "./page-bridge";
+
+type RequestOptions = {
+  body?: Record<string, string | number>;
+  method?: "GET" | "POST";
+  signal?: AbortSignal;
+};
+export type DouyinClientOptions = {
+  signal?: AbortSignal;
+  requestPolicy?: OpenApiPlatformRequestPolicy;
+};
 
 export const DOUYIN_BASE_URL = "https://www.douyin.com";
-
-const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
-const REQUEST_TIMEOUT_MS = 15_000;
 
 export class DouyinApiError extends Error {
   constructor(
@@ -19,16 +29,27 @@ export class DouyinApiError extends Error {
       | "ACCESS_BLOCKED"
       | "RATE_LIMITED"
       | "ANTI_BOT"
+      | "BROWSER_SESSION_UNAVAILABLE"
       | "UPSTREAM_ERROR",
     readonly details?: {
       endpoint?: string;
       status?: number;
       upstreamCode?: number;
+      retryAfterSeconds?: number;
     },
   ) {
     super(message);
     this.name = "DouyinApiError";
   }
+}
+
+export function isDouyinCredentialError(
+  error: unknown,
+): error is DouyinApiError & { code: "INVALID_COOKIE" | "LOGIN_REQUIRED" } {
+  return (
+    error instanceof DouyinApiError &&
+    (error.code === "INVALID_COOKIE" || error.code === "LOGIN_REQUIRED")
+  );
 }
 
 export type DouyinWebClient = {
@@ -38,197 +59,117 @@ export type DouyinWebClient = {
     path: string,
     params: Record<string, string | number>,
     attempts?: number,
-    options?: {
-      body?: Record<string, string | number>;
-      method?: "GET" | "POST";
-      referer?: string;
-    },
+    options?: RequestOptions,
   ): Promise<Record<string, unknown>>;
   verifyAuthenticatedSession(attempts?: number): Promise<void>;
 };
 
-export function createDouyinWebClient(value: string): DouyinWebClient {
+export function createDouyinWebClient(
+  value: string,
+  options: DouyinClientOptions = {},
+): DouyinWebClient {
   const cookie = normalizeCookie(value);
-  const cookieMap = parseCookie(cookie);
-  if (!cookie || !hasLoginCookie(cookieMap)) {
+  const hasLogin = cookie.split(";").some((part) => {
+    const index = part.indexOf("=");
+    return (
+      index > 0 &&
+      ["sessionid", "sessionid_ss", "sid_guard", "sid_tt"].includes(part.slice(0, index).trim()) &&
+      Boolean(part.slice(index + 1).trim())
+    );
+  });
+  if (!hasLogin) {
     throw new DouyinApiError("访问凭证不完整，请重新获取。", "INVALID_COOKIE");
   }
-  return createWebClient(cookie, cookieMap);
-}
-
-function createWebClient(
-  cookie: string,
-  cookieMap: Record<string, string>,
-): DouyinWebClient {
-  const baseHeaders: Record<string, string> = {
-    accept: "application/json, text/plain, */*",
-    "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    referer: "https://www.douyin.com/?recommend=1",
-    "user-agent": DEFAULT_USER_AGENT,
-  };
-  let msToken = cookieMap.msToken ?? "";
+  // Sharing a credential also shares its cooldown across all authenticated features.
+  const policy = options.requestPolicy ??
+    openApiPlatformRequestPolicy.forUser(
+      `douyin-credential:${createHash("sha256").update(cookie).digest("hex")}`,
+    );
 
   async function request(
     path: string,
     params: Record<string, string | number>,
     attempts = 3,
-    options?: {
-      body?: Record<string, string | number>;
-      method?: "GET" | "POST";
-      referer?: string;
-    },
+    requestOptions: RequestOptions = {},
   ): Promise<Record<string, unknown>> {
-    msToken ||= await resolveMsToken("", DEFAULT_USER_AGENT);
-    const requestParams = { ...params, msToken };
-    const body = options?.body ? new URLSearchParams(stringifyParams(options.body)).toString() : "";
-    let lastFailure: DouyinApiError | undefined;
-
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const unsignedUrl = buildUrl(path, requestParams);
-      const signed = signRequest(unsignedUrl, body);
-      let response: Response;
+    const signal = options.signal && requestOptions.signal
+      ? AbortSignal.any([options.signal, requestOptions.signal])
+      : requestOptions.signal ?? options.signal;
+    for (let attempt = 1; ; attempt++) {
+      signal?.throwIfAborted();
       try {
-        response = await fetchWithRetry(signed.url, {
-          body: body || undefined,
-          cache: "no-store",
-          headers: {
-            ...baseHeaders,
-            cookie: appendCookie(cookie, "msToken", msToken),
-            ...(options?.referer ? { referer: options.referer } : {}),
-            ...(body ? { "content-type": "application/x-www-form-urlencoded" } : {}),
-            "user-agent": signed.userAgent,
-          },
-          method: options?.method ?? "GET",
-          retry: {
-            attempts: 1,
-            retryNetworkErrors: false,
-            retryOnDefaultHttpStatuses: false,
-            timeoutMs: REQUEST_TIMEOUT_MS,
-          },
+        const response = await requestDouyinPage({
+          cookie, path, params, ...requestOptions, signal,
+          beforeDispatch: () => policy.beforeRequest("douyin", signal),
         });
-      } catch (error) {
-        if (attempt >= attempts) throw error;
-        await retryDelay(attempt);
-        continue;
-      }
-      if (response.status === 403 || response.status === 429) {
-        await response.body?.cancel();
-        lastFailure = response.status === 403
-          ? new DouyinApiError("抖音拒绝了当前请求，请稍后重试。", "ACCESS_BLOCKED", {
-              endpoint: path,
-              status: response.status,
-            })
-          : new DouyinApiError("抖音接口请求过于频繁，请稍后重试。", "RATE_LIMITED", {
-              endpoint: path,
-              status: response.status,
-            });
-        if (attempt < attempts) {
-          await retryDelay(attempt);
-          continue;
+        policy.observeResponse("douyin", response);
+        const text = await response.text();
+        if (response.status === 403 || response.status === 429) {
+          throw new DouyinApiError(
+            "抖音暂时限制访问，请稍后重试。",
+            response.status === 429 ? "RATE_LIMITED" : "ACCESS_BLOCKED",
+            { endpoint: path, status: response.status },
+          );
         }
-        throw lastFailure;
-      }
-      if (response.status >= 500) {
-        await response.body?.cancel();
-        lastFailure = new DouyinApiError("抖音接口暂时不可用，请稍后重试。", "UPSTREAM_ERROR", {
-          endpoint: path,
-          status: response.status,
-        });
-        if (attempt < attempts) {
-          await retryDelay(attempt);
-          continue;
+        if (!text.trim() && response.status < 500) {
+          throw new DouyinApiError(
+            "抖音返回空响应，请在浏览器完成验证后继续；无需重复保存凭证。",
+            "ANTI_BOT", { endpoint: path, status: response.status },
+          );
         }
-        throw lastFailure;
-      }
-
-      const text = await response.text();
-      if (!text.trim()) {
-        lastFailure = new DouyinApiError(
-          "抖音返回空响应，当前请求触发了反爬验证，请稍后重试。",
-          "ANTI_BOT",
-          { endpoint: path, status: response.status },
-        );
-        if (attempt < attempts) {
-          await retryDelay(attempt);
-          continue;
+        if (response.status >= 500) {
+          if (attempt < attempts) {
+            await delay(exponentialRetryDelay(attempt, 500, 5_000), undefined, { signal });
+            continue;
+          }
+          throw new DouyinApiError(
+            "抖音接口暂时不可用，请稍后重试。",
+            "UPSTREAM_ERROR",
+            { endpoint: path, status: response.status },
+          );
         }
-        throw lastFailure;
-      }
-
-      const payload = parseJson(text);
-      if (!response.ok) {
+        const payload = parseJson(text);
+        if (payload) policy.observePayload("douyin", payload);
         const upstreamCode = payload ? readNumber(payload.status_code) : undefined;
-        if (isLoginRequired(payload)) {
-          throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED", {
-            endpoint: path,
-            status: response.status,
-            upstreamCode,
-          });
+        if (payload && (
+          upstreamCode === 2483 ||
+          /请先登录|用户未登录/u.test(String(payload.status_msg ?? ""))
+        )) {
+          throw new DouyinApiError(
+            "访问凭证已失效，请重新获取。", "LOGIN_REQUIRED",
+            { endpoint: path, status: response.status, upstreamCode },
+          );
         }
-        throw new DouyinApiError("抖音接口暂时不可用，请稍后重试。", "UPSTREAM_ERROR", {
-          endpoint: path,
-          status: response.status,
-          upstreamCode,
-        });
+        if (!response.ok || !payload || (upstreamCode !== undefined && upstreamCode !== 0)) {
+          throw new DouyinApiError(
+            "抖音接口响应异常，请稍后重试。", "UPSTREAM_ERROR",
+            { endpoint: path, status: response.status, upstreamCode },
+          );
+        }
+        return payload;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof OpenApiPlatformCooldownError) {
+          throw new DouyinApiError(
+            "抖音暂时限制访问，请稍后继续；无需重复保存凭证。", "RATE_LIMITED",
+            { endpoint: path, retryAfterSeconds: error.retryAfterSeconds },
+          );
+        }
+        if (error instanceof DouyinPageBridgeError) {
+          throw new DouyinApiError(error.message, "BROWSER_SESSION_UNAVAILABLE", { endpoint: path });
+        }
+        throw error;
       }
-      if (!payload) {
-        throw new DouyinApiError("抖音响应格式异常。", "UPSTREAM_ERROR", {
-          endpoint: path,
-          status: response.status,
-        });
-      }
-      if (isLoginRequired(payload)) {
-        throw new DouyinApiError("访问凭证已失效，请重新获取。", "LOGIN_REQUIRED", {
-          endpoint: path,
-          status: response.status,
-          upstreamCode: readNumber(payload.status_code),
-        });
-      }
-      return payload;
     }
-
-    throw lastFailure ?? new DouyinApiError("抖音接口暂时不可用，请稍后重试。", "UPSTREAM_ERROR");
   }
 
   function query(): Record<string, string> {
-    return {
-      device_platform: "webapp",
-      aid: "6383",
-      channel: "channel_pc_web",
-      update_version_code: "170400",
-      pc_client_type: "1",
-      pc_libra_divert: "Windows",
-      version_code: "290100",
-      version_name: "29.1.0",
-      cookie_enabled: "true",
-      screen_width: "1536",
-      screen_height: "864",
-      browser_language: "zh-CN",
-      browser_platform: "Win32",
-      browser_name: "Chrome",
-      browser_version: "139.0.0.0",
-      browser_online: "true",
-      engine_name: "Blink",
-      engine_version: "139.0.0.0",
-      os_name: "Windows",
-      os_version: "10",
-      cpu_core_num: "16",
-      device_memory: "8",
-      platform: "PC",
-      downlink: "10",
-      effective_type: "4g",
-      round_trip_time: "200",
-      support_h265: "1",
-      support_dash: "1",
-      uifid: "",
-      msToken,
-    };
+    return { device_platform: "webapp", aid: "6383", channel: "channel_pc_web" };
   }
-
   async function getSelfProfile(attempts = 3): Promise<Record<string, unknown>> {
-    return readRecord((await request("/aweme/v1/web/user/profile/self/", query(), attempts)).user);
+    const payload = await request("/aweme/v1/web/user/profile/self/", query(), attempts);
+    return readRecord(payload.user) ?? {};
   }
-
   return {
     getSelfProfile,
     query,
@@ -247,75 +188,20 @@ export function normalizeCookie(value: string): string {
   return value.split(";").map((part) => part.trim()).filter(Boolean).join("; ");
 }
 
-function signRequest(url: string, body: string): { url: string; userAgent: string } {
-  try {
-    return signABogusUrl(url, DEFAULT_USER_AGENT, body);
-  } catch {
-    return signDouyinUrl(url, DEFAULT_USER_AGENT);
-  }
-}
-
-function buildUrl(path: string, params: Record<string, string | number>): string {
-  const url = new URL(path, DOUYIN_BASE_URL);
-  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-  return url.toString();
-}
-
-function appendCookie(cookie: string, key: string, value: string): string {
-  return parseCookie(cookie)[key] ? cookie : `${cookie}; ${key}=${value}`;
-}
-
-function stringifyParams(params: Record<string, string | number>): Record<string, string> {
-  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)]));
-}
-
-function parseCookie(cookie: string): Record<string, string> {
-  const entries: Record<string, string> = {};
-  for (const part of cookie.split(";")) {
-    const index = part.indexOf("=");
-    if (index <= 0) continue;
-    const key = part.slice(0, index).trim();
-    const value = part.slice(index + 1).trim();
-    if (key && value) entries[key] = value;
-  }
-  return entries;
-}
-
-function hasLoginCookie(cookies: Record<string, string>): boolean {
-  return Boolean(cookies.sessionid || cookies.sessionid_ss || cookies.sid_guard || cookies.sid_tt);
-}
-
 function readNumber(value: unknown): number | undefined {
-  const number = typeof value === "number" ? value : Number(value);
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
 }
-
-function isLoginRequired(payload: Record<string, unknown> | null): boolean {
-  if (!payload) return false;
-  const statusCode = Number(payload.status_code ?? 0);
-  const message = String(payload.status_msg ?? "");
-  return statusCode === 2483 || message.includes("请先登录") || message.includes("用户未登录");
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
-
 function parseJson(value: string): Record<string, unknown> | null {
   try {
-    return readRecord(JSON.parse(value) as unknown, null);
+    return readRecord(JSON.parse(value));
   } catch {
     return null;
   }
-}
-
-function readRecord(value: unknown): Record<string, unknown>;
-function readRecord(value: unknown, fallback: null): Record<string, unknown> | null;
-function readRecord(
-  value: unknown,
-  fallback: Record<string, unknown> | null = {},
-): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : fallback;
-}
-
-async function retryDelay(attempt: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, exponentialRetryDelay(attempt, 500, 5_000)));
 }

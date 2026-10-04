@@ -1,11 +1,12 @@
-import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { runFfmpegProcess } from "./ffmpeg-runner";
+
+const runtimeRequire = process.getBuiltinModule("module").createRequire(/* turbopackIgnore: true */ import.meta.url);
 
 const BILIBILI_REFERER = "https://www.bilibili.com/";
 const DOUYIN_REFERER = "https://www.douyin.com/";
@@ -15,7 +16,6 @@ const MEDIA_USER_AGENT =
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 600_000;
 const FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS = 600_000;
 const FFMPEG_AUDIO_PROBE_TIMEOUT_MS = 60_000;
-const FFMPEG_STDERR_TAIL_CHARS = 8_192;
 const MAX_TRANSCRIBE_AUDIO_DURATION_SECONDS = 12 * 60 * 60;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -38,7 +38,9 @@ export type TranscribableAudioFile = {
 export class AudioTranscriptionLimitError extends Error {}
 
 export function resolveBundledFfmpegPath(): string {
-  return ffmpegInstaller.path;
+  // Native runtime loading avoids tracing the installer's legacy dynamic filesystem search.
+  const installer = runtimeRequire("@ffmpeg-installer/ffmpeg") as { path: string };
+  return installer.path;
 }
 
 /** Proxies an upstream media response without retaining it on the application server. */
@@ -57,9 +59,12 @@ export async function fetchRemoteMedia(
 
   let lastError: unknown;
   for (const url of urls) {
+    options.signal?.throwIfAborted();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), MEDIA_DOWNLOAD_TIMEOUT_MS);
-    const signal = linkedAbortSignal(controller.signal, options.signal);
+    const signal = options.signal
+      ? AbortSignal.any([controller.signal, options.signal])
+      : controller.signal;
     try {
       const response = await fetch(url, {
         headers: { ...mediaDownloadHeaders(options.mediaSource), ...(options.range ? { range: options.range } : {}) },
@@ -71,6 +76,7 @@ export async function fetchRemoteMedia(
       await response.body?.cancel();
       lastError = new Error(`HTTP ${response.status}`);
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason;
       lastError = error;
     } finally {
       clearTimeout(timer);
@@ -93,7 +99,7 @@ export async function createTranscribableAudioFileFromNode(
   try {
     await pipeline(source, createWriteStream(inputPath));
     const durationSeconds = await extractAudioFile(inputPath, filePath);
-    const sizeBytes = (await stat(filePath)).size;
+    const sizeBytes = (await stat(/* turbopackIgnore: true */ filePath)).size;
     if (!sizeBytes) throw new Error("ffmpeg 抽取的音频为空。");
     if (sizeBytes > maxBytes) {
       throw new AudioTranscriptionLimitError(limits.sizeLimitMessage ?? "转写的音频大小不能超过 2GB，暂不能提取。");
@@ -115,33 +121,27 @@ export async function createTranscribableAudioFileFromNode(
 }
 
 async function extractAudioFile(inputPath: string, outputPath: string): Promise<number> {
-  const child = spawn(resolveFfmpegPath(), [
-    "-hide_banner", "-loglevel", "error", "-nostdin", "-i", inputPath,
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
-    "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:2", "-nostats", "-y", outputPath,
-  ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-  let stderr = "";
+  let progress = "";
   let durationSeconds = 0;
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
-    durationSeconds = Math.max(durationSeconds, parseFfmpegProgressDurationSeconds(stderr));
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("ffmpeg 抽取音频超时。"));
-    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg 抽取音频失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`));
-    });
+  await runFfmpegProcess({
+    binary: resolveFfmpegPath(),
+    args: [
+      "-hide_banner", "-loglevel", "error", "-nostdin", "-i", inputPath,
+      "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "64k",
+      "-movflags", "+faststart", "-f", "mp4", "-y", outputPath,
+    ],
+    operation: "ffmpeg 抽取音频",
+    timeoutMs: FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS,
+    onStderr: (chunk) => {
+      progress = `${progress}${chunk}`;
+      const lineEnd = progress.lastIndexOf("\n");
+      if (lineEnd < 0) {
+        progress = progress.slice(-8_192);
+        return;
+      }
+      durationSeconds = Math.max(durationSeconds, parseFfmpegProgressDurationSeconds(progress.slice(0, lineEnd)));
+      progress = progress.slice(lineEnd + 1);
+    },
   });
   return durationSeconds;
 }
@@ -154,19 +154,27 @@ export type MuxedVideoFile = {
 };
 
 export async function muxVideoAndAudioToFile(
-  video: Readable,
-  audio: Readable,
+  video: Readable | string,
+  audio: Readable | string,
   limits: { maxAudioBytes?: number; maxVideoBytes?: number } = {},
 ): Promise<MuxedVideoFile> {
   const directory = await mkdtemp(join(tmpdir(), "echolens-mux-"));
-  const videoPath = join(directory, "video.mp4");
-  const audioPath = join(directory, "audio.m4a");
   const outputPath = join(directory, "output.mp4");
   try {
-    await Promise.all([
-      pipeline(video, byteLimitStream(limits.maxVideoBytes, "DASH 视频"), createWriteStream(videoPath)),
-      pipeline(audio, byteLimitStream(limits.maxAudioBytes, "DASH 音频"), createWriteStream(audioPath)),
-    ]);
+    const inputs = [
+      prepareMuxInput(video, join(directory, "video.mp4"), limits.maxVideoBytes, "DASH 视频"),
+      prepareMuxInput(audio, join(directory, "audio.m4a"), limits.maxAudioBytes, "DASH 音频"),
+    ];
+    let videoPath: string;
+    let audioPath: string;
+    try {
+      [videoPath, audioPath] = await Promise.all(inputs);
+    } catch (error) {
+      if (video instanceof Readable) video.destroy();
+      if (audio instanceof Readable) audio.destroy();
+      await Promise.allSettled(inputs);
+      throw error;
+    }
     await runFfmpeg([
       "-hide_banner", "-loglevel", "error", "-nostdin",
       "-i", videoPath, "-i", audioPath,
@@ -178,7 +186,7 @@ export async function muxVideoAndAudioToFile(
       cleanup: () => rm(directory, { force: true, recursive: true }),
       contentType: "video/mp4",
       filePath: outputPath,
-      sizeBytes: (await stat(outputPath)).size,
+      sizeBytes: (await stat(/* turbopackIgnore: true */ outputPath)).size,
     };
   } catch (error) {
     await rm(directory, { force: true, recursive: true });
@@ -186,16 +194,15 @@ export async function muxVideoAndAudioToFile(
   }
 }
 
-export async function muxVideoAndAudioFromNode(
-  video: Readable,
-  audio: Readable,
-): Promise<Uint8Array> {
-  const file = await muxVideoAndAudioToFile(video, audio);
-  try {
-    return new Uint8Array(await readFile(file.filePath));
-  } finally {
-    await file.cleanup();
+async function prepareMuxInput(source: Readable | string, destination: string, maxBytes: number | undefined, label: string): Promise<string> {
+  if (typeof source === "string") {
+    if (maxBytes !== undefined && (await stat(/* turbopackIgnore: true */ source)).size > maxBytes) {
+      throw new Error(`${label}超过临时缓存上限。`);
+    }
+    return source;
   }
+  await pipeline(source, byteLimitStream(maxBytes, label), createWriteStream(destination));
+  return destination;
 }
 
 function byteLimitStream(maxBytes: number | undefined, label: string): Transform {
@@ -213,29 +220,11 @@ function byteLimitStream(maxBytes: number | undefined, label: string): Transform
 }
 
 async function runFfmpeg(args: string[], operation: string): Promise<void> {
-  const child = spawn(resolveFfmpegPath(), args, {
-    windowsHide: true,
-    stdio: ["ignore", "ignore", "pipe"],
-  });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
-  });
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`${operation}超时。`));
-    }, FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS);
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0) resolve();
-      else reject(new Error(`${operation}失败：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`));
-    });
+  await runFfmpegProcess({
+    args,
+    binary: resolveFfmpegPath(),
+    operation,
+    timeoutMs: FFMPEG_AUDIO_EXTRACT_TIMEOUT_MS,
   });
 }
 
@@ -248,40 +237,15 @@ export async function probeTranscribableAudioFromUrl(
   sourceUrl: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(resolveFfmpegPath(), [
+  await runFfmpegProcess({
+    binary: resolveFfmpegPath(),
+    args: [
       "-hide_banner", "-loglevel", "error", "-nostdin", "-i", sourceUrl,
       "-map", "0:a:0", "-frames:a", "1", "-f", "null", "-",
-    ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", abort);
-      if (error) reject(error);
-      else resolve();
-    };
-    const abort = () => {
-      child.kill("SIGTERM");
-      finish(abortError());
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish(new Error("OSS 原声音频探测超时。"));
-    }, FFMPEG_AUDIO_PROBE_TIMEOUT_MS);
-
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr = tailText(`${stderr}${chunk}`, FFMPEG_STDERR_TAIL_CHARS);
-    });
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => finish(code === 0
-      ? undefined
-      : new Error(`OSS 原声音频无法解码：${stderr.slice(-600) || `ffmpeg exited with code ${code}`}`)));
-    if (signal?.aborted) abort();
-    else signal?.addEventListener("abort", abort, { once: true });
+    ],
+    operation: "OSS 原声音频探测",
+    signal,
+    timeoutMs: FFMPEG_AUDIO_PROBE_TIMEOUT_MS,
   });
 }
 
@@ -290,7 +254,7 @@ function normalizeRemoteMediaSource(source: RemoteMediaSource): string[] {
   return Array.from(new Set(urls.map((url) => url.trim()).filter((url) => /^https?:\/\//u.test(url))));
 }
 
-function mediaDownloadHeaders(mediaSource: MediaSourcePlatform = "douyin"): Record<string, string> {
+export function mediaDownloadHeaders(mediaSource: MediaSourcePlatform = "douyin"): Record<string, string> {
   return {
     accept: "video/mp4,audio/*,*/*;q=0.8",
     referer: mediaSource === "bilibili" ? BILIBILI_REFERER : DOUYIN_REFERER,
@@ -303,23 +267,4 @@ function parseFfmpegProgressDurationSeconds(chunk: string): number {
     const value = line.match(/^out_time=(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)$/u);
     return value ? Math.max(max, Number(value[1]) * 3600 + Number(value[2]) * 60 + Number(value[3])) : max;
   }, 0);
-}
-
-function tailText(value: string, maxLength: number): string {
-  return value.length > maxLength ? value.slice(-maxLength) : value;
-}
-
-function linkedAbortSignal(...signals: Array<AbortSignal | undefined>): AbortSignal {
-  const controller = new AbortController();
-  for (const signal of signals.filter((value): value is AbortSignal => Boolean(value))) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-  return controller.signal;
-}
-
-function abortError(): Error {
-  const error = new Error("媒体处理已取消。");
-  error.name = "AbortError";
-  return error;
 }

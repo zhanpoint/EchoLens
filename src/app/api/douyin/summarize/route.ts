@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createJsonSseResponse } from "@/lib/http/sse-response";
 import { z } from "zod";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import { streamSummarizeTranscript } from "@/lib/dashscope/summary";
@@ -75,103 +76,51 @@ function streamSummary(input: {
   transcript: string;
   userId: string;
 }): Response {
-  const encoder = new TextEncoder();
-  let closed = false;
-  let closeResponse: (() => void) | undefined;
-  const upstreamAbortController = new AbortController();
-  const abortUpstream = () => {
-    if (!upstreamAbortController.signal.aborted) {
-      upstreamAbortController.abort();
-    }
-  };
-  const handleInputAbort = () => {
-    abortUpstream();
-    closeResponse?.();
-  };
-  if (input.signal?.aborted) {
-    abortUpstream();
-  } else {
-    input.signal?.addEventListener("abort", handleInputAbort, { once: true });
-  }
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const close = () => {
-        if (!closed) {
-          closed = true;
-          controller.close();
-        }
-      };
-      closeResponse = close;
-      const send = (event: SummaryEvent) => {
-        if (closed || input.signal?.aborted) {
-          return;
-        }
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      };
-
-      try {
-        const result = await streamSummarizeTranscript({
-          apiKey: input.apiKey,
-          model: input.model,
-          prompt: input.prompt,
-          transcript: input.transcript,
-          onDelta: (delta) => send({ type: "delta", value: delta }),
-          onReset: () => send({ type: "replace", value: "" }),
-          signal: upstreamAbortController.signal,
-        });
-        if (upstreamAbortController.signal.aborted) {
-          return;
-        }
-
-        if (result.ok) {
-          const summary = input.historyRecordId && input.promptId && input.promptTitle
-            ? await insertTranscriptHistorySummary({
-                content: result.content,
-                historyRecordId: input.historyRecordId,
-                id: createHistorySummaryId(),
-                promptId: input.promptId,
-                promptTitle: input.promptTitle,
-                userId: input.userId,
-              })
-            : undefined;
-          if (upstreamAbortController.signal.aborted) {
-            return;
-          }
-          send({ summary, type: "done", value: result.content });
-        } else {
-          send({ type: "error", error: result.detail, code: result.code });
-        }
-      } catch (error) {
-        if (upstreamAbortController.signal.aborted) {
-          return;
-        }
-        logServerError("douyin.summarize", error);
-        const networkFailure = error instanceof NetworkRetryExhaustedError;
-        send({
-          type: "error",
-          error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "AI处理失败，请稍后重试。",
-          ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
-        });
-      } finally {
-        input.signal?.removeEventListener("abort", handleInputAbort);
-        closeResponse = undefined;
-        close();
+  return createJsonSseResponse<SummaryEvent>(input.signal, async ({ send, signal }) => {
+    try {
+      const result = await streamSummarizeTranscript({
+        apiKey: input.apiKey,
+        model: input.model,
+        prompt: input.prompt,
+        transcript: input.transcript,
+        onDelta: (delta) => send({ type: "delta", value: delta }),
+        onReset: () => send({ type: "replace", value: "" }),
+        signal,
+      });
+      if (signal.aborted) {
+        return;
       }
-    },
-    cancel() {
-      closed = true;
-      abortUpstream();
-      input.signal?.removeEventListener("abort", handleInputAbort);
-      closeResponse = undefined;
-    },
-  });
 
-  return new Response(stream, {
-    headers: {
-      "cache-control": "no-cache, no-transform",
-      "content-type": "text/event-stream; charset=utf-8",
-      "x-accel-buffering": "no",
-    },
+      if (result.ok) {
+        const summary = input.historyRecordId && input.promptId && input.promptTitle
+          ? await insertTranscriptHistorySummary({
+              content: result.content,
+              historyRecordId: input.historyRecordId,
+              id: createHistorySummaryId(),
+              promptId: input.promptId,
+              promptTitle: input.promptTitle,
+              userId: input.userId,
+            })
+          : undefined;
+        if (signal.aborted) {
+          return;
+        }
+        send({ summary, type: "done", value: result.content });
+      } else {
+        send({ type: "error", error: result.detail, code: result.code });
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        return;
+      }
+      logServerError("douyin.summarize", error);
+      const networkFailure = error instanceof NetworkRetryExhaustedError;
+      send({
+        type: "error",
+        error: networkFailure ? NETWORK_RETRY_ERROR_MESSAGE : "AI处理失败，请稍后重试。",
+        ...(networkFailure ? { code: NETWORK_RETRY_ERROR_CODE } : {}),
+      });
+    }
   });
 }
 

@@ -66,8 +66,11 @@ type AssetContext = {
   workId: string;
   workKey: string;
 };
+type StoredBilibiliAudio = { contentType: string; objectKey: string; sizeBytes: number };
+const bilibiliAudioTasks = new Map<string, Promise<StoredBilibiliAudio>>();
 
 export async function ensureHistoryAsset(input: {
+  signal?: AbortSignal;
   assetKind: HistoryAssetKind;
   forceRefresh?: boolean;
   historyRecordId: string;
@@ -86,7 +89,7 @@ export async function ensureHistoryAsset(input: {
 
   return mediaSourceFromWorkKey(history.workKey) === "bilibili"
     ? await refreshBilibiliAsset(history, input.assetKind, input.userId)
-    : await refreshDouyinAsset(history, input.assetKind, input.userId);
+    : await refreshDouyinAsset(history, input.assetKind, input.userId, input.signal);
 }
 
 export async function readHistoryUpstreamAssets(input: {
@@ -200,6 +203,7 @@ async function refreshDouyinAsset(
   history: TranscriptHistoryRecord,
   assetKind: HistoryAssetKind,
   userId: string,
+  signal?: AbortSignal,
 ): Promise<AvailableHistoryAsset | null> {
   const [settings, credentialState] = await Promise.all([
     readUserSetting(userId, "download"),
@@ -211,6 +215,7 @@ async function refreshDouyinAsset(
     videoQuality,
     undefined,
     credentialState.status === "valid" ? credentialState.cookie : "",
+    signal,
   );
   try {
     const snapshot = createDouyinResourceSnapshot(lease.metadata, videoQuality);
@@ -437,8 +442,16 @@ function upstreamAsset(
 async function ensureBilibiliOriginalAudio(
   workId: string,
   stream: BilibiliMediaStream,
-): Promise<{ contentType: string; objectKey: string; sizeBytes: number }> {
+): Promise<StoredBilibiliAudio> {
   const objectKey = `echolens/media/video/${workId}/audio.${audioExtension(stream)}`;
+  const existing = bilibiliAudioTasks.get(objectKey);
+  if (existing) return existing;
+  const task = storeBilibiliOriginalAudio(objectKey, stream).finally(() => bilibiliAudioTasks.delete(objectKey));
+  bilibiliAudioTasks.set(objectKey, task);
+  return task;
+}
+
+async function storeBilibiliOriginalAudio(objectKey: string, stream: BilibiliMediaStream): Promise<StoredBilibiliAudio> {
   const existing = await getOssObjectInfo(objectKey);
   if (existing?.contentLength) {
     return {

@@ -5,13 +5,17 @@ const mocks = vi.hoisted(() => ({
   createOssSignedUrlWithExpiration: vi.fn(),
   prepareDouyinOriginalAudio: vi.fn(),
   ensureTemporaryMuxedVideo: vi.fn(),
+  fetchRemoteMedia: vi.fn(),
   getOssObjectInfo: vi.fn(),
   leaseRelease: vi.fn(),
   readDouyinCredentialState: vi.fn(),
   readTranscriptHistoryRecord: vi.fn(),
   readUserSetting: vi.fn(),
+  putOssStream: vi.fn(),
   updateTranscriptHistoryRecordMetadata: vi.fn(),
 }));
+
+vi.mock("@/lib/media/audio", () => ({ fetchRemoteMedia: mocks.fetchRemoteMedia }));
 
 vi.mock("@/lib/douyin/asset-bundle", () => ({
   douyinOriginalAudioObjectKey: vi.fn(() => "echolens/media/video/7649250336875613449/audio.m4a"),
@@ -23,7 +27,7 @@ vi.mock("@/lib/user-settings", () => ({ readUserSetting: mocks.readUserSetting }
 vi.mock("@/lib/oss/object-store", () => ({
   createOssSignedUrlWithExpiration: mocks.createOssSignedUrlWithExpiration,
   getOssObjectInfo: mocks.getOssObjectInfo,
-  putOssStream: vi.fn(),
+  putOssStream: mocks.putOssStream,
 }));
 vi.mock("@/lib/media/temporary-video-cache", () => ({
   ensureTemporaryMuxedVideo: mocks.ensureTemporaryMuxedVideo,
@@ -236,6 +240,27 @@ describe("single-record transcript resources", () => {
       mediaSource: "bilibili",
       videoUrls: ["https://bilibili.example/video"],
     });
+  });
+
+  it("shares a Bilibili audio upload across concurrent snapshot requests", async () => {
+    let uploaded = false;
+    mocks.getOssObjectInfo.mockImplementation(async () => uploaded ? { contentLength: 3, contentType: "audio/mp4" } : null);
+    mocks.fetchRemoteMedia.mockImplementation(async () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-length": "3" } }));
+    mocks.putOssStream.mockImplementation(async () => { uploaded = true; });
+    const input = {
+      assetKind: "originalAudio" as const,
+      historyRecordId: "history-1",
+      metadata: { durationSeconds: 12 } as never,
+      selection: { audio: { id: 30280, bandwidth: 128000, urls: ["https://bilibili.example/audio"] }, video: {} as never },
+      snapshot: { authorName: "作者", caption: "标题", dashAudioUrls: [], dashVideoUrls: [], durationSeconds: 12, mediaQuality: "64", progressiveVideoUrls: [], refreshedAt: 1, source: "bilibili" as const },
+      userId: "user-1",
+      workId: "BV1test:2",
+      workKey: "bilibili:video:BV1test:2",
+    };
+    const results = await Promise.all(Array.from({ length: 10 }, () => prepareBilibiliSnapshotAsset(input)));
+    expect(results).toHaveLength(10);
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledOnce();
+    expect(mocks.putOssStream).toHaveBeenCalledOnce();
   });
 
   it("falls back to the official progressive video URL when DASH muxing fails", async () => {

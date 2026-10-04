@@ -15,7 +15,7 @@ class DownloadDirectoryTest(unittest.TestCase):
             authorName: '作者:名称',
             contentType: 'video/mp4',
             workId: '123456',
-            workTitle: '作品/标题',
+            caption: '作品/标题',
           };
           const now = new Date(2026, 6, 14, 9, 30, 0);
           console.log(JSON.stringify({

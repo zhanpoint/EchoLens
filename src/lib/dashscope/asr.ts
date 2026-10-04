@@ -10,7 +10,7 @@ import { streamTranscriptPostprocess } from "@/lib/dashscope/transcript-postproc
 import {
   DASHSCOPE_FIXED_BASE_URL,
 } from "@/lib/dashscope/fixed-config";
-import { DEFAULT_DASHSCOPE_MODELS } from "@/lib/dashscope/model-config";
+import { DEFAULT_DASHSCOPE_MODELS, DASHSCOPE_ASR_FLASH_MODEL, DASHSCOPE_ASR_FLASH_MAX_SECONDS } from "@/lib/dashscope/model-config";
 import { readDashScopeApiKeyForUser } from "@/lib/dashscope/user-credential";
 import {
   attachAsrTaskProviderTask,
@@ -19,6 +19,7 @@ import {
   markAsrTaskFailed,
   markAsrTaskRunning,
   markAsrTaskSucceeded,
+  checkpointAsrTaskResult,
   readAsrTask,
   readRunningAsrTask,
   reserveAsrTask,
@@ -35,14 +36,11 @@ type DashScopeConfig = {
 };
 
 export type DashScopeAsrModel = string;
-export type DashScopeAsrModelProfile = "e1" | "e2" | "e3";
+export type DashScopeAsrModelProfile = "e1";
 
 export type DashScopeAsrOptions = {
   diarizationEnabled?: boolean;
-  enableItn?: boolean;
   model: DashScopeAsrModel;
-  profile: DashScopeAsrModelProfile;
-  specialWordFilter?: DashScopeSpecialWordFilter;
   speakerCount?: number;
 };
 
@@ -62,19 +60,10 @@ export type DashScopeAsrRuntimeOptions = {
   signal?: AbortSignal;
 };
 
-export type DashScopeSpecialWordFilter = {
-  filter_with_empty?: DashScopeSensitiveWordList;
-  filter_with_signed?: DashScopeSensitiveWordList;
-  system_reserved_filter?: boolean;
-};
 export type DashScopeAsrAudio = {
   durationSeconds?: number;
   objectKey: string;
   signedUrl: string;
-};
-
-type DashScopeSensitiveWordList = {
-  word_list: string[];
 };
 
 type TranscriptPayload = {
@@ -89,6 +78,7 @@ export type DashScopeAsrJobResult =
 const DASH_SCOPE_REQUEST_TIMEOUT_MS = 60_000;
 const DASH_SCOPE_SUBMIT_TIMEOUT_MS = 15_000;
 const DASH_SCOPE_QUERY_TIMEOUT_MS = 20_000;
+const DASH_SCOPE_FLASH_TIMEOUT_MS = 120_000;
 export const PLATFORM_ASR_QUOTA_SECONDS = 60 * 60;
 const NO_SPEECH_DETAIL = "未检测到可识别的语音。暂不支持转录纯静音、仅背景噪声或没有人声的音频。";
 const NO_SPEECH_TASK_CODES = new Set([
@@ -150,6 +140,7 @@ export async function submitDashScopeAsrJob(
   }
 
   let reservedJobId: string | undefined;
+  let providerResultSaved = false;
   try {
     const credentialSource = runtimeOptions.credentialSource ?? "platform";
     const config = await readDashScopeConfig(
@@ -194,6 +185,17 @@ export async function submitDashScopeAsrJob(
       throw new AsrQuotaExceededError();
     }
     reservedJobId = jobId;
+    if (model === DASHSCOPE_ASR_FLASH_MODEL) {
+      const transcript = await recognizeFlashAudio(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
+      if (!transcript) {
+        await markAsrTaskFailed(jobId, NO_SPEECH_DETAIL);
+        return { status: "failed", result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL } };
+      }
+      const rawResult = { ...transcript, ok: true as const, asrModel: model };
+      providerResultSaved = await checkpointAsrTaskResult(jobId, rawResult);
+      if (!providerResultSaved) return { status: "canceled", result: { ok: false, code: "error", detail: "转录任务已取消。" } };
+      return await settleTranscript(config, taskInput, transcript, runtimeOptions);
+    }
     const taskId = await submitDashScopeAsrTask(config, audio.signedUrl, normalizedOptions, runtimeOptions.signal);
     if (!(await attachAsrTaskProviderTask({ id: jobId, taskId }))) {
       await cancelDashScopeAsrTask(config, taskId).catch(() => undefined);
@@ -201,7 +203,7 @@ export async function submitDashScopeAsrJob(
     }
     return { status: "running", historyContext, jobId };
   } catch (error) {
-    if (reservedJobId) {
+    if (reservedJobId && !providerResultSaved) {
       const detail = error instanceof Error ? error.message : "转录任务提交失败。";
       await markAsrTaskFailed(reservedJobId, detail).catch(() => undefined);
     }
@@ -210,7 +212,7 @@ export async function submitDashScopeAsrJob(
     }
     return {
       status: "failed",
-      fallbackEligible: isFallbackEligibleRequestError(error),
+      fallbackEligible: canFallbackSubmission(error, options.model),
       result: toProviderFailure(error),
     };
   }
@@ -240,6 +242,13 @@ export async function transcribeDashScopeAsrOnce(
   const normalizedOptions = normalizeDashScopeAsrOptions(options);
   let taskId: string | undefined;
   try {
+    if (normalizedOptions.model === DASHSCOPE_ASR_FLASH_MODEL) {
+      const transcript = await recognizeFlashAudio(config, fileUrl, normalizedOptions, runtimeOptions.signal);
+      if (!transcript) return { result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL } };
+      return { result: await postprocessTranscript({ apiKey: config.apiKey, model: normalizedOptions.model, runtimeOptions,
+        title: runtimeOptions.title, authorName: runtimeOptions.authorName,
+        transcript: { ...transcript, ok: true, asrModel: normalizedOptions.model } }) };
+    }
     taskId = await submitDashScopeAsrTask(config, fileUrl, normalizedOptions, runtimeOptions.signal);
     for (;;) {
       await waitForNextAsrPoll(runtimeOptions.signal);
@@ -287,7 +296,7 @@ export async function transcribeDashScopeAsrOnce(
       throw error;
     }
     return {
-      ...(!taskId && isFallbackEligibleRequestError(error) ? { fallbackEligible: true } : {}),
+      ...(!taskId && canFallbackSubmission(error, options.model) ? { fallbackEligible: true } : {}),
       result: toProviderFailure(error),
     };
   }
@@ -357,34 +366,7 @@ async function settleDashScopeAsrTask(
         result: { ok: false, code: "no_speech", detail: NO_SPEECH_DETAIL },
       };
     }
-    const model = job.model;
-    const result = await postprocessTranscript({
-      apiKey: config.apiKey,
-      model,
-      runtimeOptions,
-      title: job.historyContext?.work.caption,
-      authorName: job.historyContext?.work.authorName,
-      transcript: {
-        asrModel: model,
-        ok: true,
-        content: transcript.content,
-        emotions: transcript.emotions,
-        transcriptSegments: transcript.transcriptSegments,
-      },
-    });
-    if (result.ok) {
-      if ((await markAsrTaskSucceeded(job.id)) === false) {
-        return {
-          status: "canceled",
-          historyContext: job.historyContext,
-          result: { ok: false, code: "error", detail: "转录任务已取消。" },
-        };
-      }
-      return { status: "successed", historyContext: job.historyContext, result };
-    }
-
-    await markAsrTaskFailed(job.id, result.detail);
-    return { status: "failed", historyContext: job.historyContext, result };
+    return settleTranscript(config, job, transcript, runtimeOptions);
   }
 
   if (status === "CANCELED") {
@@ -409,8 +391,43 @@ async function settleDashScopeAsrTask(
   return { status: "failed", historyContext: job.historyContext, result: { ok: false, code: "error", detail } };
 }
 
-export async function refreshDashScopeAsrJob(userId: string, jobId: string): Promise<DashScopeAsrJobResult | null> {
-  return await refreshDashScopeAsrJobWithOptions(userId, jobId);
+async function settleTranscript(
+  config: DashScopeConfig,
+  job: Pick<StoredAsrTask, "id" | "userId" | "model" | "historyContext">,
+  transcript: TranscriptPayload,
+  runtimeOptions: DashScopeAsrRuntimeOptions,
+): Promise<DashScopeAsrJobResult> {
+  const model = job.model;
+  const result = await postprocessTranscript({
+    apiKey: config.apiKey,
+    model,
+    runtimeOptions,
+    title: job.historyContext?.work.caption,
+    authorName: job.historyContext?.work.authorName,
+    transcript: {
+      asrModel: model,
+      ok: true,
+      content: transcript.content,
+      emotions: transcript.emotions,
+      transcriptSegments: transcript.transcriptSegments,
+    },
+  });
+  if (result.ok) {
+    if ((await markAsrTaskSucceeded(job.id, result)) === false) {
+      const settled = await readAsrTask({ id: job.id, userId: job.userId });
+      if (settled?.status === "succeeded" && settled.result) {
+        return { status: "successed", historyContext: settled.historyContext, result: settled.result };
+      }
+      return {
+        status: "canceled",
+        historyContext: job.historyContext,
+        result: { ok: false, code: "error", detail: "转录任务已取消。" },
+      };
+    }
+    return { status: "successed", historyContext: job.historyContext, result };
+  }
+
+  return { status: "failed", historyContext: job.historyContext, result };
 }
 
 export async function refreshDashScopeAsrJobWithOptions(
@@ -433,14 +450,24 @@ export async function refreshDashScopeAsrJobWithOptions(
     runtimeOptions.apiKeys === undefined,
   );
   try {
-    const payload = await queryDashScopeAsrTask(config, job.taskId, runtimeOptions.signal);
-    return await settleDashScopeAsrTask(config, job, payload, {
+    const options: DashScopeAsrRuntimeOptions = {
       ...runtimeOptions,
       postprocess: {
         ...runtimeOptions.postprocess,
         model: runtimeOptions.postprocessModels?.[source] ?? runtimeOptions.postprocess?.model,
       },
-    });
+    };
+    if (job.model === DASHSCOPE_ASR_FLASH_MODEL) {
+      if (job.result) return await settleTranscript(config, job, job.result, options);
+      if (Date.now() - job.updatedAt >= DASH_SCOPE_FLASH_TIMEOUT_MS) {
+        const detail = "短音频提交确认中断，无法查询服务商结果；请先核对服务商记录，再决定是否重新转录。";
+        await markAsrTaskFailed(job.id, detail);
+        return { status: "failed", result: { ok: false, code: "error", detail } };
+      }
+      return readStoredAsrTaskResult(job);
+    }
+    const payload = await queryDashScopeAsrTask(config, job.taskId, runtimeOptions.signal);
+    return await settleDashScopeAsrTask(config, job, payload, options);
   } catch (error) {
     if (runtimeOptions.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
       throw error;
@@ -469,7 +496,7 @@ export async function cancelDashScopeAsrJob(
   if (job.status === "running") {
     await markAsrTaskCanceled(job.id);
   }
-  if (!job.taskId.startsWith("pending:")) {
+  if (job.model !== DASHSCOPE_ASR_FLASH_MODEL && !job.taskId.startsWith("pending:")) {
     const apiKey = typeof apiKeyOrMap === "string" ? apiKeyOrMap : apiKeyOrMap?.[job.credentialSource];
     const config = await readDashScopeConfig(userId, apiKey, apiKeyOrMap === undefined);
     try {
@@ -496,7 +523,7 @@ async function submitDashScopeAsrTask(
     },
     body: JSON.stringify({
       model: options.model,
-      input: buildDashScopeAsrInput(options, fileUrl),
+      input: { file_urls: [fileUrl] },
       parameters: buildDashScopeAsrParameters(options),
     }),
     signal,
@@ -511,6 +538,32 @@ async function submitDashScopeAsrTask(
     throw new Error("DashScope 未返回任务 ID。");
   }
   return taskId;
+}
+
+export function buildDashScopeFlashRequest(fileUrl: string, options: DashScopeAsrOptions) {
+  return {
+    model: options.model,
+    input: { messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { data: fileUrl } }] }] },
+    parameters: buildDashScopeAsrParameters(options),
+  };
+}
+
+export function parseDashScopeFlashTranscriptPayload(payload: unknown): TranscriptPayload | null {
+  const output = payload && typeof payload === "object" ? (payload as { output?: Record<string, unknown> }).output : undefined;
+  if (!output || typeof output.text !== "string") throw new Error("DashScope 短音频结果格式无效：缺少 output.text。");
+  if (!output.text.trim()) return null;
+  const sentences = Array.isArray(output.sentences) ? output.sentences : output.sentence ? [output.sentence] : [];
+  return buildTranscriptPayload(output.text, sentences.length ? parseTranscriptSegments({ sentences }) : []);
+}
+
+async function recognizeFlashAudio(config: DashScopeConfig, fileUrl: string, options: DashScopeAsrOptions, signal?: AbortSignal) {
+  const response = await dashScopeFetch(config, "/services/aigc/multimodal-generation/generation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(buildDashScopeFlashRequest(fileUrl, options)), signal,
+  }, { retryNetworkErrors: false, timeoutMs: DASH_SCOPE_FLASH_TIMEOUT_MS });
+  const payload = await readJson(response);
+  if (!response.ok) throw DashScopeRequestError.fromResponse(response.status, payload);
+  return parseDashScopeFlashTranscriptPayload(payload);
 }
 
 async function queryDashScopeAsrTask(config: DashScopeConfig, taskId: string, signal?: AbortSignal): Promise<unknown> {
@@ -594,7 +647,7 @@ async function dashScopeFetch(
   config: DashScopeConfig,
   path: string,
   init: RequestInit,
-  retryOptions: { retryNetworkErrors?: boolean } = {},
+  retryOptions: { retryNetworkErrors?: boolean; timeoutMs?: number } = {},
 ): Promise<Response> {
   try {
     return await fetchWithRetry(`${config.baseUrl}${path}`, {
@@ -605,7 +658,7 @@ async function dashScopeFetch(
       },
       retry: {
         retryNetworkErrors: retryOptions.retryNetworkErrors,
-        timeoutMs: init.method === "GET" ? DASH_SCOPE_QUERY_TIMEOUT_MS : DASH_SCOPE_SUBMIT_TIMEOUT_MS,
+        timeoutMs: retryOptions.timeoutMs ?? (init.method === "GET" ? DASH_SCOPE_QUERY_TIMEOUT_MS : DASH_SCOPE_SUBMIT_TIMEOUT_MS),
       },
     });
   } catch (error) {
@@ -621,6 +674,7 @@ async function dashScopeFetch(
 
 function readStoredAsrTaskResult(job: StoredAsrTask): DashScopeAsrJobResult {
   if (job.status === "succeeded") {
+    if (job.result) return { status: "successed", historyContext: job.historyContext, result: job.result };
     return { status: "failed", result: { ok: false, code: "error", detail: "转录任务已完成，请重新发起转录。" } };
   }
   if (job.status === "failed") {
@@ -855,37 +909,15 @@ function normalizeSpeakerId(value: string): string {
 
 export function buildDashScopeAsrParameters(
   options: DashScopeAsrOptions,
-  model = options.model,
 ): Record<string, unknown> {
-  const parameters: Record<string, unknown> = options.profile === "e1"
-    ? {
-        enable_words: false,
-        ...(options.enableItn ? { enable_itn: true } : {}),
-      }
-    : options.profile === "e3"
-      ? {
-          channel_id: [0],
-          ...(options.enableItn ? { enable_itn: true } : {}),
-        }
-      : { channel_id: [0] };
-
+  const flash = options.model === DASHSCOPE_ASR_FLASH_MODEL;
+  const parameters: Record<string, unknown> = flash ? { format: "m4a" } : { channel_id: [0] };
   if (options.diarizationEnabled) {
-    if (options.profile !== "e2" && options.profile !== "e3") {
-      throw new Error(`当前 ASR profile ${options.profile} 的模型 ${model} 不支持说话人分离，请切换到支持说话人分离的 ASR profile。`);
-    }
-    parameters.diarization_enabled = true;
-    if (options.speakerCount !== undefined) {
+    parameters[flash ? "speaker_diarization_enabled" : "diarization_enabled"] = true;
+    if (!flash && options.speakerCount !== undefined) {
       parameters.speaker_count = options.speakerCount;
     }
   }
-
-  if (options.specialWordFilter) {
-    if (options.profile !== "e2") {
-      throw new Error(`当前 ASR profile ${options.profile} 的模型 ${model} 不支持敏感词过滤，请切换到支持敏感词过滤的 ASR profile。`);
-    }
-    parameters.special_word_filter = JSON.stringify(options.specialWordFilter);
-  }
-
   return parameters;
 }
 
@@ -894,71 +926,22 @@ function normalizeDashScopeAsrOptions(
 ): DashScopeAsrOptions {
   const normalized: DashScopeAsrOptions = {
     model: options.model,
-    profile: options.profile,
   };
-
-  if (options.enableItn && (options.profile === "e1" || options.profile === "e3")) {
-    normalized.enableItn = true;
-  }
-
-  if (options.diarizationEnabled && (options.profile === "e2" || options.profile === "e3")) {
+  if (options.diarizationEnabled) {
     normalized.diarizationEnabled = true;
     if (Number.isInteger(options.speakerCount)) {
       normalized.speakerCount = options.speakerCount;
     }
   }
 
-  const specialWordFilter = normalizeSpecialWordFilter(options.specialWordFilter);
-  if (specialWordFilter && options.profile === "e2") {
-    normalized.specialWordFilter = specialWordFilter;
-  }
-
   return normalized;
 }
-
-function normalizeSpecialWordFilter(
-  filter: DashScopeSpecialWordFilter | undefined,
-): DashScopeSpecialWordFilter | undefined {
-  if (!filter) {
-    return undefined;
-  }
-
-  const normalized: DashScopeSpecialWordFilter = {
-    system_reserved_filter: filter.system_reserved_filter ?? true,
-  };
-  const signedWords = normalizeSensitiveWordList(filter.filter_with_signed?.word_list);
-  const emptyWords = normalizeSensitiveWordList(filter.filter_with_empty?.word_list);
-  if (signedWords.length > 0) {
-    normalized.filter_with_signed = { word_list: signedWords };
-  }
-  if (emptyWords.length > 0) {
-    normalized.filter_with_empty = { word_list: emptyWords };
-  }
-
-  return normalized;
-}
-
-function normalizeSensitiveWordList(wordList: string[] | undefined): string[] {
-  if (!wordList) {
-    return [];
-  }
-
-  return [...new Set(wordList.map((word) => word.trim()).filter(Boolean))];
-}
-
-function buildDashScopeAsrInput(options: DashScopeAsrOptions, fileUrl: string): Record<string, unknown> {
-  return options.profile === "e2"
-    ? { file_urls: [fileUrl] }
-    : { file_url: fileUrl };
-}
-
-export function getDashScopeAsrModelForProfile(
-  profile: DashScopeAsrModelProfile,
+export function getDashScopeAsrModel(
+  durationSeconds: number | undefined,
   models = DEFAULT_DASHSCOPE_MODELS,
 ): DashScopeAsrModel {
-  if (profile === "e1") return models.asrE1;
-  if (profile === "e2") return models.asrE2;
-  return models.asrE3 ?? "qwen-audio-3.0-asr-flash-filetrans";
+  return durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= DASHSCOPE_ASR_FLASH_MAX_SECONDS
+    ? DASHSCOPE_ASR_FLASH_MODEL : models.asrE1;
 }
 
 function formatDashScopeError(status: number, payload: unknown): string {
@@ -1011,6 +994,13 @@ function isFallbackEligibleRequestError(error: unknown): boolean {
 
   const category = error.providerCode?.toLowerCase().split(/[.:]/u, 1)[0];
   return Boolean(category && FALLBACK_PROVIDER_ERROR_CATEGORIES.has(category));
+}
+
+function canFallbackSubmission(error: unknown, model: string): boolean {
+  // A synchronous request may have completed and been billed even when its response was lost.
+  if (model === DASHSCOPE_ASR_FLASH_MODEL && (error instanceof NetworkRetryExhaustedError ||
+    (error instanceof DashScopeRequestError && error.kind === "network"))) return false;
+  return isFallbackEligibleRequestError(error);
 }
 
 function toProviderFailure(error: unknown): Extract<ProviderResult, { ok: false }> {

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { DouyinApiError } from "@/lib/douyin/web-client";
+import { DouyinMetadataError } from "@/lib/douyin/detail";
+import { toDouyinApiErrorResponse } from "@/app/api/douyin/_credential";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
 import {
   NETWORK_RETRY_ERROR_CODE,
@@ -38,6 +41,7 @@ export async function GET(request: Request, context: RouteContext) {
       ...(forceRefresh ? { forceRefresh: true } : {}),
       historyRecordId: id,
       userId: user.id,
+      signal: request.signal,
     });
     if (!asset) {
       return NextResponse.json({ error: "会话不存在或资源不可用。" }, { status: 404 });
@@ -59,6 +63,11 @@ export async function GET(request: Request, context: RouteContext) {
       { headers: { "cache-control": "private, no-store" } },
     );
   } catch (error) {
+    if (error instanceof DouyinApiError) return toDouyinApiErrorResponse(error, user.id);
+    if (error instanceof DouyinMetadataError) {
+      if (error.cause instanceof DouyinApiError) return toDouyinApiErrorResponse(error.cause, user.id);
+      return NextResponse.json({ code: error.code, error: error.message }, { status: 409 });
+    }
     logServerError(`transcript-history.assets.${parsedKind.data}`, error);
     const networkFailure = error instanceof NetworkRetryExhaustedError;
     return NextResponse.json(

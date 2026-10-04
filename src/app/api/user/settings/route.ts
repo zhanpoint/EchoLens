@@ -5,7 +5,8 @@ import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-s
 import { canUseDouyinAccountServices } from "@/lib/douyin/account-services";
 import { validateAndStoreDouyinCredential } from "@/lib/douyin/account";
 import { BilibiliCredentialError, validateAndStoreBilibiliCredential } from "@/lib/bilibili/account";
-import { DouyinApiError } from "@/lib/douyin/web-client";
+import { DouyinApiError, isDouyinCredentialError } from "@/lib/douyin/web-client";
+import { toDouyinApiErrorResponse } from "@/app/api/douyin/_credential";
 import {
   BILIBILI_AUDIO_QUALITIES,
   BILIBILI_VIDEO_CODECS,
@@ -94,11 +95,12 @@ export async function PUT(request: Request) {
 
   if (parsed.data.category === "douyin") {
     try {
-      await validateAndStoreDouyinCredential(user.id, (value.data as z.infer<typeof DouyinSettingsSchema>).cookie);
+      await validateAndStoreDouyinCredential(user.id, (value.data as z.infer<typeof DouyinSettingsSchema>).cookie, { signal: request.signal });
     } catch (error) {
       if (error instanceof DouyinApiError) {
-        const status = error.code === "UPSTREAM_ERROR" ? 502 : 400;
-        return NextResponse.json({ code: error.code, error: error.message }, { status });
+        // Validation already persisted explicit invalidity; do not read/write it again.
+        if (isDouyinCredentialError(error)) return NextResponse.json({ code: error.code, error: error.message }, { status: 400 });
+        return toDouyinApiErrorResponse(error, user.id);
       }
       return NextResponse.json({ error: "抖音账号访问凭证验证失败，请稍后重试。" }, { status: 502 });
     }

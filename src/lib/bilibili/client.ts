@@ -373,8 +373,9 @@ export async function requestBilibiliWbiJson(
   params: Record<string, string | number>,
   cookie: string,
   requestPolicy?: OpenApiPlatformRequestPolicy,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  return await requestWbiJsonWithSession(endpoint, params, await getWbiSession(cookie, requestPolicy), requestPolicy);
+  return await requestWbiJsonWithSession(endpoint, params, await getWbiSession(cookie, requestPolicy, signal), requestPolicy, signal);
 }
 
 async function requestWbiJsonWithSession(
@@ -382,20 +383,22 @@ async function requestWbiJsonWithSession(
   params: Record<string, string | number>,
   session: WbiSession,
   requestPolicy?: OpenApiPlatformRequestPolicy,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const query = signWbi(params, session);
-  return await requestJson(`${endpoint}?${query}`, session.cookie, requestPolicy);
+  return await requestJson(`${endpoint}?${query}`, session.cookie, requestPolicy, signal);
 }
 
 async function getWbiSession(
   cookie: string,
   requestPolicy?: OpenApiPlatformRequestPolicy,
+  signal?: AbortSignal,
 ): Promise<WbiSession> {
   let effectiveCookie = cookie.trim();
-  let payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy);
+  let payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy, signal);
   let keys = readWbiKeys(payload);
   if (!keys && !effectiveCookie) {
-    const spi = await requestJson(SPI_URL, "", requestPolicy);
+    const spi = await requestJson(SPI_URL, "", requestPolicy, signal);
     const data = asRecord(spi.data);
     const buvid3 = readString(data?.b_3);
     const buvid4 = readString(data?.b_4);
@@ -403,7 +406,7 @@ async function getWbiSession(
       .filter(Boolean)
       .join("; ");
     if (effectiveCookie) {
-      payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy);
+      payload = await requestPayload(NAV_URL, effectiveCookie, requestPolicy, signal);
       keys = readWbiKeys(payload);
     }
   }
@@ -432,12 +435,15 @@ function signWbi(params: Record<string, string | number>, keys: Pick<WbiSession,
   return `${query}&w_rid=${wRid}`;
 }
 
+export { requestJson as requestBilibiliJson };
+
 async function requestJson(
   url: string,
   cookie: string,
   requestPolicy?: OpenApiPlatformRequestPolicy,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const payload = await requestPayload(url, cookie, requestPolicy);
+  const payload = await requestPayload(url, cookie, requestPolicy, signal);
   assertSuccessfulPayload(payload);
   return payload;
 }
@@ -446,11 +452,14 @@ async function requestPayload(
   url: string,
   cookie: string,
   requestPolicy?: OpenApiPlatformRequestPolicy,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  await requestPolicy?.beforeRequest("bilibili");
+  signal?.throwIfAborted();
+  await requestPolicy?.beforeRequest("bilibili", signal);
   const response = await fetchWithRetry(url, {
     cache: "no-store",
     headers: requestHeaders(cookie),
+    signal,
     retry: {
       onResponse: (value) => requestPolicy?.observeResponse("bilibili", value),
       retryHttpStatuses: [429],

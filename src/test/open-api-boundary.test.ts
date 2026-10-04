@@ -40,11 +40,11 @@ describe("Open API boundary", () => {
   it("accepts only a public media link and optional model for transcription", () => {
     expect(OpenTranscriptionSchema.safeParse({
       input: "https://v.douyin.com/example",
-      model: "e2",
+      model: "e1",
     }).success).toBe(true);
     expect(OpenTranscriptionSchema.safeParse({
       historyRecordId: "history_123",
-      model: "e2",
+      model: "e1",
     }).success).toBe(false);
     expect(OpenTranscriptionSchema.safeParse({
       input: "https://v.douyin.com/example",

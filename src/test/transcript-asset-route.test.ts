@@ -60,6 +60,7 @@ describe("transcript history single asset route", () => {
       expect(mocks.ensureHistoryAsset).toHaveBeenCalledTimes(1);
       expect(mocks.ensureHistoryAsset).toHaveBeenCalledWith({
         assetKind: kind,
+        signal: expect.any(AbortSignal),
         historyRecordId: "history-1",
         userId: "user-1",
       });
@@ -82,6 +83,7 @@ describe("transcript history single asset route", () => {
     expect(mocks.ensureHistoryAsset).toHaveBeenCalledWith({
       assetKind: "cover",
       forceRefresh: true,
+      signal: expect.any(AbortSignal),
       historyRecordId: "history-1",
       userId: "user-1",
     });

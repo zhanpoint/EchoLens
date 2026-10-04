@@ -109,7 +109,6 @@ describe("dashscope qwen-mt translation", () => {
     const firstKey = "segment:0-1";
     const secondKey = "segment:1-2";
     const controller = new AbortController();
-    const abortListenerSpy = vi.spyOn(controller.signal, "addEventListener");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response([
@@ -152,7 +151,8 @@ describe("dashscope qwen-mt translation", () => {
     };
     expect(body.messages[0].content).toContain("⟦0⟧");
     expect(body.messages[0].content).toContain("⟦1⟧");
-    expect(abortListenerSpy).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+    controller.abort();
+    expect(requestInit?.signal?.aborted).toBe(true);
   });
 
   it("bisects a malformed batch response instead of returning misaligned translations", async () => {

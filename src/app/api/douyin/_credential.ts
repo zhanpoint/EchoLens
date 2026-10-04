@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { markDouyinCredentialInvalid, readDouyinCredentialState } from "@/lib/douyin/account";
-import { DouyinApiError } from "@/lib/douyin/web-client";
+import { DouyinApiError, isDouyinCredentialError } from "@/lib/douyin/web-client";
 
 export async function readValidDouyinCredential(userId: string): Promise<string | NextResponse> {
   const state = await readDouyinCredentialState(userId);
@@ -28,7 +28,7 @@ export async function toDouyinApiErrorResponse(
   error: DouyinApiError,
   userId: string,
 ): Promise<NextResponse> {
-  if (error.code === "LOGIN_REQUIRED" || error.code === "INVALID_COOKIE") {
+  if (isDouyinCredentialError(error)) {
     await markDouyinCredentialInvalid(userId);
     return NextResponse.json({
       code: "CREDENTIAL_INVALID",
@@ -41,5 +41,9 @@ export async function toDouyinApiErrorResponse(
     : error.code === "UPSTREAM_ERROR"
       ? 502
       : 503;
-  return NextResponse.json({ code: error.code, error: error.message }, { status });
+  const retryAfterSeconds = error.details?.retryAfterSeconds;
+  return NextResponse.json({ code: error.code, error: error.message, retryAfterSeconds }, {
+    status,
+    headers: retryAfterSeconds ? { "Retry-After": String(retryAfterSeconds) } : undefined,
+  });
 }
