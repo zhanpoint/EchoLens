@@ -3,6 +3,9 @@ services:
     image: postgres:17-alpine
     container_name: echolens-postgres
     restart: unless-stopped
+    mem_limit: 384m
+    memswap_limit: 384m
+    pids_limit: 128
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-echolens}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -29,6 +32,9 @@ services:
     image: ${ECHOLENS_IMAGE:?ECHOLENS_IMAGE is required}
     container_name: echolens
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 256
     init: true
     env_file:
       - .env
