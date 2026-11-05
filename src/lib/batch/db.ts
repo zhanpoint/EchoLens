@@ -22,7 +22,6 @@ export type ClaimedItem = {
   batch_id: string;
   user_id: string;
   platform: BatchPlatform;
-  model: "e1";
   video: AuthorVideo;
   generation: number;
   retries: number;
@@ -31,7 +30,7 @@ export type ClaimedItem = {
   part_count: number;
   asr_job_id: string | null;
 };
-const JOB_COLUMNS = `b.id, b.platform, b.author_name AS "authorName", b.model, b.status, b.created_at AS "createdAt",
+const JOB_COLUMNS = `b.id, b.platform, b.author_name AS "authorName", b.status, b.created_at AS "createdAt",
   COUNT(i.id)::int AS total,
   COALESCE(SUM(CASE WHEN i.status = 'succeeded' THEN 1 ELSE 0 END), 0)::int AS succeeded,
   COALESCE(SUM(CASE WHEN i.status = 'skipped' THEN 1 ELSE 0 END), 0)::int AS skipped,
@@ -45,7 +44,6 @@ export async function createBatch(
   input: {
     platform: BatchPlatform;
     authorName: string;
-    model: "e1";
     videos: AuthorVideo[];
   },
 ): Promise<string> {
@@ -60,8 +58,8 @@ export async function createBatch(
   ];
   await withTransaction(async (client) => {
     await client.query(
-      "INSERT INTO transcript_batches (id, user_id, platform, author_name, model, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-      [id, userId, input.platform, input.authorName, input.model, Date.now()],
+      "INSERT INTO transcript_batches (id, user_id, platform, author_name, created_at) VALUES ($1, $2, $3, $4, $5)",
+      [id, userId, input.platform, input.authorName, Date.now()],
     );
     // One insert per chunk avoids N database round trips for large selections.
     for (let start = 0; start < videos.length; start += 200) {
@@ -164,7 +162,7 @@ export async function claimBatchItem(maxInFlight = 8): Promise<ClaimedItem | nul
     // Serialize only admission so multiple instances cannot exceed the durable pipeline window.
     await client.query("SELECT pg_advisory_xact_lock(hashtext('echolens.batch.admission'))");
     const { rows } = await client.query<ClaimedItem>(
-      `SELECT i.*, b.user_id, b.platform, b.model FROM transcript_batch_items i JOIN transcript_batches b ON b.id = i.batch_id
+      `SELECT i.*, b.user_id, b.platform FROM transcript_batch_items i JOIN transcript_batches b ON b.id = i.batch_id
       WHERE (b.status = 'running' OR (b.status = 'paused' AND i.status = 'waiting')) AND i.next_run_at <= $1
       AND (i.status IN ('queued', 'waiting') OR (i.status = 'processing' AND i.lease_until < $1))
       AND (i.status <> 'queued' OR (SELECT COUNT(*) FROM transcript_batch_items WHERE status = 'waiting' OR (status = 'processing' AND lease_until > $1)) < $2)

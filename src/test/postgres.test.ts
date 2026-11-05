@@ -33,11 +33,11 @@ describe("postgres storage", () => {
     try {
       setPostgresPoolForTest(pool);
       await ensurePostgresSchema();
-      expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(4);
+      expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(5);
       expect(statements.some((sql) => sql.startsWith("UPDATE transcript_history_records"))).toBe(false);
       expect(statements.some((sql) => sql.startsWith("ALTER TABLE transcript_history_records"))).toBe(false);
       expect(statements.some((sql) => sql.startsWith("DROP TABLE"))).toBe(false);
-      expect(release).toHaveBeenCalledTimes(4);
+      expect(release).toHaveBeenCalledTimes(5);
     } finally {
       connect.mockRestore();
     }

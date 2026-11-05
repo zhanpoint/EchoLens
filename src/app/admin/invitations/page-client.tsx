@@ -34,8 +34,8 @@ export function InvitationConsole({
   }
 
   return (
-    <main className="h-dvh overflow-hidden bg-background px-3 py-4 text-foreground sm:px-5 lg:px-7">
-      <div className="mx-auto flex h-full max-w-7xl flex-col">
+    <main className="min-h-dvh bg-background px-3 py-4 text-foreground sm:px-5 lg:h-dvh lg:overflow-hidden lg:px-7">
+      <div className="mx-auto flex min-h-[calc(100dvh-2rem)] max-w-7xl flex-col lg:h-full lg:min-h-0">
         <header className="mb-4 flex shrink-0 items-center gap-3 px-1">
           <Link
             href="/"

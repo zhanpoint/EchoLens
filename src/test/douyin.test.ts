@@ -36,6 +36,15 @@ function sharePageHtml(videoInfoRes: unknown): string {
 }
 
 describe("douyin url utilities", () => {
+  it("only sends Douyin credentials to trusted HTTPS hosts across redirects", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "https://outside.example/video" } }))
+      .mockResolvedValueOnce(new Response("audio"));
+    await fetchRemoteMedia("https://video-web-cn.douyin.com/video", { mediaSource: "douyin", douyinCookie: "sessionid=secret" });
+    expect(new Headers(fetch.mock.calls[0][1]?.headers).get("cookie")).toBe("sessionid=secret");
+    expect(new Headers(fetch.mock.calls[1][1]?.headers).has("cookie")).toBe(false);
+  });
+
   it("stops CDN fallback immediately when a media request is canceled", async () => {
     const controller = new AbortController();
     const reason = new Error("download canceled");

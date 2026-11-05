@@ -588,6 +588,13 @@ body::-webkit-scrollbar-button {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .shiny-loading-text {
+    animation: none;
+    color: var(--shiny-loading-base);
+  }
+}
+
 @keyframes toast-enter {
   from {
     opacity: 0;

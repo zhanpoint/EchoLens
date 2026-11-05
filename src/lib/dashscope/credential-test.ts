@@ -69,8 +69,8 @@ export async function testDashScopeCredential(
 
 function readTestDefinitions(models: EchoLensDashScopeModelIds, purpose?: DashScopeModelPurpose): TestDefinition[] {
   const definitions: TestDefinition[] = [
-    { id: models.asrE1, kind: "asr", purpose: "asrE1" },
-    { id: DASHSCOPE_ASR_FLASH_MODEL, kind: "asr", purpose: "asrE1" },
+    { id: models.asr, kind: "asr", purpose: "asr" },
+    { id: DASHSCOPE_ASR_FLASH_MODEL, kind: "asr", purpose: "asr" },
     {
       id: models.translation,
       kind: "translation",
@@ -229,8 +229,10 @@ async function fetchJson(url: string, input: {
 
 function formatDashScopeTestError(status: number, payload: unknown): string {
   const message = readStringPath(payload, ["message"]) || readStringPath(payload, ["error", "message"]);
+  const code = readStringPath(payload, ["code"]) || readStringPath(payload, ["error", "code"]);
+  if (code === "insufficient_quota") return "免费额度已耗尽。请检查百炼免费额度、付款信息及仅使用免费额度模式。";
   if (status === 401) return "API Key 无效或已过期。";
-  if (status === 403) return "API Key 没有该模型的调用权限，或业务空间不匹配。";
+  if (status === 403) return message ? `模型请求被拒绝：${message}` : "模型请求被拒绝，请检查模型权限及业务空间。";
   if (status === 429) return "请求触发限流，请稍后重试。";
   return message ? `模型请求失败：${message}` : `模型请求失败：HTTP ${status}`;
 }

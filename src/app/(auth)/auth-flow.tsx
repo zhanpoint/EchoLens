@@ -80,6 +80,7 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
   const fieldErrors = useMemo(() => getFieldErrors(form, mode, loginMethod), [form, loginMethod, mode]);
   const hasBlockingErrors = Object.values(fieldErrors).some(Boolean);
   const canSubmit = pendingAction === null && (mode === "forgot" || form.acceptedLegal) && !hasBlockingErrors;
+  const canAttemptSubmit = pendingAction === null && !hasBlockingErrors;
   const canSendCode = useMemo(
     () =>
       (mode === "register" || mode === "forgot" || loginMethod === "code") &&
@@ -362,7 +363,11 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
 
                 {mode !== "forgot" ? (
                   <div className="grid gap-3 pt-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-                    <LegalConsent checked={form.acceptedLegal} onChange={(value) => update("acceptedLegal", value)} />
+                    <LegalConsent
+                      checked={form.acceptedLegal}
+                      error={submitted && !form.acceptedLegal ? "请先同意用户协议和隐私政策。" : undefined}
+                      onChange={(value) => update("acceptedLegal", value)}
+                    />
                     <ModeLinks mode={mode} />
                   </div>
                 ) : (
@@ -376,10 +381,10 @@ export function AuthFlow({ mode }: { mode: AuthMode }) {
 
                 <button
                   type="submit"
-                  disabled={loading || !canSubmit}
+                  disabled={loading || !canAttemptSubmit}
                   className={cn(
                     "mt-0.5 inline-flex h-10 items-center justify-center gap-2 rounded-md px-4 text-sm font-semibold transition active:scale-[0.98]",
-                    canSubmit
+                    canAttemptSubmit
                       ? "bg-cyan text-black hover:brightness-110 disabled:cursor-wait disabled:opacity-65"
                       : "cursor-not-allowed border border-white/12 bg-muted text-muted-foreground",
                   )}
@@ -625,31 +630,53 @@ function CodeField({
   );
 }
 
-function LegalConsent({ checked, onChange }: { checked: boolean; onChange: (value: boolean) => void }) {
+function LegalConsent({
+  checked,
+  error,
+  onChange,
+}: {
+  checked: boolean;
+  error?: string;
+  onChange: (value: boolean) => void;
+}) {
   return (
-    <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[0.6875rem] leading-4 text-muted-foreground">
+    <label className="flex min-w-0 cursor-pointer items-start gap-2 text-[0.6875rem] leading-4 text-muted-foreground">
       <span className="relative shrink-0">
         <input
+          aria-describedby={error ? "legal-consent-error" : undefined}
+          aria-invalid={error ? "true" : undefined}
+          aria-required="true"
           checked={checked}
           className="peer absolute inset-0 z-10 cursor-pointer opacity-0"
           onChange={(event) => onChange(event.currentTarget.checked)}
-          required
           type="checkbox"
         />
-        <span className="flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border border-white/25 bg-white/[0.03] transition peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:[&_svg]:opacity-100">
+        <span
+          className={cn(
+            "flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border bg-white/[0.03] transition peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:[&_svg]:opacity-100",
+            error ? "border-red-300/80 bg-red-400/[0.08]" : "border-white/25",
+          )}
+        >
           <Check className="size-[0.82rem] text-cyan opacity-0" strokeWidth={3.2} />
         </span>
       </span>
       <span className="min-w-0">
-        我已阅读并同意{" "}
-        <Link className="font-semibold text-cyan hover:text-amber" href="/terms" target="_blank" rel="noreferrer">
-          用户协议
-        </Link>{" "}
-        和{" "}
-        <Link className="font-semibold text-cyan hover:text-amber" href="/privacy" target="_blank" rel="noreferrer">
-          隐私政策
-        </Link>
-        。
+        <span>
+          我已阅读并同意{" "}
+          <Link className="font-semibold text-cyan hover:text-amber" href="/terms" target="_blank" rel="noreferrer">
+            用户协议
+          </Link>{" "}
+          和{" "}
+          <Link className="font-semibold text-cyan hover:text-amber" href="/privacy" target="_blank" rel="noreferrer">
+            隐私政策
+          </Link>
+          。
+        </span>
+        {error ? (
+          <span id="legal-consent-error" className="mt-1 block text-xs leading-4 text-red-200">
+            {error}
+          </span>
+        ) : null}
       </span>
     </label>
   );

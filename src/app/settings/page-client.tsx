@@ -769,7 +769,7 @@ function AiCredentialPanel({
       };
       const results = testPayload.results ?? [];
       setModelTests(Object.fromEntries(results.map((result) => [result.purpose, result])));
-      if (!testResponse.ok || !testPayload.ok) {
+      if ((!testResponse.ok || !testPayload.ok) && !(testResponse.status === 422 && results.some((result) => result.ok))) {
         throw new Error(testPayload.error || "至少一个 EchoLens 模型测试未通过，请检查下方结果。");
       }
 
@@ -793,9 +793,9 @@ function AiCredentialPanel({
       setIsVisible(false);
       setFeedback({
         message: isConfigured
-          ? "所选模型测试通过，API Key 已加密保存。"
+          ? testPayload.ok ? "所选模型测试通过，API Key 已加密保存。" : "API Key 已加密保存，部分模型测试未通过，请检查下方结果。"
           : "自定义 API Key 已移除。",
-        tone: "success",
+        tone: testPayload.ok ? "success" : "warning",
       });
     } catch (error) {
       setFeedback({ message: readUserFacingError(error, "自定义 APIKey 保存失败。"), tone: "error" });
@@ -898,6 +898,12 @@ function AiCredentialPanel({
       if (!result) {
         throw new Error("模型测试未返回结果。");
       }
+      setFeedback({
+        message: nextApiKey
+          ? configured ? "模型测试成功。修改过的密钥需点击验证并保存。" : "模型测试成功。当前输入的密钥尚未保存，请点击验证并保存。"
+          : configured ? "模型测试成功，使用的是已保存的自定义密钥。" : "模型测试成功，使用的是服务器默认密钥；当前账号未填写自定义密钥。",
+        tone: "success",
+      });
     } catch (error) {
       setModelTests((current) => ({
         ...current,
@@ -918,7 +924,7 @@ function AiCredentialPanel({
   }
 
   return (
-    <div className="w-full max-w-5xl">
+    <div className="w-full">
       <div className="border-b border-white/10 pb-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -944,8 +950,8 @@ function AiCredentialPanel({
           <label htmlFor="dashscope-api-key" className="mt-4 block text-xs font-semibold text-foreground">
             DASHSCOPE_API_KEY
           </label>
-          <div className="mt-2 flex items-center gap-2">
-            <div className="relative min-w-0 flex-1">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[min(100%,16rem)] flex-1">
               <input
                 id="dashscope-api-key"
                 type={isVisible ? "text" : "password"}
@@ -996,7 +1002,7 @@ function AiCredentialPanel({
             </button>
           </div>
           {feedback ? (
-            <p className={`mt-3 text-xs font-medium leading-5 ${feedback.tone === "error" ? "text-rose-400" : "text-emerald-400"}`} role={feedback.tone === "error" ? "alert" : "status"}>
+            <p className={`mt-3 text-xs font-medium leading-5 ${feedback.tone === "error" ? "text-rose-400" : feedback.tone === "warning" ? "text-amber" : "text-emerald-400"}`} role={feedback.tone === "error" ? "alert" : "status"}>
               {feedback.message}
             </p>
           ) : null}
@@ -1030,11 +1036,15 @@ function AiCredentialPanel({
                         </button>
                       </div>
                     </div>
-                    {purpose === "asrE1" ? (
+                    {purpose === "asr" ? (
                       <div className="mt-2 rounded-md border border-white/10 bg-black/25 px-2.5 py-2">
                         <code className="block break-words text-[11px] text-cyan">{selectedModel}</code>
                         <code className="mt-1 block break-words text-[11px] text-cyan">{DASHSCOPE_ASR_FLASH_MODEL}</code>
-                        <p className="mt-1 text-[11px] text-muted-foreground">按音频时长自动选择；5 分钟以内使用 flash。</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">按音频时长自动选择：5 分钟以内使用 {DASHSCOPE_ASR_FLASH_MODEL}；超过 5 分钟或时长未知时使用 {selectedModel}。</p>
+                      </div>
+                    ) : DASHSCOPE_MODEL_OPTIONS[purpose].length === 1 ? (
+                      <div className="mt-2 flex min-h-9 items-center rounded-md border border-white/10 bg-black/25 px-2.5">
+                        <code className="break-all text-[11px] text-cyan">{selectedModel}</code>
                       </div>
                     ) : <Select
                       value={selectedModel}
@@ -1124,7 +1134,7 @@ function AiCredentialPanel({
             </GuideDisclosure>
             <GuideDisclosure title="3. 授权模型并设置空间限流">
               <ol className="grid list-decimal gap-1 pl-4">
-                <li>在 EchoLens 业务空间打开“模型列表”，逐一搜索左侧配置的模型；E1 的长、短音频两个型号都需授权。</li>
+                <li>在 EchoLens 业务空间打开“模型列表”，逐一搜索左侧配置的模型；语音识别的长、短音频两个型号都需授权。</li>
                 <li>在每个模型的“模型调用”列打开授权。这里只需要调用权限，不需要开启模型训练或部署权限。</li>
                 <li>在“当前空间限流”中分别可选设置请求数限流和 Token 限流。按账号总配额和预计并发分配，并保留突发流量余量。</li>
                 <li>保存后再次确认所用模型均显示“已授权”。默认业务空间无法限制模型调用和设置空间限流，这是必须使用非默认空间的原因。</li>
@@ -1136,7 +1146,7 @@ function AiCredentialPanel({
               <ol className="grid list-decimal gap-1 pl-4">
                 <li>保持地域为新加坡，进入“API Key”，点击“创建 API Key”。</li>
                 <li>“归属业务空间”选择 <code className="text-cyan">EchoLens</code>，描述可填写“EchoLens 本地调用”。</li>
-                <li>“权限”选择“自定义”。在可访问模型中勾选左侧配置的模型，包含 E1 的两个型号，不要把 Key 创建到默认业务空间。</li>
+                <li>“权限”选择“自定义”。在可访问模型中勾选左侧配置的模型，包含语音识别的两个型号，不要把 Key 创建到默认业务空间。</li>
                 <li>有固定出口 IP 时配置 IP 白名单；出口不固定时保留控制台默认值，避免误拦截。</li>
                 <li>确认并创建，立即复制完整 Key。关闭弹窗后通常无法再次查看完整明文。</li>
               </ol>
@@ -1953,7 +1963,7 @@ export function SettingsPage({
         message: savedSettings.cookie
           ? "访问凭证验证成功并已保存。"
           : "抖音账号访问凭证已清除。",
-        tone: "success",
+        tone: savedSettings.cookie ? "success" : "warning",
       });
     } catch (saveError) {
       setDouyinFeedback({
@@ -2379,6 +2389,22 @@ export function SettingsPage({
                   </div>
                   <button
                     type="button"
+                    onClick={async () => {
+                      try {
+                        const cookie = await navigator.clipboard.readText();
+                        setSettings((current) => ({ ...current, cookie }));
+                        setCredentialStatus("idle");
+                        setDouyinFeedback({ message: cookie ? "凭证已粘贴，请验证并保存。" : "剪贴板为空。", tone: "warning" });
+                      } catch {
+                        setDouyinFeedback({ message: "无法读取剪贴板，请在输入框中按 Ctrl+V 粘贴。", tone: "warning" });
+                      }
+                    }}
+                    className="inline-flex h-9 shrink-0 items-center justify-center rounded-md border border-white/15 px-3 text-xs text-foreground hover:bg-white/5"
+                  >
+                    粘贴
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void saveSettings()}
                     disabled={isDouyinSaving || !isLoaded}
                     className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-cyan px-3 text-xs font-semibold text-black transition hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
@@ -2456,13 +2482,24 @@ export function SettingsPage({
                         </span>
                       </div>
                       {bilibiliQrSession ? (
-                        <div className="flex flex-wrap items-center gap-3">
+                        <dialog
+                          ref={(node) => { if (node && !node.open) node.showModal(); }}
+                          onCancel={() => { setBilibiliQrSession(undefined); setBilibiliFeedback(undefined); }}
+                          aria-labelledby="bilibili-qr-title"
+                          className="m-auto max-h-[calc(100dvh-2rem)] w-[min(23rem,calc(100%-2rem))] overflow-y-auto rounded-md border border-white/15 bg-surface-strong p-5 text-foreground shadow-xl backdrop:bg-black/65"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <h3 id="bilibili-qr-title" className="text-base font-semibold">Bilibili 扫码登录</h3>
+                            <button type="button" onClick={() => { setBilibiliQrSession(undefined); setBilibiliFeedback(undefined); }} className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.06] hover:text-foreground" aria-label="关闭">
+                              <X className="size-4" aria-hidden="true" />
+                            </button>
+                          </div>
                           <div
-                            className="rounded-md bg-white p-2"
+                            className="mx-auto mt-4 w-fit rounded-md bg-white p-2"
                             aria-label="Bilibili 登录二维码"
                             dangerouslySetInnerHTML={{ __html: bilibiliQrSession.svg }}
                           />
-                          <div className="grid gap-2 text-xs leading-5 text-muted-foreground">
+                          <div className="mt-4 grid justify-items-center gap-2 text-xs leading-5 text-muted-foreground">
                             <button
                               type="button"
                               onClick={() => void pollBilibiliQrCode(bilibiliQrSession)}
@@ -2472,8 +2509,9 @@ export function SettingsPage({
                               {isBilibiliQrPolling ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <ShieldCheck className="size-3.5" aria-hidden="true" />}
                               立即检测
                             </button>
+                            <FeedbackMessage feedback={bilibiliFeedback} feedbackRef={bilibiliFeedbackRef} />
                           </div>
-                        </div>
+                        </dialog>
                       ) : null}
                     </div>
                   ) : (
@@ -2543,7 +2581,7 @@ export function SettingsPage({
                     {isBilibiliSaving ? "验证中" : "验证并保存"}
                   </button>
                 </div>
-                <FeedbackMessage feedback={bilibiliFeedback} feedbackRef={bilibiliFeedbackRef} />
+                {!bilibiliQrSession ? <FeedbackMessage feedback={bilibiliFeedback} feedbackRef={bilibiliFeedbackRef} /> : null}
               </div>
               </div>
             ) : (

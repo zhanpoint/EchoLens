@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import type { DouyinWorkMetadata } from "@/lib/douyin/detail";
 import {
@@ -38,17 +39,20 @@ export function douyinOriginalAudioObjectKey(input: Pick<AssetInput, "id" | "kin
 export async function prepareDouyinOriginalAudio(
   input: AssetInput,
   metadata: DouyinWorkMetadata,
+  credentialCookie = "",
 ): Promise<OriginalAudioAsset> {
   const objectKey = douyinOriginalAudioObjectKey(input);
-  const existing = originalAudioTasks.get(objectKey);
+  const taskKey = `${objectKey}:${createHash("sha256").update(credentialCookie).digest("hex")}`;
+  const existing = originalAudioTasks.get(taskKey);
   if (existing) return existing;
   const task = ensureOriginalAudioFromSources(
     objectKey,
     metadata.audioUrls ?? [],
     metadata.videoUrls ?? [],
     metadata.durationSeconds,
-  ).finally(() => originalAudioTasks.delete(objectKey));
-  originalAudioTasks.set(objectKey, task);
+    credentialCookie,
+  ).finally(() => originalAudioTasks.delete(taskKey));
+  originalAudioTasks.set(taskKey, task);
   return task;
 }
 
@@ -57,6 +61,7 @@ async function ensureOriginalAudioFromSources(
   audioUrls: readonly string[],
   videoUrls: readonly string[],
   durationSeconds?: number,
+  credentialCookie = "",
 ): Promise<OriginalAudioAsset> {
   const existing = await getOssObjectInfo(objectKey);
   if (existing?.contentLength) {
@@ -70,21 +75,22 @@ async function ensureOriginalAudioFromSources(
 
   if (audioUrls.length) {
     try {
-      return await extractAndUploadAudio(objectKey, audioUrls, durationSeconds);
+      return await extractAndUploadAudio(objectKey, audioUrls, durationSeconds, credentialCookie);
     } catch (error) {
       if (!videoUrls.length || isRetryableNetworkError(error)) throw error;
     }
   }
   if (!videoUrls.length) throw new AudioUnavailableError("作品没有可用的音频或视频资源。");
-  return await extractAndUploadAudio(objectKey, videoUrls, durationSeconds);
+  return await extractAndUploadAudio(objectKey, videoUrls, durationSeconds, credentialCookie);
 }
 
 async function extractAndUploadAudio(
   objectKey: string,
   sourceUrls: readonly string[],
   durationSeconds?: number,
+  credentialCookie = "",
 ): Promise<OriginalAudioAsset> {
-  const response = await fetchRemoteMedia(sourceUrls, { mediaSource: "douyin" });
+  const response = await fetchRemoteMedia(sourceUrls, { mediaSource: "douyin", douyinCookie: credentialCookie });
   let audio: Awaited<ReturnType<typeof createTranscribableAudioFileFromNode>> | undefined;
   try {
     audio = await createTranscribableAudioFileFromNode(

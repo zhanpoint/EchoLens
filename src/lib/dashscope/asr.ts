@@ -39,7 +39,6 @@ type DashScopeConfig = {
 };
 
 export type DashScopeAsrModel = string;
-export type DashScopeAsrModelProfile = "e1";
 
 export type DashScopeAsrOptions = {
   diarizationEnabled?: boolean;
@@ -196,7 +195,7 @@ export async function submitDashScopeAsrJob(
         // A definite rejection of the synchronous transport can use the queryable file transport.
         // Never replay an ambiguous network failure: the provider may already have billed it.
         if (!(error instanceof DashScopeRequestError) || error.status !== 400) throw error;
-        normalizedOptions.model = DEFAULT_DASHSCOPE_MODELS.asrE1;
+        normalizedOptions.model = DEFAULT_DASHSCOPE_MODELS.asr;
         taskInput.model = normalizedOptions.model;
         taskInput.cacheKey = buildTranscriptCacheKey(taskInput.model, audio.objectKey, normalizedOptions, credentialSource);
         transcript = null;
@@ -998,7 +997,7 @@ export function getDashScopeAsrModel(
   models = DEFAULT_DASHSCOPE_MODELS,
 ): DashScopeAsrModel {
   return durationSeconds !== undefined && durationSeconds > 0 && durationSeconds <= DASHSCOPE_ASR_FLASH_MAX_SECONDS
-    ? DASHSCOPE_ASR_FLASH_MODEL : models.asrE1;
+    ? DASHSCOPE_ASR_FLASH_MODEL : models.asr;
 }
 
 function formatDashScopeError(status: number, payload: unknown): string {

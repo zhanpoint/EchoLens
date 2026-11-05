@@ -163,7 +163,7 @@ export async function transcribeBatchItem(
         },
         {
           // Batch work needs a queryable provider task even for short audio.
-          model: models.asrE1,
+          model: models.asr,
         },
         {
           apiKey: custom ? config.customApiKey : config.platformApiKey,
@@ -240,6 +240,7 @@ export async function transcribeBatchItem(
       try {
         const asset = await prepareDouyinSnapshotAsset({
           assetKind: "originalAudio",
+          credentialCookie: credential.cookie,
           historyRecordId: history.id,
           userId: item.user_id,
           workId,

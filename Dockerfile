@@ -12,9 +12,21 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 RUN npm ci
 
+FROM golang:1.24-bookworm AS credential-helper
+WORKDIR /app
+COPY scripts/douyin-credential-helper ./scripts/douyin-credential-helper
+COPY scripts/build-douyin-credential.mjs ./scripts/
+COPY src/lib/douyin/credential-helper-artifacts.json ./src/lib/douyin/
+COPY --from=base /usr/local/bin/node /usr/local/bin/node
+RUN node scripts/build-douyin-credential.mjs
+
+FROM scratch AS credential-helper-output
+COPY --from=credential-helper /app/public/downloads/ /
+
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+COPY --from=credential-helper /app/public/downloads ./public/downloads
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runner

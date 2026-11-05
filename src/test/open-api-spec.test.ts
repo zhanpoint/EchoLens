@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { OPEN_API_ENDPOINTS } from "@/lib/open-api/spec";
+import { OpenMediaResolveSchema, OpenTranscriptionSchema } from "@/lib/open-api/contracts";
 
 type JsonRecord = Record<string, unknown>;
 type MediaExample = JsonRecord & { downloads?: { audioUrl?: unknown; videoUrl?: unknown } };
 type TranscriptExample = JsonRecord & { segments?: unknown; text?: unknown };
 
 describe("Open API documentation contract", () => {
+  it("uses requests accepted by the public route schemas", () => {
+    for (const endpoint of OPEN_API_ENDPOINTS) {
+      const schema = endpoint.path === "/media/resolve" ? OpenMediaResolveSchema : OpenTranscriptionSchema;
+      for (const variant of endpoint.variants) {
+        expect(schema.safeParse(variant.request).success, endpoint.path).toBe(true);
+      }
+    }
+  });
+
   it("documents every catalog endpoint with request and response examples", () => {
     expect(OPEN_API_ENDPOINTS).toHaveLength(2);
     for (const endpoint of OPEN_API_ENDPOINTS) {

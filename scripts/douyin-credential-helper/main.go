@@ -21,7 +21,7 @@ import (
 
 const (
 	loginURL           = "https://www.douyin.com/user/self?showTab=favorite_collection"
-	defaultSettingsURL = "http://localhost:3000/settings"
+	defaultSettingsURL = "http://localhost:3000/settings?section=douyin#douyin-credential"
 	loginTimeout       = 5 * time.Minute
 )
 
@@ -116,7 +116,13 @@ func run(probe bool) error {
 		return err
 	}
 	cleanupPending = false
-	return openSettingsPage()
+	if err := openSettingsPage(); err != nil {
+		return err
+	}
+	fmt.Println("请在设置页点击粘贴按钮，或按 Ctrl+V 粘贴凭证，然后验证并保存。")
+	fmt.Println("按回车键关闭窗口。")
+	_, _ = fmt.Scanln()
+	return nil
 }
 
 func findBrowser() (string, error) {

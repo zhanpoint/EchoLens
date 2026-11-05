@@ -31,7 +31,7 @@ vi.mock("@/lib/dashscope/asr", () => ({
       super("平台转录剩余额度不足，无法转录当前音频。请前往设置，配置正确且可用的自定义 API Key 后继续使用。");
     }
   },
-  getDashScopeAsrModel: vi.fn((duration: number, models: { asrE1: string }) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asrE1),
+  getDashScopeAsrModel: vi.fn((duration: number, models: { asr: string }) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asr),
   refreshDashScopeAsrJobWithOptions: vi.fn(),
   transcribeDashScopeAsr: vi.fn(),
 }));
@@ -41,21 +41,21 @@ vi.mock("@/lib/dashscope/user-credential", () => ({
     apiKey: "test-user-key",
     customApiKey: "test-user-key",
     customModels: {
-      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
+      asr: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
       transcriptPostprocess: "deepseek-v4.1-flash",
       summary: "deepseek-v4.1-flash",
     },
     isCustomApiKey: true,
     models: {
-      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
+      asr: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
       transcriptPostprocess: "deepseek-v4.1-flash",
       summary: "deepseek-v4.1-flash",
     },
     platformApiKey: "platform-key",
     platformModels: {
-      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
+      asr: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-flash",
       transcriptPostprocess: "deepseek-v4.1-flash",
       summary: "deepseek-v4.1-flash",
@@ -197,7 +197,6 @@ describe("douyin transcribe route", () => {
   it("passes E1 speaker separation options", async () => {
     const response = await POST(transcribeRequest({
       diarizationEnabled: true,
-      model: "e1",
       speakerCount: 1,
     }));
 

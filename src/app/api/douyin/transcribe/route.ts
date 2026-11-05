@@ -13,7 +13,7 @@ import {
   type DashScopeAsrOptions,
   type DashScopeAsrModel,
 } from "@/lib/dashscope/asr";
-import { DEFAULT_DASHSCOPE_ASR_PROFILE, type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
+import { type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
 import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
 import { TranscribeWorkSchema } from "@/lib/douyin/transcribe-schema";
 import { ensureHistoryAsset } from "@/lib/transcript/assets";
@@ -41,7 +41,6 @@ const TranscribeSchema = z.object({
   clientJobId: z.string().min(1).max(CLIENT_JOB_ID_MAX_LENGTH).optional(),
   historyRecordId: z.string().min(1).max(128),
   diarizationEnabled: z.boolean().optional(),
-  model: z.literal(DEFAULT_DASHSCOPE_ASR_PROFILE).optional(),
   speakerCount: z.coerce.number().int().min(1).max(10).optional(),
 }).strict();
 

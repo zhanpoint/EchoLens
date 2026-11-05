@@ -95,6 +95,7 @@ export async function POST(request: Request) {
           try {
             const asset = await prepareDouyinSnapshotAsset({
               assetKind,
+              credentialCookie,
               historyRecordId: history.id,
               metadata: lease.metadata,
               snapshot,

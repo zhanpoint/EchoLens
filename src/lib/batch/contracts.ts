@@ -25,7 +25,6 @@ export type BatchExportRow = { position: number; video: AuthorVideo; transcript:
 export const CreateBatchSchema = z.object({
   platform: PlatformSchema,
   authorName: z.string().trim().max(200).default(""),
-  model: z.literal("e1").default("e1"),
   videos: z.array(AuthorVideoSchema).min(1).max(5000),
 });
 export type BatchStatus = "running" | "paused" | "completed" | "canceled";
@@ -35,7 +34,6 @@ export type BatchJob = {
   id: string;
   platform: BatchPlatform;
   authorName: string;
-  model: "e1";
   status: BatchStatus;
   createdAt: number;
   total: number;

@@ -19,7 +19,7 @@ type GlobalWithPostgres = typeof globalThis & {
   __echolensPostgresSchemaVersion?: number;
 };
 
-const POSTGRES_SCHEMA_VERSION = 6;
+const POSTGRES_SCHEMA_VERSION = 7;
 
 const globalForPostgres = globalThis as GlobalWithPostgres;
 types.setTypeParser(20, (value) => Number(value));
@@ -159,6 +159,10 @@ async function migrateBatchSchema(db: PooledQueryable): Promise<void> {
     ["transcript-schema-v7-qwen-audio-31", [
       "UPDATE transcript_batches SET model = 'e1' WHERE model <> 'e1'",
       `UPDATE user_settings SET value = (value - 'asrE2' - 'asrE3') || '{"asrE1":"qwen-audio-3.1-asr-flash-filetrans","transcriptPostprocess":"deepseek-v4.1-flash","summary":"deepseek-v4.1-flash"}'::jsonb WHERE category = 'aiModels'`,
+    ]],
+    ["transcript-schema-v8-remove-asr-profile", [
+      "ALTER TABLE transcript_batches DROP COLUMN IF EXISTS model",
+      `UPDATE user_settings SET value = (value - 'asrE1') || '{"asr":"qwen-audio-3.1-asr-flash-filetrans"}'::jsonb WHERE category = 'aiModels'`,
     ]],
   ] as const;
   for (const [version, statements] of migrations) {

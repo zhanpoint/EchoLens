@@ -71,7 +71,7 @@ describe("original-audio OSS pipeline", () => {
       sizeBytes: 3,
     });
 
-    expect(mocks.fetchRemoteMedia).toHaveBeenCalledWith(metadata.audioUrls, { mediaSource: "douyin" });
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledWith(metadata.audioUrls, { mediaSource: "douyin", douyinCookie: "" });
     expect(mocks.createTranscribableAudioFileFromNode).toHaveBeenCalledOnce();
     expect(mocks.putOssStream).toHaveBeenCalledWith(expect.objectContaining({
       contentLength: 3,
@@ -100,7 +100,7 @@ describe("original-audio OSS pipeline", () => {
       { ...metadata, audioUrls: [] },
     )).resolves.toMatchObject({ durationSeconds: 90 });
 
-    expect(mocks.fetchRemoteMedia).toHaveBeenCalledWith(metadata.videoUrls, { mediaSource: "douyin" });
+    expect(mocks.fetchRemoteMedia).toHaveBeenCalledWith(metadata.videoUrls, { mediaSource: "douyin", douyinCookie: "" });
     expect(mocks.createTranscribableAudioFileFromNode).toHaveBeenCalledOnce();
     expect(mocks.putOssStream).toHaveBeenCalledOnce();
     expect(mocks.audioCleanup).toHaveBeenCalledOnce();

@@ -28,7 +28,7 @@ vi.mock("@/lib/dashscope/user-credential", () => ({
   readDashScopeUserConfig: vi.fn(async () => ({
     platformApiKey: "key",
     customModels: { transcriptPostprocess: "model" },
-    platformModels: { asrE1: "qwen-audio-3.1-asr-flash-filetrans", transcriptPostprocess: "model" },
+    platformModels: { asr: "qwen-audio-3.1-asr-flash-filetrans", transcriptPostprocess: "model" },
   })),
 }));
 vi.mock("@/lib/dashscope/asr", () => ({
@@ -57,7 +57,6 @@ const item = (): ClaimedItem => ({
   batch_id: "batch",
   user_id: "owner",
   platform: "bilibili",
-  model: "e1",
   generation: 0,
   retries: 0,
   lease_token: "lease",

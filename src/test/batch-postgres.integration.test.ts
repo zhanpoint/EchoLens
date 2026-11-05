@@ -74,7 +74,6 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
     const input = {
       platform: "douyin" as const,
       authorName: "作者",
-      model: "e1" as const,
       videos: [
         {
           id: "123456",
@@ -436,14 +435,15 @@ describe.runIf(process.env.BATCH_POSTGRES_TEST === "1")(
     });
     it("migrates old model selections once and preserves translation overrides", async () => {
       const id = await createBatch("owner", input);
-      await execute("UPDATE transcript_batches SET model = 'e2' WHERE id = $1", [id]);
+      await execute("ALTER TABLE transcript_batches ADD COLUMN model text NOT NULL DEFAULT 'e2'");
       await execute("INSERT INTO user_settings (user_id, category, value, updated_at) VALUES ('owner', 'aiModels', $1::jsonb, 1)", [JSON.stringify({ asrE1: "old-asr", asrE2: "old-e2", asrE3: "old-e3", translation: "qwen-mt-plus", summary: "old-summary" })]);
       await execute("DELETE FROM app_schema_migrations WHERE version = 'transcript-schema-v7-qwen-audio-31'");
+      await execute("DELETE FROM app_schema_migrations WHERE version = 'transcript-schema-v8-remove-asr-profile'");
       setPostgresPoolForTest(pool);
       await ensurePostgresSchema();
-      expect((await readBatch("owner", id))!.job.model).toBe("e1");
+      expect((await readBatch("owner", id))!.job).not.toHaveProperty("model");
       expect(await queryRow("SELECT value FROM user_settings WHERE user_id = 'owner' AND category = 'aiModels'")).toEqual({ value: {
-        asrE1: "qwen-audio-3.1-asr-flash-filetrans", translation: "qwen-mt-plus", transcriptPostprocess: "deepseek-v4.1-flash", summary: "deepseek-v4.1-flash",
+        asr: "qwen-audio-3.1-asr-flash-filetrans", translation: "qwen-mt-plus", transcriptPostprocess: "deepseek-v4.1-flash", summary: "deepseek-v4.1-flash",
       } });
       await execute("UPDATE user_settings SET value = value || '{\"summary\":\"qwen3.7-plus\"}'::jsonb WHERE user_id = 'owner' AND category = 'aiModels'");
       setPostgresPoolForTest(pool);

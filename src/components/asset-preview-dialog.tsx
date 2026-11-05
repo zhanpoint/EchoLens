@@ -164,9 +164,10 @@ function CoverPreview({ onResourceError, url }: { onResourceError: () => void; u
 
 function VideoPreview({ onResourceError, url }: { onResourceError: () => void; url: string }) {
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
   return (
     <div className="relative overflow-hidden rounded-md bg-black/40">
-      <LoadingOverlay visible={!loaded} label="视频加载中" />
+      {error ? <ErrorOverlay label="视频加载失败，请关闭后重试。" /> : <LoadingOverlay visible={!loaded} label="视频加载中" />}
       <video
         src={url}
         controls
@@ -174,7 +175,7 @@ function VideoPreview({ onResourceError, url }: { onResourceError: () => void; u
         playsInline
         onLoadedMetadata={() => setLoaded(true)}
         onCanPlay={() => setLoaded(true)}
-        onError={onResourceError}
+        onError={() => { setError(true); onResourceError(); }}
         className={cn("max-h-[68dvh] w-full rounded-md bg-black transition-opacity duration-200", loaded ? "opacity-100" : "opacity-0")}
       />
     </div>

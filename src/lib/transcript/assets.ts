@@ -104,6 +104,7 @@ export async function readHistoryUpstreamAssets(input: {
 
 export async function prepareDouyinSnapshotAsset(input: AssetContext & {
   assetKind: HistoryAssetKind;
+  credentialCookie?: string;
   metadata: CompleteDouyinWorkMetadata;
   videoQuality: DownloadVideoQuality;
 }): Promise<AvailableHistoryAsset | null> {
@@ -134,6 +135,7 @@ export async function prepareDouyinSnapshotAsset(input: AssetContext & {
   const prepared = await prepareDouyinOriginalAudio(
     { id: input.workId, kind: "video", videoQuality: input.videoQuality },
     input.metadata,
+    input.credentialCookie,
   );
   await persistOriginalAudio(input, prepared.objectKey);
   return signedOriginalAudioAsset(input.historyRecordId, prepared, input.snapshot.refreshedAt);
@@ -222,6 +224,7 @@ async function refreshDouyinAsset(
     await persistSnapshot(history.id, userId, snapshot);
     return await prepareDouyinSnapshotAsset({
       assetKind,
+      credentialCookie: credentialState.status === "valid" ? credentialState.cookie : "",
       historyRecordId: history.id,
       metadata: lease.metadata,
       snapshot,

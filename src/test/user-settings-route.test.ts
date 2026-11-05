@@ -248,10 +248,10 @@ describe("user settings route", () => {
 
   it("persists only supported AI model selections", async () => {
     const models = {
-      asrE1: "qwen-audio-3.1-asr-flash-filetrans",
+      asr: "qwen-audio-3.1-asr-flash-filetrans",
       translation: "qwen-mt-plus",
-      transcriptPostprocess: "qwen3.7-plus",
-      summary: "qwen3.5-flash",
+      transcriptPostprocess: "deepseek-v4.1-flash-1017",
+      summary: "deepseek-v4.1-flash-1017",
     };
 
     const putResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
@@ -266,5 +266,11 @@ describe("user settings route", () => {
       method: "PUT",
     }));
     expect(invalidResponse.status).toBe(400);
+
+    const removedResponse = await PUT(new Request("https://echolens.test/api/user/settings", {
+      body: JSON.stringify({ category: "aiModels", value: { ...models, summary: "qwen3.7-plus" } }),
+      method: "PUT",
+    }));
+    expect(removedResponse.status).toBe(400);
   });
 });

@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/dashscope/asr", () => ({
   AsrQuotaExceededError: class AsrQuotaExceededError extends Error {},
-  getDashScopeAsrModel: vi.fn((duration: number, models: Record<string, string>) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asrE1),
+  getDashScopeAsrModel: vi.fn((duration: number, models: Record<string, string>) => duration <= 300 ? "qwen-audio-3.1-asr-flash" : models.asr),
   PLATFORM_ASR_QUOTA_SECONDS: 3_600,
   transcribeDashScopeAsrOnce: mocks.transcribeDashScopeAsrOnce,
 }));
@@ -28,7 +28,7 @@ vi.mock("@/lib/transcript/db", () => ({
 import { createOpenTranscription } from "@/lib/open-api/operation-gateway";
 
 const models = {
-  asrE1: "asr-e1",
+  asr: "asr-model",
   summary: "summary",
   transcriptPostprocess: "postprocess",
   translation: "translation",
@@ -67,7 +67,6 @@ describe("Open API one-shot transcription", () => {
 
     const response = await createOpenTranscription({
       input: "https://v.douyin.com/example",
-      model: "e1",
       userId: "user-1",
     });
 

@@ -48,7 +48,7 @@ describe("dashscope ASR transcript parsing", () => {
   });
 
   it("loads the current model configuration without obsolete E2 or E3 environment variables", () => {
-    vi.stubEnv("DASHSCOPE_ASR_MODEL_E1", DEFAULT_DASHSCOPE_MODELS.asrE1);
+    vi.stubEnv("DASHSCOPE_ASR_MODEL", DEFAULT_DASHSCOPE_MODELS.asr);
     vi.stubEnv("DASHSCOPE_TRANSLATION_MODEL", DEFAULT_DASHSCOPE_MODELS.translation);
     vi.stubEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL", DEFAULT_DASHSCOPE_MODELS.transcriptPostprocess);
     vi.stubEnv("DASHSCOPE_SUMMARY_MODEL", DEFAULT_DASHSCOPE_MODELS.summary);

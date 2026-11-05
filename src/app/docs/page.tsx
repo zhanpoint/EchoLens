@@ -4,7 +4,7 @@ import { DocsPage } from "./page-client";
 
 export const metadata: Metadata = {
   title: "文档 | EchoLens",
-  description: "EchoLens API、MCP 与 CLI 调用文档",
+  description: "EchoLens 媒体解析与音频转录的 API、MCP 和 Skill 接入文档",
 };
 
 export default async function Page({

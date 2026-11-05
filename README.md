@@ -27,7 +27,7 @@
 - **把内容整理成知识**：在转录基础上生成 AI 总结、翻译，保存历史记录，按需导出正文或字幕。
 - **研究一位创作者**：分页获取博主作品，按日期、标题、标签、最新／最早 N 个筛选，再选择作品批量转录。
 - **长任务可恢复**：数据库保存队列、执行租约和识别检查点；支持暂停、继续、取消与重试，保留已完成结果。
-- **接入现有工作流**：Web、开放 API、CLI 和 MCP 共用媒体与转录链路；为笔记工具、脚本和 AI Agent 提供可追溯文本。
+- **接入现有工作流**：Web、开放 API 和 MCP 共用媒体与转录链路；为笔记工具、脚本和 AI Agent 提供可追溯文本。
 
 ## 快速开始
 
@@ -87,7 +87,7 @@ npm run dev
 
 1. 输入博主主页链接，点击「获取」。默认遍历全部可见作品，获取中断后可继续分页。
 2. 获取后按日期、标题关键词或 `#标签` 即时筛选列表，修改条件无需重新获取。日期包含首尾当天（北京时间），先筛选再取最新／最早 N 个，标签支持任一或全部匹配。
-3. 勾选作品并转录，查看任务进度；临时失败自动重试。批量使用 E1 系列的异步 Filetrans 保存服务商任务 ID，单视频按时长选择 Flash／Filetrans；Bilibili 多分 P 作品会转录全部分 P。
+3. 勾选作品并转录，查看任务进度；临时失败自动重试。批量使用异步 Filetrans 保存服务商任务 ID，单视频按时长选择 Flash／Filetrans；Bilibili 多分 P 作品会转录全部分 P。
 4. 导出已完成结果：每个视频一个文件，或合并成一个文件。保留作品标题、来源链接、发布时间与正文，便于 LLM 读取分析。
 
 关闭页面后，持续运行的服务会继续处理。暂停停止领取新项，已提交的识别可完成；取消终止未完成项，已完成结果仍可导出。服务重启后在租约过期时接管中断项。网络、限流和临时服务故障会持续自动退避重试，复用已确认的识别与后处理检查点。无语音、音频无法解码、超出识别限制或不可重试的识别失败会跳过当前视频；多分 P 作品继续处理其余分 P，导出仅包含有效转录。提交结果不明确时跳过且不重复提交，原服务商任务可能继续执行或计费。凭据失效、额度不足等需要人工处理的问题会暂停，处理后继续／重试。
@@ -124,7 +124,7 @@ npm run dev
 
 | 用途 | 当前默认模型 |
 | --- | --- |
-| 语音识别 E1 | 音频 ≤ 300 秒使用 `qwen-audio-3.1-asr-flash`；长音频或未知时长使用 `qwen-audio-3.1-asr-flash-filetrans` |
+| 语音识别 | 音频 ≤ 300 秒使用 `qwen-audio-3.1-asr-flash`；长音频或未知时长使用 `qwen-audio-3.1-asr-flash-filetrans` |
 | 转录后处理 / AI 总结 | `deepseek-v4.1-flash` |
 | 翻译 | `qwen-mt-flash` |
 
@@ -139,12 +139,12 @@ npm run dev
 | 入口 | 能力 |
 | --- | --- |
 | `POST /api/open/media/resolve` | 解析 1–10 个媒体输入，返回作品信息与可用媒体地址 |
-| `POST /api/open/transcripts/transcribe` | 转录指定视频；识别模型统一使用 `e1` |
-| [CLI](packages/echolens-cli/bin/echolens.mjs) | `media resolve`、`transcript transcribe` |
+| `POST /api/open/transcripts/transcribe` | 转录指定视频；识别模型按音频时长自动选择 |
 | [MCP](packages/echolens-mcp/bin/echolens-mcp.mjs) | `echolens_resolve_media`、`echolens_transcribe`，通过 stdio 接入 Agent |
+| Skill | 通过开放 API 调用相同的两个服务，模板见应用文档 |
 
 <details>
-<summary><strong>可复制的 PowerShell API、CLI 与 MCP 示例</strong></summary>
+<summary><strong>可复制的 PowerShell API 与 MCP 示例</strong></summary>
 
 在项目根目录执行，输入自己的令牌与视频链接。下面的调用解析媒体，不提交语音识别。
 
@@ -153,7 +153,6 @@ $env:ECHOLENS_BASE_URL = 'http://localhost:3000'
 $env:ECHOLENS_API_TOKEN = Read-Host '输入设置页生成的 API 访问令牌' -MaskInput
 $videoUrl = Read-Host '输入抖音或 Bilibili 视频链接'
 Invoke-RestMethod -Method Post -Uri "$env:ECHOLENS_BASE_URL/api/open/media/resolve" -Headers @{ Authorization = "Bearer $env:ECHOLENS_API_TOKEN" } -ContentType 'application/json' -Body (@{ inputs = @($videoUrl) } | ConvertTo-Json)
-node packages/echolens-cli/bin/echolens.mjs media resolve --input $videoUrl --json
 ```
 
 生成本地 MCP 配置，复制到支持 MCP 的客户端；其中令牌仅供本机配置使用：
@@ -180,7 +179,7 @@ node packages/echolens-cli/bin/echolens.mjs media resolve --input $videoUrl --js
 ```mermaid
 flowchart LR
     Web[Web 界面] --> App[Next.js / Node.js]
-    Tools[API / CLI / MCP] --> App
+    Tools[API / MCP / Skill] --> App
     App --> Media[抖音 / Bilibili 客户端]
     Media --> Audio[音频准备 / FFmpeg]
     Audio --> OSS[OSS 存储]

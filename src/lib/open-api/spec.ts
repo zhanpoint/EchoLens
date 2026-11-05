@@ -69,14 +69,14 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
     path: "/transcripts/transcribe",
     title: "转录音频",
     description: "将抖音或 Bilibili 视频中的音频转写为文本。",
-    codeComments: ["input：一个抖音或 Bilibili 分享链接", "model：可选 e1"],
-    requestDescription: "input 为一个抖音或 Bilibili 分享链接；model 可选 e1。",
+    codeComments: ["input：一个抖音或 Bilibili 分享链接"],
+    requestDescription: "input 为一个抖音或 Bilibili 分享链接。",
     responseDescription: "JSON。返回媒体信息和转录结果。",
     transport: "json",
     variants: [
       {
         label: "抖音",
-        request: { input: "https://v.douyin.com/example", model: "e1" },
+        request: { input: "https://v.douyin.com/example" },
         response: {
           media: {
             source: "douyin",
@@ -97,7 +97,7 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
       },
       {
         label: "Bilibili",
-        request: { input: "https://b23.tv/example", model: "e1" },
+        request: { input: "https://b23.tv/example" },
         response: {
           media: {
             source: "bilibili",
@@ -118,9 +118,4 @@ export const OPEN_API_ENDPOINTS: OpenApiEndpoint[] = [
       },
     ],
   },
-];
-
-export const AGENT_ENVIRONMENT_VARIABLES = [
-  { name: "ECHOLENS_BASE_URL", description: "EchoLens 服务地址，例如 http://localhost:3000" },
-  { name: "ECHOLENS_API_TOKEN", description: "设置页创建的 API 访问令牌" },
 ];

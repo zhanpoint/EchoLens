@@ -4,7 +4,6 @@ import {
   getDashScopeAsrModel,
   PLATFORM_ASR_QUOTA_SECONDS,
   transcribeDashScopeAsrOnce,
-  type DashScopeAsrModelProfile,
 } from "@/lib/dashscope/asr";
 import { type EchoLensDashScopeModelIds } from "@/lib/dashscope/model-config";
 import { readDashScopeUserConfig } from "@/lib/dashscope/user-credential";
@@ -16,7 +15,6 @@ import {
 
 export async function createOpenTranscription(input: {
   input: string;
-  model?: DashScopeAsrModelProfile;
   signal?: AbortSignal;
   userId: string;
 }): Promise<Response> {

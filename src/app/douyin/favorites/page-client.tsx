@@ -847,6 +847,9 @@ function VirtualFavoritesList({
 function FavoritesSkeleton() {
   return (
     <div className="h-full overflow-hidden" aria-label="正在读取收藏列表">
+      <p role="status" className="shiny-loading-text px-4 pb-3 text-xs leading-5 sm:px-0">
+        正在同步收藏内容，首次加载可能需要一点时间…
+      </p>
       {Array.from({ length: 7 }, (_, index) => (
         <div key={index} className="flex h-20 items-center px-4">
           <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_6rem]">
@@ -866,6 +869,9 @@ function FavoritesSkeleton() {
 function GroupsSkeleton() {
   return (
     <div className="grid grid-cols-1 gap-3 overflow-hidden xl:grid-cols-2" aria-label="正在读取收藏分组">
+      <p role="status" className="shiny-loading-text col-span-full text-xs leading-5">
+        正在同步收藏分组，首次加载可能需要一点时间…
+      </p>
       {Array.from({ length: 6 }, (_, index) => (
         <div key={index} className="min-h-40 animate-pulse rounded-md border border-white/[0.06] bg-white/[0.035] p-4" style={{ animationDelay: `${index * 60}ms` }}>
           <div className="flex items-center justify-between gap-4">

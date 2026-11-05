@@ -323,7 +323,6 @@ export function BatchPage() {
         body: JSON.stringify({
           platform,
           authorName: matchingCatalogue?.authorName,
-          model: "e1",
           videos: chosen,
         }),
       });
@@ -380,16 +379,16 @@ export function BatchPage() {
   }
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <header className="border-b border-border bg-surface">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
+    <main className="min-h-[100dvh] bg-background text-foreground">
+      <header>
+        <div className="mx-auto flex w-full max-w-[96rem] items-center gap-4 px-3 py-4 sm:px-5 lg:px-6">
           <div className="flex items-center gap-3">
             <Link
               href="/"
-              className={`${button} size-9 px-0`}
+              className="inline-flex size-10 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
               aria-label="返回 EchoLens"
             >
-              <ArrowLeft className="size-4" />
+              <ArrowLeft className="size-6" strokeWidth={2.1} />
             </Link>
             <div>
               <h1 className="flex items-center gap-2 text-lg font-semibold">
@@ -401,15 +400,9 @@ export function BatchPage() {
               </p>
             </div>
           </div>
-          <Link
-            href="/settings"
-            className="text-sm text-muted-foreground hover:text-primary"
-          >
-            凭据与模型设置
-          </Link>
         </div>
       </header>
-      <div className="mx-auto max-w-5xl px-4 py-5 sm:px-6">
+      <div className="mx-auto w-full max-w-[96rem] px-3 py-5 sm:px-5 lg:px-6">
         {error && (
           <div
             role="alert"
@@ -429,9 +422,9 @@ export function BatchPage() {
         )}
           <section
             aria-labelledby="source-heading"
-            className="min-w-0 rounded-lg border border-border bg-surface"
+            className="min-w-0 space-y-2"
           >
-            <div className="border-b border-border p-4">
+            <div className="px-0 py-4">
               <h2 id="source-heading" className="text-sm font-semibold">
                 获取用户作品
               </h2>
@@ -504,7 +497,7 @@ export function BatchPage() {
               {!parsedFilters.success && <p role="alert" className="mt-2 text-xs text-destructive">{parsedFilters.error.issues[0]?.message}</p>}
             </div>
             <section
-              className="border-b border-border p-4"
+              className="px-0 py-4"
               aria-labelledby="task-heading"
             >
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -732,7 +725,7 @@ export function BatchPage() {
                 </p>
               )}
             </section>
-            <div className="p-4">
+            <div className="px-0 py-4">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-semibold">
@@ -991,7 +984,7 @@ function Pagination({
 }) {
   const pages = Math.ceil(total / size);
   return (
-    <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+    <div className="mt-4 flex items-center justify-between pt-3">
       <span className="text-xs text-muted-foreground">
         第 {page + 1} / {pages} 页
       </span>

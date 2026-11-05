@@ -1,17 +1,9 @@
 const CHAT_MODEL_OPTIONS = [
-  "deepseek-v4.1-flash",
-  "qwen3.7-plus",
-  "qwen3.7-plus-2026-05-26",
-  "qwen3.6-plus",
-  "qwen3.6-plus-2026-04-02",
-  "qwen3.5-plus",
-  "qwen3.5-plus-2026-02-15",
-  "qwen3.5-flash",
-  "qwen3.5-flash-2026-02-23",
+  "deepseek-v4.1-flash-1017",
 ] as const;
 
 export const DASHSCOPE_MODEL_OPTIONS = {
-  asrE1: [
+  asr: [
     "qwen-audio-3.1-asr-flash-filetrans",
   ],
   translation: [
@@ -29,20 +21,19 @@ export type DashScopeModelId<Purpose extends DashScopeModelPurpose = DashScopeMo
 
 export type EchoLensDashScopeModelIds = Record<DashScopeModelPurpose, string>;
 
-export const DEFAULT_DASHSCOPE_ASR_PROFILE = "e1" as const;
 export const DASHSCOPE_ASR_FLASH_MODEL = "qwen-audio-3.1-asr-flash";
 export const DASHSCOPE_ASR_FLASH_MAX_SECONDS = 300;
 
 export const DEFAULT_DASHSCOPE_MODELS: EchoLensDashScopeModelIds = {
-  asrE1: "qwen-audio-3.1-asr-flash-filetrans",
+  asr: "qwen-audio-3.1-asr-flash-filetrans",
   translation: "qwen-mt-flash",
-  transcriptPostprocess: "deepseek-v4.1-flash",
-  summary: "deepseek-v4.1-flash",
+  transcriptPostprocess: "deepseek-v4.1-flash-1017",
+  summary: "deepseek-v4.1-flash-1017",
 };
 
 export function readEnvironmentDashScopeModelIds(): EchoLensDashScopeModelIds {
   return {
-    asrE1: readRequiredEnv("DASHSCOPE_ASR_MODEL_E1"),
+    asr: readRequiredEnv("DASHSCOPE_ASR_MODEL"),
     translation: readRequiredEnv("DASHSCOPE_TRANSLATION_MODEL"),
     transcriptPostprocess: readRequiredEnv("DASHSCOPE_TRANSCRIPT_POSTPROCESS_MODEL"),
     summary: readRequiredEnv("DASHSCOPE_SUMMARY_MODEL"),
@@ -50,7 +41,7 @@ export function readEnvironmentDashScopeModelIds(): EchoLensDashScopeModelIds {
 }
 
 export const DASHSCOPE_MODEL_METADATA: Record<DashScopeModelPurpose, { label: string }> = {
-  asrE1: { label: "E1 语音识别模型" },
+  asr: { label: "语音识别模型" },
   translation: { label: "翻译模型" },
   transcriptPostprocess: { label: "转录后处理模型" },
   summary: { label: "AI 总结模型" },

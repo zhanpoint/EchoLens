@@ -81,7 +81,7 @@ import {
 } from "@/types/douyin";
 import type { CommentsPayload } from "@/lib/comment-model";
 import { SUMMARY_PROMPTS, type SummaryPrompt } from "@/lib/ai/prompts";
-import { DEFAULT_DASHSCOPE_ASR_PROFILE, DASHSCOPE_ASR_FLASH_MAX_SECONDS } from "@/lib/dashscope/model-config";
+import { DASHSCOPE_ASR_FLASH_MAX_SECONDS } from "@/lib/dashscope/model-config";
 import { clearProgressStartedAt, estimateMediaProcessingDurationSeconds, readProgressStartedAt } from "@/lib/douyin/cache-estimate";
 import {
   mergeWorkMetadata,
@@ -584,6 +584,32 @@ function readUserFacingErrorCode(error: unknown): string | undefined {
   return /^(Failed to fetch|NetworkError|Load failed|fetch failed)$/i.test(error.message.trim())
     ? NETWORK_RETRY_ERROR_CODE
     : undefined;
+}
+
+function UserFacingErrorMessage({ message }: { message: string }) {
+  const settingsSection = message.includes("抖音") || message.includes("Cookie")
+    ? "douyin"
+    : message.includes("API Key")
+      ? "aiCredential"
+      : undefined;
+
+  if (!settingsSection || !message.includes("设置")) {
+    return <span>{message}</span>;
+  }
+
+  const [before, after] = message.split("设置", 2);
+  return (
+    <span>
+      {before}
+      <Link
+        href={`/settings?section=${settingsSection}`}
+        className="font-semibold text-cyan underline decoration-cyan/50 underline-offset-2 hover:text-cyan/80"
+      >
+        设置
+      </Link>
+      {after}
+    </span>
+  );
 }
 
 function codedError(message: string, code?: string): Error {
@@ -1250,6 +1276,7 @@ export default function HomePage() {
     readUsageConsent,
     readServerUsageConsent,
   );
+  const [showUsageConsentError, setShowUsageConsentError] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null | undefined>(undefined);
   const [asrQuota, setAsrQuota] = useState<AsrQuota | null | undefined>(undefined);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -2199,7 +2226,6 @@ export default function HomePage() {
           clientJobId,
           diarizationEnabled: speakerDiarizationEnabled,
           historyRecordId,
-          model: DEFAULT_DASHSCOPE_ASR_PROFILE,
           speakerCount: effectiveSpeakerCount,
         }),
         signal: controller.signal,
@@ -2287,6 +2313,7 @@ export default function HomePage() {
   }
 
   function updateUsageConsent(value: boolean) {
+    if (value) setShowUsageConsentError(false);
     if (value) {
       window.localStorage.setItem(USAGE_CONSENT_STORAGE_KEY, "true");
     } else {
@@ -2671,11 +2698,13 @@ export default function HomePage() {
                 checked={hasAcceptedUsage}
                 onChange={(event) => updateUsageConsent(event.target.checked)}
                 aria-labelledby="usage-consent-description"
+                aria-describedby={showUsageConsentError && !hasAcceptedUsage ? "usage-consent-error" : undefined}
+                aria-invalid={showUsageConsentError && !hasAcceptedUsage ? "true" : undefined}
                 className="peer absolute inset-0 z-10 cursor-pointer opacity-0"
               />
               <span
                 aria-hidden="true"
-                className="flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border border-white/28 bg-white/[0.03] shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06),0_0_0_1px_rgb(0_0_0_/_0.2)] transition peer-hover:border-cyan/55 peer-focus-visible:border-cyan/70 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:bg-white/[0.02] peer-checked:shadow-[inset_0_1px_0_rgb(255_255_255_/_0.08),0_0_0_1px_rgb(0_0_0_/_0.18),0_0_16px_rgb(34_211_238_/_0.12)] peer-checked:[&_svg]:opacity-100"
+                className={cn("flex size-[1.05rem] items-center justify-center rounded-[0.28rem] border bg-white/[0.03] shadow-[inset_0_1px_0_rgb(255_255_255_/_0.06),0_0_0_1px_rgb(0_0_0_/_0.2)] transition peer-hover:border-cyan/55 peer-focus-visible:border-cyan/70 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan/20 peer-checked:border-cyan/80 peer-checked:bg-white/[0.02] peer-checked:shadow-[inset_0_1px_0_rgb(255_255_255_/_0.08),0_0_0_1px_rgb(0_0_0_/_0.18),0_0_16px_rgb(34_211_238_/_0.12)] peer-checked:[&_svg]:opacity-100", showUsageConsentError && !hasAcceptedUsage ? "border-red-300/80 bg-red-400/[0.08]" : "border-white/28")}
               >
                 <Check className="size-[0.82rem] text-cyan opacity-0 drop-shadow-[0_0_6px_rgba(34,211,238,0.45)] transition duration-150 ease-out" strokeWidth={3.4} />
               </span>
@@ -2688,6 +2717,11 @@ export default function HomePage() {
               >
                 法律声明
               </Link>
+              {showUsageConsentError && !hasAcceptedUsage ? (
+                <span id="usage-consent-error" role="alert" className="mt-1 block text-xs leading-4 text-red-200">
+                  请先勾选使用确认。
+                </span>
+              ) : null}
             </span>
           </div>
 
@@ -2718,7 +2752,10 @@ export default function HomePage() {
               <input
                 value={input}
                 onChange={(event) => updateInput(event.target.value)}
-                disabled={!hasAcceptedUsage}
+                onFocus={() => { if (!hasAcceptedUsage) setShowUsageConsentError(true); }}
+                onClick={() => { if (!hasAcceptedUsage) setShowUsageConsentError(true); }}
+                readOnly={!hasAcceptedUsage}
+                aria-describedby={!hasAcceptedUsage && showUsageConsentError ? "usage-consent-error" : undefined}
                 className="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 placeholder={hasAcceptedUsage ? "粘贴抖音或 Bilibili 作品链接。" : "请先勾选使用确认。"}
               />
@@ -2832,7 +2869,7 @@ export default function HomePage() {
               )}
             >
               <AlertCircle className="size-4 shrink-0" />
-              <span>{error}</span>
+              <UserFacingErrorMessage message={error} />
               <NetworkRetryButton
                 code={errorCode}
                 isRetrying={isResolving || isTranscribing}
@@ -2875,7 +2912,6 @@ export default function HomePage() {
                   hasValidSpeakerCount={hasValidSpeakerCount} onCheckedChange={setSpeakerDiarizationEnabled}
                   onSpeakerCountChange={setSpeakerCount} speakerCount={speakerCount} supportsSpeakerCount={supportsSpeakerCount} />
               ) : undefined}
-              modelSlot={activeKind === "video" ? <span className="text-xs text-muted-foreground" title="Qwen Audio 3.1：不超过 5 分钟使用 flash，长音频使用 flash-filetrans">E1</span> : undefined}
               quotaSlot={
                 currentUser ? <AsrQuotaIndicator quota={asrQuota} /> : undefined
               }
@@ -4127,7 +4163,12 @@ function WorkDownloadActions({
                 onClick={() => {
                   setDownloadError("");
                   void ensureAssetUrl(action.asset)
-                    .then((url) => setPreview({ action, url }))
+                    .then((url) => setPreview({
+                      action,
+                      url: action.asset === "video" && work.source === "douyin"
+                        ? `/api/transcript-history/${encodeURIComponent(historyRecordId)}/video?preview=${Date.now()}`
+                        : url,
+                    }))
                     .catch((error) => {
                       setDownloadError(readUserFacingError(error, "资源准备失败。"));
                     });
@@ -4184,8 +4225,7 @@ function WorkDownloadActions({
               )}
               onClose={() => setPreview(null)}
               onResourceError={() => {
-                setPreview(null);
-                onRetryAsset(preview.action.asset);
+                if (preview.action.asset !== "video") onRetryAsset(preview.action.asset);
               }}
             />,
             document.body,

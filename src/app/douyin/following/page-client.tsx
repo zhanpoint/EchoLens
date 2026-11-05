@@ -453,6 +453,9 @@ function Pagination({ page, totalPages, onChange }: { page: number; totalPages: 
 function FollowingSkeleton() {
   return (
     <div className="h-full overflow-hidden" aria-label="正在读取关注列表">
+      <p role="status" className="shiny-loading-text px-4 pb-3 text-xs leading-5 sm:px-0">
+        正在同步关注列表，首次加载可能需要一点时间…
+      </p>
       {Array.from({ length: 7 }, (_, index) => (
         <div key={index} className="flex h-28 items-center px-4">
           <div className="grid w-full gap-3 md:grid-cols-[10rem_minmax(0,1fr)_4rem]">

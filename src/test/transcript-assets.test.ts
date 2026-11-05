@@ -190,6 +190,7 @@ describe("single-record transcript resources", () => {
     expect(mocks.prepareDouyinOriginalAudio).toHaveBeenCalledWith(
       { id: history.workId, kind: "video", videoQuality: "lowest" },
       metadata,
+      "",
     );
     expect(mocks.updateTranscriptHistoryRecordMetadata).toHaveBeenLastCalledWith(expect.objectContaining({
       originalAudio: audioObjectKey,

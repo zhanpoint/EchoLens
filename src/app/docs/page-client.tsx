@@ -1,15 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Bot, BrainCircuit, Check, ChevronDown, CirclePlay, Copy, Music2, Server, SquareTerminal } from "lucide-react";
+import { ArrowLeft, Bot, BrainCircuit, Check, ChevronDown, CirclePlay, Copy, Music2, Server } from "lucide-react";
 import * as Select from "@radix-ui/react-select";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useState } from "react";
-import { AGENT_ENVIRONMENT_VARIABLES, OPEN_API_ENDPOINTS, type OpenApiEndpoint, type OpenApiVariant } from "@/lib/open-api/spec";
+import { OPEN_API_ENDPOINTS, type OpenApiEndpoint, type OpenApiVariant } from "@/lib/open-api/spec";
 
-type DocsSection = "api" | "mcp" | "cli" | "skill";
-type DocsAnchor = "api-overview" | "api-auth" | "api-endpoints" | "mcp-overview" | "mcp-tools" | "cli-overview" | "cli-commands" | "skill-overview" | "skill-install" | "skill-template";
+type DocsSection = "api" | "mcp" | "skill";
+type DocsAnchor = "api-overview" | "api-auth" | "api-endpoints" | "mcp-overview" | "mcp-tools" | "skill-overview" | "skill-install" | "skill-template";
 
 type NavigationItem = {
   id: DocsAnchor;
@@ -38,8 +38,8 @@ curl -X POST "${openApiUrl}/media/resolve" \\
 const createMcpConfig = (baseUrl: string) => JSON.stringify({
   mcpServers: {
     echolens: {
-      command: "npx",
-      args: ["-y", "echolens-mcp"],
+      command: "node",
+      args: ["替换为本机 EchoLens 项目中 packages/echolens-mcp/bin/echolens-mcp.mjs 的绝对路径"],
       env: {
         ECHOLENS_BASE_URL: baseUrl,
         ECHOLENS_API_TOKEN: "从设置页复制的 API 访问令牌",
@@ -73,8 +73,7 @@ const createSkillMarkdown = () => [
   "",
   "1. 只需要媒体信息时，调用媒体解析接口。",
   "2. 需要文本、字幕、笔记或摘要时，直接调用音频转录接口。",
-  "3. 转录统一使用 `e1`；不超过 5 分钟使用 flash，长音频使用 flash-filetrans。",
-  "4. 返回简洁结果：标题、作者、来源、转录文本和必要链接。",
+  "3. 返回媒体信息，或包含转录文本的结果。",
   "",
   "## 请求示例",
   "",
@@ -93,21 +92,14 @@ const createSkillMarkdown = () => [
   "curl -X POST \"$ECHOLENS_BASE_URL/api/open/transcripts/transcribe\" \\",
   "  -H \"Authorization: Bearer $ECHOLENS_API_TOKEN\" \\",
   "  -H \"Content-Type: application/json\" \\",
-  "  -d '{\"input\":\"https://v.douyin.com/...\",\"model\":\"e1\"}'",
+  "  -d '{\"input\":\"https://v.douyin.com/...\"}'",
   "```",
   "",
-  "## 输出要求",
-  "",
-  "- 不要求浏览器登录或 Cookie；开放 API 只需要 token。",
-  "- 不暴露完整签名 URL、长查询参数、访问令牌或其他密钥。",
-  "- 不编造转录内容，只使用 API 返回结果。",
-  "- 配置缺失或请求失败时，只询问继续处理所需的最小信息。",
 ].join("\n");
 
 const SECTION_ALIASES: Record<string, DocsSection> = {
   api: "api",
   "api-tokens": "api",
-  cli: "cli",
   mcp: "mcp",
   skill: "skill",
 };
@@ -116,7 +108,7 @@ const NAVIGATION: NavigationGroup[] = [
   {
     id: "api",
     icon: Server,
-    label: "常规 API",
+    label: "开放 API",
     items: [
       { id: "api-auth", label: "认证方式" },
       { id: "api-overview", label: "快速开始" },
@@ -142,20 +134,10 @@ const NAVIGATION: NavigationGroup[] = [
       { id: "skill-template", label: "Skill 模板" },
     ],
   },
-  {
-    id: "cli",
-    icon: SquareTerminal,
-    label: "Agent CLI",
-    items: [
-      { id: "cli-overview", label: "环境变量" },
-      { id: "cli-commands", label: "常用命令" },
-    ],
-  },
 ];
 
 const SECTION_ANCHORS: Record<DocsSection, DocsAnchor> = {
   api: "api-auth",
-  cli: "cli-overview",
   mcp: "mcp-overview",
   skill: "skill-overview",
 };
@@ -246,7 +228,6 @@ export function DocsPage({ initialSection, openApiBaseUrl }: { initialSection?: 
           {activeSection === "api" ? <ApiDocs baseUrl={openApiBaseUrl} openApiUrl={openApiUrl} /> : null}
           {activeSection === "mcp" ? <McpDocs baseUrl={openApiBaseUrl} /> : null}
           {activeSection === "skill" ? <SkillDocs baseUrl={openApiBaseUrl} /> : null}
-          {activeSection === "cli" ? <CliDocs /> : null}
         </article>
       </div>
     </main>
@@ -256,9 +237,9 @@ export function DocsPage({ initialSection, openApiBaseUrl }: { initialSection?: 
 function ApiDocs({ baseUrl, openApiUrl }: { baseUrl: string; openApiUrl: string }) {
   return (
     <div className="grid gap-12">
-      <DocumentIntro title="常规 API" description="使用 EchoLens Open API，将媒体解析和转录能力接入你的应用或自动化工作流。" />
+      <DocumentIntro title="开放 API" description="两个服务：解析媒体和转录音频。使用 HTTP 将其接入应用或自动化工作流。" />
       <DocSection id="api-auth" title="认证方式">
-        <p>进入 <Link href="/settings?section=apiTokens" className="font-semibold text-cyan hover:underline hover:underline-offset-4">设置 / API 访问令牌</Link> 创建令牌。调用时通过 `Authorization: Bearer` 请求头传入令牌。</p>
+        <p>进入 <Link href="/settings?section=apiTokens" className="font-semibold text-cyan hover:underline hover:underline-offset-4">设置 / API 访问令牌</Link> 创建令牌。调用时通过 <code className="text-cyan">Authorization: Bearer &lt;token&gt;</code> 请求头传入令牌。请妥善保管令牌，不要将其提交到代码仓库。</p>
       </DocSection>
       <DocSection id="api-overview" title="快速开始">
         <div className="grid gap-2">
@@ -285,6 +266,7 @@ function ApiDocs({ baseUrl, openApiUrl }: { baseUrl: string; openApiUrl: string 
         ]} />
       </DocSection>
       <DocSection id="api-endpoints" title="接口列表">
+        <p>媒体解析返回标题、作者、封面及可用的媒体地址；转录返回媒体信息和识别文本。两个接口均返回 JSON。</p>
         <div className="grid divide-y divide-white/10 border-y border-white/10">
           {OPEN_API_ENDPOINTS.map((endpoint) => <ApiReference key={`${endpoint.method}-${endpoint.path}`} endpoint={endpoint} openApiUrl={openApiUrl} />)}
         </div>
@@ -327,7 +309,7 @@ function ApiReference({ endpoint, openApiUrl }: { endpoint: OpenApiEndpoint; ope
                 <Select.Content position="popper" sideOffset={4} className="z-50 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-md border border-white/10 bg-surface-strong p-1 shadow-xl shadow-black/40">
                   <Select.Viewport>
                     {endpoint.variants.map((item, index) => (
-                      <Select.Item key={item.label} value={String(index)} className="relative flex h-8 cursor-pointer select-none items-center rounded px-7 pr-2 text-xs font-semibold text-muted-foreground outline-none data-[highlighted]:bg-white/[0.07] data-[highlighted]:text-foreground data-[state=checked]:text-cyan">
+                      <Select.Item key={item.label} value={String(index)} className="relative flex h-8 cursor-pointer select-none items-center rounded px-7 pr-2 text-xs font-semibold text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-cyan/50 data-[highlighted]:bg-white/[0.07] data-[highlighted]:text-foreground data-[state=checked]:text-cyan">
                         <Select.ItemText><PlatformLabel label={item.label} /></Select.ItemText>
                         <Select.ItemIndicator className="absolute left-2 inline-flex items-center"><Check className="size-3.5" aria-hidden="true" /></Select.ItemIndicator>
                       </Select.Item>
@@ -436,16 +418,16 @@ function RequestCodeBlock({ examples }: { examples: RequestCodeExample[] }) {
 function McpDocs({ baseUrl }: { baseUrl: string }) {
   return (
     <div className="grid gap-12">
-      <DocumentIntro title="Agent MCP" description="EchoLens MCP 使用官方 TypeScript SDK 的 stdio 传输，适合 Cursor、Claude Desktop 等本地 Agent 直接启动并调用。" />
+      <DocumentIntro title="Agent MCP" description="通过 MCP 的 stdio 传输，将解析媒体和转录音频接入支持 MCP 的本地 Agent。" />
       <DocSection id="mcp-overview" title="安装与配置">
-        <p>在 EchoLens 设置页创建 API 访问令牌，然后把下面配置复制到 Agent 的 MCP 配置文件。<code className="text-cyan">ECHOLENS_BASE_URL</code> 填 EchoLens 服务根地址，<code className="text-cyan">ECHOLENS_API_TOKEN</code> 填访问令牌。</p>
+        <p>在 EchoLens 项目根目录安装依赖后，用本地 MCP 脚本接入 Agent。将服务地址替换为你的 EchoLens 地址，并填入从设置页创建的 API 访问令牌。</p>
         <CodeBlock code={createMcpConfig(baseUrl)} language="json" />
         <p>配置后重启 Agent。Agent 会发现 <code className="text-cyan">echolens_resolve_media</code> 和 <code className="text-cyan">echolens_transcribe</code> 两个工具。</p>
       </DocSection>
       <DocSection id="mcp-tools" title="可用工具">
         <div className="grid gap-3">
-          <p><code className="text-cyan">echolens_resolve_media</code>：解析抖音或 Bilibili 链接，返回媒体信息。</p>
-          <p><code className="text-cyan">echolens_transcribe</code>：转录抖音或 Bilibili 视频音频，可选择转录模型。</p>
+          <p><code className="text-cyan">echolens_resolve_media</code>：传入 <code>input</code>（一个链接或 Bilibili BV 号），返回媒体信息。</p>
+          <p><code className="text-cyan">echolens_transcribe</code>：输入视频链接，返回媒体信息和转录文本。</p>
         </div>
       </DocSection>
     </div>
@@ -460,29 +442,13 @@ function SkillDocs({ baseUrl }: { baseUrl: string }) {
         <p>当用户提供抖音或 Bilibili 链接，并希望解析媒体信息、转录音频、提取字幕或整理文本内容时，使用这个 Skill。</p>
       </DocSection>
       <DocSection id="skill-install" title="安装方式">
-        <p>在 Agent 的 Skills 目录中新建 <code className="text-cyan">echolens-api/SKILL.md</code>，复制下面模板即可使用。运行前确保环境变量已配置。</p>
+        <p>使用 Skills CLI 安装 EchoLens Skill：</p>
+        <CodeBlock language="bash" code="npx skills@latest add zhanpoint/EchoLens --skill echolens" />
+        <p>安装后，按宿主提示重新加载 Skill，并配置 EchoLens 地址和 API 访问令牌。</p>
         <CodeBlock language="bash" code={`export ECHOLENS_BASE_URL="${baseUrl}"\nexport ECHOLENS_API_TOKEN="el_xxx"`} />
       </DocSection>
       <DocSection id="skill-template" title="Skill 模板">
         <CodeBlock language="markdown" code={createSkillMarkdown()} />
-      </DocSection>
-    </div>
-  );
-}
-
-function CliDocs() {
-  return (
-    <div className="grid gap-12">
-      <DocumentIntro title="Agent CLI" description="EchoLens CLI 面向本地自动化、脚本和不支持 MCP 的 Agent；所有命令默认输出稳定 JSON，适合直接交给 Agent 读取。" />
-      <DocSection id="cli-overview" title="环境变量">
-        <div className="grid gap-3">
-          {AGENT_ENVIRONMENT_VARIABLES.map((item) => <p key={item.name}><code className="text-cyan">{item.name}</code>：{item.description}</p>)}
-        </div>
-        <CodeBlock language="bash" code={`export ECHOLENS_BASE_URL="http://localhost:3000"\nexport ECHOLENS_API_TOKEN="el_xxx"`} />
-      </DocSection>
-      <DocSection id="cli-commands" title="常用命令">
-        <p>先用 <code className="text-cyan">help</code> 检查安装，再按需执行媒体解析或转录。<code className="text-cyan">mcp config</code> 会输出可复制到 Agent 的 MCP 配置。</p>
-        <CodeBlock language="bash" code={`npx -y echolens help\nnpx -y echolens media resolve --input "https://www.bilibili.com/video/BV..." --json\nnpx -y echolens transcript transcribe --input "https://v.douyin.com/..." --model e1 --json\nnpx -y echolens mcp config --base-url "$ECHOLENS_BASE_URL" --json`} />
       </DocSection>
     </div>
   );

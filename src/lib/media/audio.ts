@@ -48,6 +48,7 @@ export async function fetchRemoteMedia(
   source: RemoteMediaSource,
   options: {
     mediaSource?: MediaSourcePlatform;
+    douyinCookie?: string;
     range?: string | null;
     signal?: AbortSignal;
   } = {},
@@ -65,10 +66,8 @@ export async function fetchRemoteMedia(
       ? AbortSignal.any([deadline, options.signal])
       : deadline;
     try {
-      const response = await fetch(url, {
-        headers: { ...mediaDownloadHeaders(options.mediaSource), ...(options.range ? { range: options.range } : {}) },
-        signal,
-      });
+      const headers = { ...mediaDownloadHeaders(options.mediaSource), ...(options.range ? { range: options.range } : {}) };
+      const response = await fetchMediaWithScopedCredential(url, headers, signal, options.mediaSource === "douyin" ? options.douyinCookie : undefined);
       if (response.ok && response.body) {
         return response;
       }
@@ -80,6 +79,25 @@ export async function fetchRemoteMedia(
     }
   }
   throw new Error(`媒体资源下载失败：${lastError instanceof Error ? lastError.message : "未知错误"}`);
+}
+
+async function fetchMediaWithScopedCredential(url: string, headers: Record<string, string>, signal: AbortSignal, cookie?: string): Promise<Response> {
+  let current = url;
+  for (let redirects = 0; redirects <= 10; redirects++) {
+    const target = new URL(current);
+    const trusted = target.protocol === "https:" && (target.hostname === "douyin.com" || target.hostname.endsWith(".douyin.com"));
+    const response = await fetch(current, {
+      headers: { ...headers, ...(trusted && cookie ? { cookie } : {}) },
+      redirect: "manual",
+      signal,
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    await response.body?.cancel();
+    if (!location) throw new Error("媒体重定向缺少地址。");
+    current = new URL(location, current).toString();
+  }
+  throw new Error("媒体重定向次数过多。");
 }
 
 /** Creates a finalized seekable M4A file before any remote upload. */

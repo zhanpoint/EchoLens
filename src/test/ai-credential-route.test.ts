@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
 const { readUserSetting } = vi.hoisted(() => ({
@@ -19,6 +19,7 @@ import { GET } from "@/app/api/user/settings/ai-credential/route";
 const requireUserMock = vi.mocked(requireUser);
 
 describe("user AI credential route", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     vi.clearAllMocks();
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
@@ -44,6 +45,7 @@ describe("user AI credential route", () => {
   });
 
   it("returns an empty value when no custom API key is configured", async () => {
+    vi.stubEnv("DASHSCOPE_API_KEY", "sk-platform-secret");
     readUserSetting.mockResolvedValue(undefined);
 
     const response = await GET(new Request("https://echolens.test/api/user/settings/ai-credential"));

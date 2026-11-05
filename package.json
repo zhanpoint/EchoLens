@@ -10,6 +10,7 @@
     "packages/*"
   ],
   "scripts": {
+    "predev": "node scripts/ensure-douyin-credential.mjs",
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "douyin:credential": "node scripts/build-douyin-credential.mjs --run",
