@@ -46,7 +46,7 @@ describe("transcript comment route", () => {
   beforeEach(() => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
     vi.clearAllMocks();
-    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
+    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test", douyinAccountServicesEnabled: true });
     mocks.readHistory.mockResolvedValue({ id: "history-1", workId: "123" });
     mocks.credential.mockResolvedValue("sessionid=test; msToken=test-token");
     mocks.metadata.mockResolvedValue({ collectedAt: 2, commentCount: 1 });
@@ -62,15 +62,17 @@ describe("transcript comment route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects non-admin reads and collection before credential access when disabled", async () => {
-    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+  it("rejects reads and collection without an invitation before credential access", async () => {
+    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     const request = new Request("https://echolens.test/api/transcript-history/history-1/comments");
     const [getResponse, postResponse] = await Promise.all([
       GET(request, context()),
       POST(new Request(request.url, { method: "POST" }), context()),
     ]);
-    expect(getResponse.status).toBe(503);
-    expect(postResponse.status).toBe(503);
+    expect(getResponse.status).toBe(403);
+    expect(postResponse.status).toBe(403);
+    await expect(getResponse.json()).resolves.toMatchObject({ code: "INVITATION_REQUIRED" });
+    await expect(postResponse.json()).resolves.toMatchObject({ code: "INVITATION_REQUIRED" });
     expect(requireUserMock).toHaveBeenCalledTimes(2);
     expect(mocks.credential).not.toHaveBeenCalled();
     expect(mocks.collect).not.toHaveBeenCalled();

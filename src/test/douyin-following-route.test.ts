@@ -41,7 +41,7 @@ describe("douyin following route", () => {
   beforeEach(() => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
     vi.clearAllMocks();
-    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
+    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test", douyinAccountServicesEnabled: true });
     readCredentialStateMock.mockResolvedValue({
       checkedAt: 1_234,
       cookie: "sessionid=abc; ttwid=token",
@@ -53,11 +53,11 @@ describe("douyin following route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects non-admin users before credential reading and collection when disabled", async () => {
-    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
+  it("rejects users without an invitation before reading credentials", async () => {
+    requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     const response = await POST(new Request("https://echolens.test/api/douyin/following", { method: "POST" }));
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ code: "DOUYIN_ACCOUNT_SERVICES_DISABLED" });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "INVITATION_REQUIRED" });
     expect(requireUserMock).toHaveBeenCalledOnce();
     expect(readCredentialStateMock).not.toHaveBeenCalled();
     expect(collectMock).not.toHaveBeenCalled();
