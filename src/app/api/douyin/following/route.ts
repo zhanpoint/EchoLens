@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/app/api/auth/_shared";
-import { rejectDisabledDouyinAccountServices } from "../_account-services";
+import { rejectWithoutInvitation } from "../_account-services";
 import { collectDouyinFollowingUsers } from "@/lib/douyin/following";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { readValidDouyinCredential, toDouyinApiErrorResponse } from "../_credential";
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
     return user;
   }
 
-  const disabled = rejectDisabledDouyinAccountServices(user);
+  const disabled = rejectWithoutInvitation(user);
   if (disabled) return disabled;
   const cookie = await readValidDouyinCredential(user.id);
   if (cookie instanceof NextResponse) {

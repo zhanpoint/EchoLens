@@ -5,7 +5,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 
 const SUPPORT_QQ = "2182392144";
-const INVITATION_FEATURES = ["评论采集", "收藏作品", "关注列表", "账号凭证管理"] as const;
+const INVITATION_FEATURES = ["收藏与关注", "博主语料采集", "评论采集"] as const;
 
 type InvitationDialogProps = {
   invitationRedeemed: boolean;

@@ -2,13 +2,7 @@
 
 import { Loader2, Send, X } from "lucide-react";
 import { useState } from "react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 
 type FeedbackType = "bug" | "feature" | "other";
 
@@ -72,6 +66,26 @@ export function FeedbackDialog({
           </button>
         </div>
 
+        <fieldset className="grid gap-2 text-sm font-medium text-foreground">
+          <legend>反馈类型 <span className="font-normal text-muted-foreground">（可选）</span></legend>
+          <div className="flex flex-wrap gap-x-6 gap-y-3 pt-2">
+            {([
+              { value: "bug", label: "问题反馈" },
+              { value: "feature", label: "功能建议" },
+              { value: "other", label: "其他" },
+            ] as const).map((option) => (
+              <label key={option.value} className="inline-flex cursor-pointer items-center gap-2 font-normal">
+                <Checkbox
+                  checked={type === option.value}
+                  onChange={(event) => setType(event.currentTarget.checked ? option.value : undefined)}
+                  disabled={submitting}
+                />
+                {option.label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
         <div className="relative">
           <textarea
             autoFocus
@@ -85,23 +99,6 @@ export function FeedbackDialog({
           <span className="pointer-events-none absolute bottom-2.5 right-3 text-xs tabular-nums text-muted-foreground">
             {content.length}/4000
           </span>
-        </div>
-
-        <div className="grid gap-1.5 text-sm font-medium text-foreground">
-          <div className="flex items-center gap-1.5">
-            <span>反馈类型</span>
-            <span className="font-normal text-muted-foreground">（可选）</span>
-          </div>
-          <Select value={type} onValueChange={(value) => setType(value as FeedbackType)}>
-            <SelectTrigger className="h-10 w-full justify-between border-white/12 bg-black/20 px-3 text-sm hover:bg-black/30 focus-visible:border-cyan/55 focus-visible:ring-2 focus-visible:ring-cyan/15">
-              <SelectValue placeholder="请选择反馈类型" />
-            </SelectTrigger>
-            <SelectContent className="z-[80] border-white/12 bg-[#141821] text-foreground">
-              <SelectItem value="bug">问题反馈</SelectItem>
-              <SelectItem value="feature">功能建议</SelectItem>
-              <SelectItem value="other">其他</SelectItem>
-            </SelectContent>
-          </Select>
         </div>
 
         {error ? <p className="text-sm font-medium text-destructive">{error}</p> : null}

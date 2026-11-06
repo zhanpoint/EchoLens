@@ -2,7 +2,7 @@ import { z } from "zod";
 import { requireUser } from "@/app/api/auth/_shared";
 import { fetchAuthorVideos, resolveAuthorId } from "@/lib/batch/author-videos";
 import { PlatformSchema } from "@/lib/batch/contracts";
-import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
+import { rejectWithoutInvitation } from "@/app/api/douyin/_account-services";
 import { DouyinApiError } from "@/lib/douyin/web-client";
 import { toDouyinApiErrorResponse } from "@/app/api/douyin/_credential";
 import { OpenApiPlatformCooldownError } from "@/lib/open-api/platform-request-policy";
@@ -19,10 +19,8 @@ export async function POST(request: Request) {
   const parsed = Schema.safeParse(await request.json().catch(() => null));
   if (!parsed.success)
     return Response.json({ error: parsed.error.issues[0]?.message || "用户主页或分页参数无效。" }, { status: 400 });
-  if (parsed.data.platform === "douyin") {
-    const disabled = rejectDisabledDouyinAccountServices(user);
-    if (disabled) return disabled;
-  }
+  const disabled = rejectWithoutInvitation(user);
+  if (disabled) return disabled;
   try {
     const authorId = await resolveAuthorId(
       parsed.data.platform,

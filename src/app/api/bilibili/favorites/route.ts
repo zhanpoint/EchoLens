@@ -3,6 +3,7 @@ import { requireUser } from "@/app/api/auth/_shared";
 import { readUsableBilibiliCookie } from "@/lib/bilibili/account";
 import { BilibiliFavoriteError, collectBilibiliFavorites } from "@/lib/bilibili/favorites";
 import { readUserSetting } from "@/lib/user-settings";
+import { rejectWithoutInvitation } from "@/app/api/douyin/_account-services";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -10,6 +11,8 @@ export const maxDuration = 300;
 export async function POST(request: Request) {
   const user = await requireUser(request);
   if (user instanceof NextResponse) return user;
+  const disabled = rejectWithoutInvitation(user);
+  if (disabled) return disabled;
 
   const settings = await readUserSetting(user.id, "bilibili");
   const cookie = readUsableBilibiliCookie(settings);

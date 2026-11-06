@@ -9,6 +9,13 @@ type AccountServicesUser = {
   douyinAccountServicesEnabled?: boolean;
 };
 
+export function rejectWithoutInvitation(user: AccountServicesUser): NextResponse | null {
+  return user.douyinAccountServicesEnabled === true ? null : NextResponse.json(
+    { code: "INVITATION_REQUIRED", error: "请先输入邀请码开通此功能。" },
+    { status: 403 },
+  );
+}
+
 export function rejectDisabledDouyinAccountServices(user: AccountServicesUser): NextResponse | null {
   return canUseDouyinAccountServices(user)
     ? null

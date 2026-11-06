@@ -2,6 +2,7 @@ import { requireUser } from "@/app/api/auth/_shared";
 import { CreateBatchSchema } from "@/lib/batch/contracts";
 import { createBatch, listBatches } from "@/lib/batch/db";
 import { startBatchWorker } from "@/lib/batch/worker";
+import { rejectWithoutInvitation } from "@/app/api/douyin/_account-services";
 
 export const runtime = "nodejs";
 export async function GET(request: Request) {
@@ -12,6 +13,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const user = await requireUser(request);
   if (user instanceof Response) return user;
+  const disabled = rejectWithoutInvitation(user);
+  if (disabled) return disabled;
   const parsed = CreateBatchSchema.safeParse(
     await request.json().catch(() => null),
   );

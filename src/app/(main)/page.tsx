@@ -1254,7 +1254,7 @@ function useDouyinAccountServices(): [PublicFeatures, () => Promise<void>] {
 }
 
 export default function HomePage() {
-  const [{ douyinAccountServicesEnabled, invitationRedeemed }, refreshAccountServices] = useDouyinAccountServices();
+  const [{ invitationRedeemed }, refreshAccountServices] = useDouyinAccountServices();
   const router = useRouter();
   const [initialSession] = useState(() => createWorkflowSession());
   const [activeSessionId, setActiveSessionId] = useState(initialSession.historyRecordId);
@@ -2539,7 +2539,7 @@ export default function HomePage() {
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
           activeId={activeSidebarId}
-          douyinAccountServicesEnabled={douyinAccountServicesEnabled}
+          invitationRedeemed={invitationRedeemed}
           entries={sidebarEntries}
           isDrawerOpen={historyDrawerOpen}
           isOpen={historySidebarOpen}
@@ -2837,7 +2837,7 @@ export default function HomePage() {
                   <WorkDownloadActions
                     key={`${historyDetail?.record.id ?? activeSession.historyRecordId}:${activeWorkKey}`}
                     cachedAssets={cachedAssets}
-                    commentsEnabled={displayWork.source === "bilibili" || douyinAccountServicesEnabled}
+                    commentsEnabled={invitationRedeemed}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
                     onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
@@ -3036,7 +3036,7 @@ function TopToast({
 
 function TranscriptHistorySidebar({
   activeId,
-  douyinAccountServicesEnabled,
+  invitationRedeemed,
   isDrawerOpen,
   isLoading,
   isOpen,
@@ -3056,7 +3056,7 @@ function TranscriptHistorySidebar({
   showReturnLive,
 }: {
   activeId?: string;
-  douyinAccountServicesEnabled: boolean;
+  invitationRedeemed: boolean;
   entries: SidebarEntry[];
   isDrawerOpen: boolean;
   isLoading: boolean;
@@ -3167,7 +3167,7 @@ function TranscriptHistorySidebar({
         <Link href="/batch" prefetch={false} className="mt-4 flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-semibold text-foreground transition hover:bg-white/[0.08]">
           <Layers3 className="size-4 shrink-0 text-primary" aria-hidden="true" />博主语料采集
         </Link>
-        {douyinAccountServicesEnabled ? (
+        {invitationRedeemed ? (
         <div className="mt-1 border-t border-white/10 pt-1">
           <Link
             href="/douyin/favorites"
@@ -3295,7 +3295,7 @@ function TranscriptHistorySidebar({
             >
               <Search className="size-4" aria-hidden="true" />
             </button>
-            {douyinAccountServicesEnabled ? (
+            {invitationRedeemed ? (
               <Link
                 href="/douyin/favorites"
                 prefetch={false}

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { logServerError, requireUser } from "@/app/api/auth/_shared";
-import { rejectDisabledDouyinAccountServices } from "@/app/api/douyin/_account-services";
+import { rejectWithoutInvitation } from "@/app/api/douyin/_account-services";
 import { readValidDouyinCredential } from "@/app/api/douyin/_credential";
 import { readUsableBilibiliCookie } from "@/lib/bilibili/account";
 import { resolveBilibiliWork, BilibiliApiError } from "@/lib/bilibili/client";
@@ -40,8 +40,7 @@ export async function GET(request: Request, context: RouteContext) {
   if (!history) {
     return NextResponse.json({ error: "会话不存在。" }, { status: 404 });
   }
-  const source = mediaSourceFromWorkKey(history.workKey);
-  const disabled = source === "douyin" ? rejectDisabledDouyinAccountServices(user) : null;
+  const disabled = rejectWithoutInvitation(user);
   if (disabled) return disabled;
 
   const url = new URL(request.url);
@@ -79,7 +78,7 @@ export async function POST(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "会话不存在。" }, { status: 404 });
   }
   const source = mediaSourceFromWorkKey(history.workKey);
-  const disabled = source === "douyin" ? rejectDisabledDouyinAccountServices(user) : null;
+  const disabled = rejectWithoutInvitation(user);
   if (disabled) return disabled;
 
   const collect = source === "bilibili"

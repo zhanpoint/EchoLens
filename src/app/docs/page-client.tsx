@@ -5,7 +5,7 @@ import { ArrowLeft, Bot, BrainCircuit, Check, ChevronDown, CirclePlay, Copy, Mus
 import * as Select from "@radix-ui/react-select";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { OPEN_API_ENDPOINTS, type OpenApiEndpoint, type OpenApiVariant } from "@/lib/open-api/spec";
 
 type DocsSection = "api" | "mcp" | "skill";
@@ -146,9 +146,18 @@ export function DocsPage({ initialSection, openApiBaseUrl }: { initialSection?: 
   const openApiUrl = `${openApiBaseUrl}/api/open`;
   const [activeSection, setActiveSection] = useState<DocsSection>(SECTION_ALIASES[initialSection ?? ""] ?? "api");
   const [activeAnchor, setActiveAnchor] = useState<DocsAnchor>(SECTION_ANCHORS[SECTION_ALIASES[initialSection ?? ""] ?? "api"]);
+  const contentRef = useRef<HTMLElement>(null);
 
   function scrollToAnchor(anchor: DocsAnchor) {
-    window.requestAnimationFrame(() => document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    window.requestAnimationFrame(() => {
+      const content = contentRef.current;
+      const target = document.getElementById(anchor);
+      if (!content || !target) return;
+      content.scrollTo({
+        top: content.scrollTop + target.getBoundingClientRect().top - content.getBoundingClientRect().top - 24,
+        behavior: "smooth",
+      });
+    });
   }
 
   function selectSection(section: DocsSection) {
@@ -202,9 +211,9 @@ export function DocsPage({ initialSection, openApiBaseUrl }: { initialSection?: 
   );
 
   return (
-    <main className="min-h-dvh overflow-x-hidden bg-background text-foreground">
-      <header className="sticky top-0 z-20 flex h-16 items-center border-b border-white/10 bg-background/95 px-4 backdrop-blur sm:px-6">
-        <div className="mx-auto flex w-full max-w-[88rem] items-center gap-4">
+    <main className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
+      <header className="z-20 flex h-16 shrink-0 items-center border-b border-white/10 bg-background/95 px-4 backdrop-blur sm:px-6">
+        <div className="flex w-full items-center gap-4">
           <Link href="/" className="inline-flex size-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.06] hover:text-foreground" aria-label="返回首页">
             <ArrowLeft className="size-5" aria-hidden="true" />
           </Link>
@@ -212,19 +221,19 @@ export function DocsPage({ initialSection, openApiBaseUrl }: { initialSection?: 
         </div>
       </header>
 
-      <div className="mx-auto grid w-full max-w-[88rem] lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="hidden border-r border-white/10 px-5 py-8 lg:block">
-          <div className="sticky top-[5.5rem]">{navigation}</div>
+      <div className="flex min-h-0 w-full flex-1 flex-col lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
+        <aside className="hidden overflow-y-auto border-r border-white/10 px-5 py-8 lg:block">
+          {navigation}
         </aside>
 
-        <div className="border-b border-white/10 px-4 py-3 lg:hidden">
+        <div className="max-h-[40dvh] shrink-0 overflow-y-auto border-b border-white/10 px-4 py-3 lg:hidden">
           <details className="group">
             <summary className="cursor-pointer list-none text-sm font-semibold text-foreground">文档目录</summary>
             <div className="mt-4">{navigation}</div>
           </details>
         </div>
 
-        <article className="min-w-0 overflow-hidden px-4 py-10 sm:px-8 lg:max-w-4xl lg:px-12 xl:px-16">
+        <article ref={contentRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-10 sm:px-8 lg:w-full lg:px-12 xl:px-16">
           {activeSection === "api" ? <ApiDocs baseUrl={openApiBaseUrl} openApiUrl={openApiUrl} /> : null}
           {activeSection === "mcp" ? <McpDocs baseUrl={openApiBaseUrl} /> : null}
           {activeSection === "skill" ? <SkillDocs baseUrl={openApiBaseUrl} /> : null}
