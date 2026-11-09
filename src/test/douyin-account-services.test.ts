@@ -10,6 +10,8 @@ describe("Douyin account services switch", () => {
   });
 
   it("enables only the explicit true value", () => {
+    delete process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED;
+    expect(isDouyinAccountServicesEnabled()).toBe(true);
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "TRUE";
     expect(isDouyinAccountServicesEnabled()).toBe(true);
 

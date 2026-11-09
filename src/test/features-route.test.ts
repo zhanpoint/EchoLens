@@ -32,6 +32,7 @@ describe("public feature status route", () => {
     expect(await response.json()).toEqual({
       douyinAccountServicesEnabled: true,
       invitationRedeemed: true,
+      invitationRequired: true,
     });
   });
 
@@ -49,6 +50,7 @@ describe("public feature status route", () => {
     expect(await response.json()).toEqual({
       douyinAccountServicesEnabled: false,
       invitationRedeemed: false,
+      invitationRequired: true,
     });
   });
 
@@ -61,6 +63,7 @@ describe("public feature status route", () => {
     expect(await response.json()).toEqual({
       douyinAccountServicesEnabled: true,
       invitationRedeemed: false,
+      invitationRequired: false,
     });
   });
 });

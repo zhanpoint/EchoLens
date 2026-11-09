@@ -55,7 +55,8 @@ describe("douyin favorites route", () => {
     process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "true";
   });
 
-  it("rejects users without an invitation even when globally enabled", async () => {
+  it("rejects users without an invitation when global access is disabled", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     requireUserMock.mockResolvedValue({ email: "admin@example.com", id: "admin-1", username: "timesea" });
     const response = await POST(new Request("https://echolens.test/api/douyin/favorites", { method: "POST" }));
     expect(response.status).toBe(403);

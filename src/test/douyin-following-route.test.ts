@@ -54,6 +54,7 @@ describe("douyin following route", () => {
   });
 
   it("rejects users without an invitation before reading credentials", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     const response = await POST(new Request("https://echolens.test/api/douyin/following", { method: "POST" }));
     expect(response.status).toBe(403);

@@ -139,6 +139,7 @@ type ApiPayload = ApiError | Record<string, unknown>;
 type PublicFeatures = {
   douyinAccountServicesEnabled: boolean;
   invitationRedeemed: boolean;
+  invitationRequired: boolean;
 };
 type SegmentTranslation = {
   error?: string;
@@ -1217,6 +1218,7 @@ function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
 const CLOSED_ACCOUNT_SERVICES: PublicFeatures = {
   douyinAccountServicesEnabled: false,
   invitationRedeemed: false,
+  invitationRequired: false,
 };
 
 async function readPublicFeatures(): Promise<PublicFeatures> {
@@ -1227,6 +1229,7 @@ async function readPublicFeatures(): Promise<PublicFeatures> {
     return {
       douyinAccountServicesEnabled: payload.douyinAccountServicesEnabled === true,
       invitationRedeemed: payload.invitationRedeemed === true,
+      invitationRequired: payload.invitationRequired === true,
     };
   } catch {
     return CLOSED_ACCOUNT_SERVICES;
@@ -1254,7 +1257,7 @@ function useDouyinAccountServices(): [PublicFeatures, () => Promise<void>] {
 }
 
 export default function HomePage() {
-  const [{ invitationRedeemed }, refreshAccountServices] = useDouyinAccountServices();
+  const [{ invitationRedeemed, invitationRequired, douyinAccountServicesEnabled }, refreshAccountServices] = useDouyinAccountServices();
   const router = useRouter();
   const [initialSession] = useState(() => createWorkflowSession());
   const [activeSessionId, setActiveSessionId] = useState(initialSession.historyRecordId);
@@ -2539,7 +2542,8 @@ export default function HomePage() {
       <div className="relative z-10 flex h-full w-full min-w-0 gap-0 overflow-hidden">
         <TranscriptHistorySidebar
           activeId={activeSidebarId}
-          invitationRedeemed={invitationRedeemed}
+          invitationRedeemed={douyinAccountServicesEnabled}
+          invitationRequired={invitationRequired}
           entries={sidebarEntries}
           isDrawerOpen={historyDrawerOpen}
           isOpen={historySidebarOpen}
@@ -2837,7 +2841,7 @@ export default function HomePage() {
                   <WorkDownloadActions
                     key={`${historyDetail?.record.id ?? activeSession.historyRecordId}:${activeWorkKey}`}
                     cachedAssets={cachedAssets}
-                    commentsEnabled={invitationRedeemed}
+                    commentsEnabled={douyinAccountServicesEnabled}
                     historyRecordId={historyDetail?.record.id ?? activeSession.historyRecordId}
                     onRetryAsset={(asset) => retryAsset(activeWorkKey, asset)}
                     work={displayWork}
@@ -3037,6 +3041,7 @@ function TopToast({
 function TranscriptHistorySidebar({
   activeId,
   invitationRedeemed,
+  invitationRequired,
   isDrawerOpen,
   isLoading,
   isOpen,
@@ -3057,6 +3062,7 @@ function TranscriptHistorySidebar({
 }: {
   activeId?: string;
   invitationRedeemed: boolean;
+  invitationRequired: boolean;
   entries: SidebarEntry[];
   isDrawerOpen: boolean;
   isLoading: boolean;
@@ -3235,14 +3241,14 @@ function TranscriptHistorySidebar({
           <MessageCircle className="size-3.5 shrink-0" aria-hidden="true" />
           反馈
         </button>
-        <button
+        {invitationRequired ? <button
           type="button"
           onClick={onOpenInvitation}
           className="group mt-1 flex h-8 w-full items-center gap-2.5 border-t border-white/8 px-2.5 pt-1 text-left text-xs font-medium text-muted-foreground transition duration-150 hover:text-cyan focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35"
         >
           <KeyRound className="size-3.5 shrink-0 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
           输入邀请码
-        </button>
+        </button> : null}
       </div>
     </div>
   );
@@ -3324,7 +3330,7 @@ function TranscriptHistorySidebar({
               >
                 <MessageCircle className="size-4" aria-hidden="true" />
               </button>
-              <button
+              {invitationRequired ? <button
                 type="button"
                 onClick={onOpenInvitation}
                 className="group inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition duration-150 hover:bg-cyan/[0.1] hover:text-cyan focus-visible:bg-cyan/[0.1] focus-visible:text-cyan focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/35 active:scale-90"
@@ -3332,7 +3338,7 @@ function TranscriptHistorySidebar({
                 title="输入邀请码"
               >
                 <KeyRound className="size-4 transition-transform duration-150 group-hover:-rotate-12 group-hover:scale-110" aria-hidden="true" />
-              </button>
+              </button> : null}
             </div>
           </div>
         )}

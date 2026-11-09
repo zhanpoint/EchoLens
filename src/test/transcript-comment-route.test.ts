@@ -63,6 +63,7 @@ describe("transcript comment route", () => {
   });
 
   it("rejects reads and collection without an invitation before credential access", async () => {
+    process.env.DOUYIN_ACCOUNT_SERVICES_ENABLED = "false";
     requireUserMock.mockResolvedValue({ email: "test@example.com", id: "user-1", username: "test" });
     const request = new Request("https://echolens.test/api/transcript-history/history-1/comments");
     const [getResponse, postResponse] = await Promise.all([
