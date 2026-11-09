@@ -240,14 +240,22 @@ async function createSession(
     // Attach rejection handling before navigation can fail.
     void signedRequest.catch(() => undefined);
     // This authenticated entry emits protected requests; the public homepage may not.
-    await page.goto("https://www.douyin.com/user/self", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
+    try {
+      await page.goto("https://www.douyin.com/user/self", {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+    } catch {
+      throw new DouyinPageBridgeError(
+        "无法连接抖音网页，请检查服务端网络与浏览器代理配置；无需重新保存访问凭证。",
+      );
+    }
     await signedRequest;
     return { context, page };
-  } catch {
+  } catch (error) {
     await context.close();
+    signal.throwIfAborted();
+    if (error instanceof DouyinPageBridgeError) throw error;
     throw new DouyinPageBridgeError(
       "抖音网页安全会话未就绪，请在浏览器确认能访问该主页、完成验证后更新访问凭证。",
     );
@@ -261,6 +269,11 @@ async function getBrowser(): Promise<Browser> {
   const pending = chromium
     .launch({
       headless: true,
+      // Backend traffic must not inherit an interactive desktop's proxy routing.
+      // Use an explicit proxy when the deployment requires one.
+      ...(process.env.DOUYIN_BROWSER_PROXY?.trim()
+        ? { proxy: { server: process.env.DOUYIN_BROWSER_PROXY.trim() } }
+        : { args: ["--no-proxy-server"] }),
       ...(process.env.DOUYIN_BROWSER_EXECUTABLE
         ? { executablePath: process.env.DOUYIN_BROWSER_EXECUTABLE }
         : process.platform === "win32"

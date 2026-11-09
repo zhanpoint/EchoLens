@@ -57,6 +57,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const s of (
     globalThis as Globals
@@ -70,6 +71,33 @@ const input = {
   params: { count: 18 },
 };
 describe("Douyin page SDK sessions", () => {
+  it("uses direct networking by default instead of inheriting the desktop proxy", async () => {
+    vi.stubEnv("DOUYIN_BROWSER_PROXY", "");
+    const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+    await requestDouyinPage(input);
+    expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ args: ["--no-proxy-server"] }));
+  });
+  it("uses the explicitly configured deployment proxy", async () => {
+    vi.stubEnv("DOUYIN_BROWSER_PROXY", "http://127.0.0.1:7897");
+    const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+    await requestDouyinPage(input);
+    const options = mocks.launch.mock.calls[0][0];
+    expect(options.proxy).toEqual({ server: "http://127.0.0.1:7897" });
+    expect(options.args).toBeUndefined();
+  });
+  it("reports navigation failure without blaming credentials and releases the failed session", async () => {
+    const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+    await requestDouyinPage(input);
+    mocks.contexts[0].page.waitForResponse.mockRejectedValueOnce(new Error("failed"));
+    await expect(requestDouyinPage(input)).rejects.toThrow();
+    mocks.newContext.mockImplementationOnce(async () => {
+      const context = mocks.contexts[0];
+      context.page.goto.mockRejectedValueOnce(new Error("net::ERR_CONNECTION_CLOSED"));
+      return { ...context, newPage: async () => context.page };
+    });
+    await expect(requestDouyinPage(input)).rejects.toThrow("无需重新保存访问凭证");
+    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(0);
+  });
   it("reuses the browser but isolates different credentials and keeps cookies off disk", async () => {
     const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
     await requestDouyinPage(input);
