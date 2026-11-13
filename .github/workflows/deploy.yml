@@ -178,14 +178,15 @@ jobs:
             exit 1
           fi
 
-          # Provisioning may leave this secret file owned by root. Compose reads
-          # it as the SSH user, so repair ownership without making secrets public.
+          # Compose reads secrets as the SSH user. Use the existing Docker admin
+          # access to repair a root-provisioned file without requiring sudo.
           if [ ! -r .env ]; then
             stat -c 'Environment file permissions: %U:%G %a' .env
-            if ! sudo -n chown "$(id -u):$(id -g)" -- .env; then
-              echo "Deployment user cannot read .env or repair its ownership. Assign this file to the SSH deployment user with mode 600." >&2
-              exit 1
-            fi
+            docker run --rm --pull=never --network none --read-only \
+              --cap-drop ALL --cap-add CHOWN \
+              --mount "type=bind,src=$PWD/.env,dst=/environment" \
+              --entrypoint chown postgres:17-alpine \
+              "$(id -u):$(id -g)" /environment
           fi
           chmod 600 .env
           if [ ! -r .env ]; then
