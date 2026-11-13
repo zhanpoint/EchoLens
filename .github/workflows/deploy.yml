@@ -178,8 +178,18 @@ jobs:
             exit 1
           fi
 
-          if ! grep -Eq '^POSTGRES_PASSWORD=.+' .env; then
-            echo "Missing POSTGRES_PASSWORD in $DEPLOY_PATH/.env. Set it before deploying PostgreSQL." >&2
+          # Provisioning may leave this secret file owned by root. Compose reads
+          # it as the SSH user, so repair ownership without making secrets public.
+          if [ ! -r .env ]; then
+            stat -c 'Environment file permissions: %U:%G %a' .env
+            if ! sudo -n chown "$(id -u):$(id -g)" -- .env; then
+              echo "Deployment user cannot read .env or repair its ownership. Assign this file to the SSH deployment user with mode 600." >&2
+              exit 1
+            fi
+          fi
+          chmod 600 .env
+          if [ ! -r .env ]; then
+            echo "Environment file is still unreadable by the deployment user." >&2
             exit 1
           fi
 
@@ -196,6 +206,8 @@ jobs:
             docker compose --env-file .env --env-file .deploy.env -f compose.yml "$@"
           }
 
+          # Validate with the same parser used for deployment, without printing secrets.
+          compose config --quiet
           compose pull
           compose up -d --remove-orphans
 
