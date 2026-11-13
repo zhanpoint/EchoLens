@@ -64,6 +64,24 @@ export class BilibiliFavoriteError extends Error {
   }
 }
 
+export async function verifyBilibiliFavoritesAccess(cookie: string, mid: number): Promise<void> {
+  const url = new URL(COLLECTED_FOLDER_URL);
+  url.searchParams.set("up_mid", String(mid));
+  url.searchParams.set("pn", "1");
+  url.searchParams.set("ps", "1");
+  url.searchParams.set("platform", "web");
+  url.searchParams.set("web_location", "333.1387");
+  const payload = await requestJson(url, {
+    accept: "application/json",
+    cookie,
+    referer: "https://www.bilibili.com/",
+  });
+  const data = readRecord(payload.data);
+  if (!data || (data.list !== null && !Array.isArray(data.list))) {
+    throw new BilibiliFavoriteError("Bilibili 收藏接口响应异常。", "UPSTREAM_ERROR");
+  }
+}
+
 export async function collectBilibiliFavorites(
   settings: BilibiliFavoriteSettings,
 ): Promise<BilibiliFavoritesSnapshot> {
@@ -267,7 +285,7 @@ async function requestJson(url: URL, headers: Record<string, string>): Promise<R
   }
   const payload = readRecord(await response.json().catch(() => null));
   if (!response.ok || !payload) {
-    throw new BilibiliFavoriteError("Bilibili 收藏接口响应异常。", "UPSTREAM_ERROR");
+    throw new BilibiliFavoriteError(`Bilibili 收藏接口请求失败：HTTP ${response.status}`, "UPSTREAM_ERROR");
   }
   if (payload.code !== 0) {
     if (payload.code === -101) {

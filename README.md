@@ -9,7 +9,7 @@
 支持抖音与 Bilibili · 视频解析 · 语音转录 · AI 总结与翻译
 
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522.3-339933?logo=nodedotjs&logoColor=white)](package.json)
-[![License](https://img.shields.io/badge/License-PolyForm_Noncommercial-6957a5)](LICENSE.md)
+[![License](https://img.shields.io/badge/License-GPL--3.0-6957a5)](LICENSE.md)
 
 [功能](#功能) · [快速开始](#快速开始) · [工具集成](#工具集成) · [架构与部署](#架构与部署) · [许可](#许可)
 
@@ -28,7 +28,7 @@
 | 提炼与翻译 | 基于转录生成总结、翻译或其他内容，管理常用提示词 |
 | 研究创作者 | 获取可见作品，按日期、关键词或标签筛选，批量转录并导出语料 |
 | 继续此前的工作 | 查看和管理历史记录，暂停、继续或重试批量任务 |
-| 接入自己的工具 | 通过 API、CLI、MCP 或 Skill 使用媒体解析和转录能力 |
+| 接入自己的工具 | 通过 API、MCP 或 Skill 使用媒体解析和转录能力 |
 
 <details>
 <summary><strong>查看博主语料采集界面</strong></summary>
@@ -70,7 +70,7 @@ Windows 可使用已安装的 Edge；其他环境可运行 `npx playwright insta
 
 ## 工具集成
 
-在「设置 → API 访问令牌」创建令牌，即可通过 HTTP 接口调用媒体解析和转录能力，也可以使用 [MCP 服务](packages/echolens-mcp/bin/echolens-mcp.mjs)接入支持 MCP 的客户端。接口、CLI、MCP 和 Skill 的使用说明见运行中的 [应用文档](http://localhost:3000/docs)。
+在「设置 → API 访问令牌」创建令牌，即可通过 HTTP 接口调用媒体解析和转录能力，也可以使用 [MCP 服务](packages/echolens-mcp/bin/echolens-mcp.mjs)接入支持 MCP 的客户端。API、MCP 和 Skill 的使用说明见运行中的 [应用文档](http://localhost:3000/docs)。
 
 ## 架构与部署
 
@@ -112,6 +112,6 @@ flowchart LR
 
 ## 许可
 
-本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE.md)，允许协议范围内的非商业使用、研究和修改，不授权商业用途。该许可不是 OSI 认可的开源许可证；第三方依赖遵循各自协议。
+本项目采用 [GNU General Public License v3.0](LICENSE.md)（`GPL-3.0-only`）。你可以在遵守协议的前提下使用、修改和分发本项目，包括商业用途。第三方依赖及所处理内容的权利遵循各自的许可和授权。
 
-Required Notice: Copyright 2026 zhanpoint.
+Copyright 2026 zhanpoint.

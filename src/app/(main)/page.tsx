@@ -122,6 +122,7 @@ import { AssetPreviewDialog } from "@/components/asset-preview-dialog";
 import { InvitationDialog } from "@/components/invitation-dialog";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { NetworkRetryButton } from "@/components/network-retry-button";
+import { ResizableSidebar } from "@/components/resizable-sidebar";
 import {
   NETWORK_RETRY_ERROR_CODE,
   NETWORK_RETRY_ERROR_MESSAGE,
@@ -2294,7 +2295,7 @@ export default function HomePage() {
 
   function detectInput() {
     if (!hasAcceptedUsage) {
-      setError("请先确认仅用于个人学习和非商业用途，并尊重原作者版权。");
+      setError("请先确认拥有相关内容的合法使用授权，并尊重原作者版权。");
       return;
     }
     if (!ensureAuthenticated()) {
@@ -2323,7 +2324,7 @@ export default function HomePage() {
       window.localStorage.removeItem(USAGE_CONSENT_STORAGE_KEY);
     }
     window.dispatchEvent(new Event(USAGE_CONSENT_EVENT));
-    if (value && error === "请先确认仅用于个人学习和非商业用途，并尊重原作者版权。") {
+    if (value && error === "请先确认拥有相关内容的合法使用授权，并尊重原作者版权。") {
       setError(null);
     }
   }
@@ -2714,7 +2715,7 @@ export default function HomePage() {
               </span>
             </span>
             <span id="usage-consent-description" className="mobile-readable min-w-0 flex-1 text-[13px] leading-5 text-muted-foreground">
-              我确认仅用于个人学习和非商业用途，并尊重原作者版权；已阅读并同意
+              我确认拥有相关内容的合法使用授权，并尊重原作者版权；已阅读并同意
               <Link
                 href="/legal"
                 className="mx-1 font-semibold text-cyan underline decoration-cyan/50 underline-offset-4 transition hover:text-amber hover:decoration-amber"
@@ -3255,12 +3256,7 @@ function TranscriptHistorySidebar({
 
   return (
     <>
-      <aside
-        className={cn(
-          "hidden h-full shrink-0 border-r border-white/10 bg-background/90 backdrop-blur md:block",
-          isOpen ? "w-52" : "w-12",
-        )}
-      >
+      <ResizableSidebar open={isOpen}>
         {isOpen ? content : (
           <div className="flex h-full w-full flex-col items-center gap-2.5 py-2">
             <button
@@ -3342,7 +3338,7 @@ function TranscriptHistorySidebar({
             </div>
           </div>
         )}
-      </aside>
+      </ResizableSidebar>
       {isDrawerOpen ? (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm md:hidden">
           <aside className="h-full w-[min(19rem,86vw)] border-r border-white/12 bg-background shadow-2xl shadow-black/50">

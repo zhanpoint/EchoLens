@@ -1,7 +1,8 @@
 import QRCode from "qrcode";
 import { fetchWithRetry } from "@/lib/http/retry";
 import { upsertUserSetting } from "@/lib/user-settings";
-import { validateBilibiliCookie } from "./client";
+import { BilibiliApiError, validateBilibiliCookie } from "./client";
+import { BilibiliFavoriteError, verifyBilibiliFavoritesAccess } from "./favorites";
 
 const QR_CODE_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
 const QR_CODE_POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
@@ -133,9 +134,20 @@ async function validateLoginCookie(cookie: string): Promise<string | undefined> 
     if (!status.isLogin) {
       throw new BilibiliCredentialError("Bilibili Cookie 未登录或已过期。", "LOGIN_REQUIRED");
     }
+    if (!status.mid) {
+      throw new BilibiliCredentialError("Bilibili 登录接口未返回用户 ID，无法验证账号访问能力。", "UPSTREAM_ERROR");
+    }
+    await verifyBilibiliFavoritesAccess(cookie, status.mid);
     return status.username;
   } catch (error) {
     if (error instanceof BilibiliCredentialError) throw error;
+    if ((error instanceof BilibiliApiError && error.code === "BILIBILI_-101") ||
+        (error instanceof BilibiliFavoriteError && error.code === "LOGIN_REQUIRED")) {
+      throw new BilibiliCredentialError("Bilibili Cookie 未登录或已过期。", "LOGIN_REQUIRED");
+    }
+    if (error instanceof BilibiliApiError || error instanceof BilibiliFavoriteError) {
+      throw new BilibiliCredentialError(`Bilibili 凭证可用性验证未通过：${error.message}`, "UPSTREAM_ERROR");
+    }
     throw new BilibiliCredentialError("Bilibili Cookie 验证失败，请稍后重试。", "UPSTREAM_ERROR");
   }
 }

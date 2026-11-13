@@ -1,6 +1,6 @@
 # 参与贡献
 
-欢迎改进 EchoLens 的解析、转录、AI 处理、采集与工具集成。参与前请阅读 [非商业许可](LICENSE.md) 和 [README 配置说明](README.md#配置)。
+欢迎改进 EchoLens 的解析、转录、AI 处理、采集与工具集成。参与前请阅读 [GPL-3.0 许可](LICENSE.md) 和 [README 快速开始](README.md#快速开始)。
 
 ## 开发流程
 

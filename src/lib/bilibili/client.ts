@@ -277,12 +277,14 @@ function isDefaultDashOptions(options: {
 
 export async function validateBilibiliCookie(cookie: string): Promise<{
   isLogin: boolean;
+  mid?: number;
   username?: string;
 }> {
   const payload = await requestJson(NAV_URL, cookie);
   const data = asRecord(payload.data);
   return {
     isLogin: data?.isLogin === true,
+    mid: readPositiveInteger(data?.mid),
     username: readString(data?.uname),
   };
 }

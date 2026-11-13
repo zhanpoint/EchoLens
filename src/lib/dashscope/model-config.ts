@@ -39,7 +39,6 @@ export function readEnvironmentDashScopeModelIds(): EchoLensDashScopeModelIds {
     summary: readRequiredEnv("DASHSCOPE_SUMMARY_MODEL"),
   };
 }
-
 export const DASHSCOPE_MODEL_METADATA: Record<DashScopeModelPurpose, { label: string }> = {
   asr: { label: "语音识别模型" },
   translation: { label: "翻译模型" },
