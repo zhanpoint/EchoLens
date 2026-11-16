@@ -32,8 +32,8 @@ services:
     image: ${ECHOLENS_IMAGE:?ECHOLENS_IMAGE is required}
     container_name: echolens
     restart: unless-stopped
-    mem_limit: 768m
-    memswap_limit: 768m
+    mem_limit: ${ECHOLENS_MEMORY_LIMIT:-1536m}
+    memswap_limit: ${ECHOLENS_MEMORY_LIMIT:-1536m}
     pids_limit: 256
     init: true
     env_file:
@@ -59,8 +59,10 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
     read_only: true
+    volumes:
+      - echolens-temporary:/tmp
     tmpfs:
-      - /tmp:mode=1777
+      - /app/.next/cache:uid=1001,gid=1001,mode=0755,size=128m
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -77,3 +79,4 @@ services:
 
 volumes:
   echolens-postgres:
+  echolens-temporary:

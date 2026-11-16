@@ -7,16 +7,20 @@ import {
   type Page,
 } from "playwright";
 
-const IDLE_MS = 120_000;
-const MAX_SESSIONS = 4;
+const IDLE_MS = 15_000;
+const MAX_SESSIONS = 2;
+const MAX_PENDING = 8;
+const MAX_SESSION_MS = 5 * 60_000;
 type Session = {
+  createdAt: number;
+  closing?: Promise<void>;
   controller: AbortController;
   ready: Promise<{ context: BrowserContext; page: Page }>;
   tail: Promise<void>;
   pending: number;
   timer?: ReturnType<typeof setTimeout>;
 };
-type State = { browser?: Promise<Browser>; sessions: Map<string, Session> };
+type State = { browser?: Promise<Browser>; closing?: Promise<void>; sessions: Map<string, Session> };
 const globals = globalThis as typeof globalThis & {
   __douyinPageBridge?: State;
 };
@@ -48,6 +52,10 @@ export async function requestDouyinPage(input: {
   // Credentials remain in memory in isolated browser contexts; never use a shared profile.
   const key = createHash("sha256").update(input.cookie).digest("hex");
   let session = state.sessions.get(key);
+  if (session && Date.now() - session.createdAt >= MAX_SESSION_MS && session.pending === 0) {
+    void dispose(key, session);
+    session = undefined;
+  }
   if (!session) {
     if (state.sessions.size >= MAX_SESSIONS) {
       const idle = [...state.sessions].find(([, entry]) => entry.pending === 0);
@@ -58,6 +66,7 @@ export async function requestDouyinPage(input: {
     }
     const controller = new AbortController();
     session = {
+      createdAt: Date.now(),
       controller,
       ready: createSession(input.cookie, controller.signal),
       tail: Promise.resolve(),
@@ -68,6 +77,8 @@ export async function requestDouyinPage(input: {
     void created.ready.catch(() => dispose(key, created));
   }
   const entry = session;
+  if (entry.pending >= MAX_PENDING)
+    throw new DouyinPageBridgeError("抖音请求队列已满，请稍后继续。");
   clearTimeout(entry.timer);
   entry.pending += 1;
   const previous = entry.tail;
@@ -89,9 +100,13 @@ export async function requestDouyinPage(input: {
     // An earlier cancellation/failure may have retired the queued session.
     // This request has not been dispatched yet and can acquire a fresh context.
     if (state.sessions.get(key) !== entry) return requestDouyinPage(input);
+    if (Date.now() - entry.createdAt >= MAX_SESSION_MS) {
+      await dispose(key, entry);
+      return requestDouyinPage(input);
+    }
     active = true;
     input.signal?.addEventListener("abort", abort, { once: true });
-    const { page } = await entry.ready;
+    const { page } = await awaitWithSignal(entry.ready, input.signal);
     try {
       // Pace actual dispatches, not queue admission: otherwise a slow request
       // could build a backlog of already-approved calls that later burst together.
@@ -178,13 +193,19 @@ export async function requestDouyinPage(input: {
     );
   } finally {
     input.signal?.removeEventListener("abort", abort);
-    entry.pending -= 1;
-    release();
-    if (entry.pending === 0 && input.signal?.aborted) void dispose(key, entry);
-    if (entry.pending === 0 && state.sessions.get(key) === entry) {
-      entry.timer = setTimeout(() => void dispose(key, entry), IDLE_MS);
-      entry.timer.unref();
-    }
+    const finish = () => {
+      entry.pending -= 1;
+      release();
+      if (active && entry.pending === 0 && input.signal?.aborted) void dispose(key, entry);
+      if (entry.pending === 0 && state.sessions.get(key) === entry) {
+        entry.timer = setTimeout(() => void dispose(key, entry), IDLE_MS);
+        entry.timer.unref();
+      }
+    };
+    // Cancelled callers return promptly, but their retained queue slots still
+    // count toward capacity until the predecessor has actually finished.
+    if (active) finish();
+    else void previous.then(finish);
   }
 }
 
@@ -192,6 +213,9 @@ async function createSession(
   cookie: string,
   signal: AbortSignal,
 ) {
+  // A replacement must not overlap a renderer that is still shutting down.
+  await state.closing;
+  signal.throwIfAborted();
   const browser = await getBrowser();
   signal.throwIfAborted();
   const context = await browser.newContext({
@@ -296,17 +320,22 @@ async function getBrowser(): Promise<Browser> {
   return pending;
 }
 
-async function dispose(key: string, entry: Session) {
-  if (state.sessions.get(key) !== entry) return;
+function dispose(key: string, entry: Session): Promise<void> {
+  if (entry.closing) return entry.closing;
+  if (state.sessions.get(key) !== entry) return Promise.resolve();
   state.sessions.delete(key);
   clearTimeout(entry.timer);
   entry.controller.abort();
-  await entry.ready
-    .then(({ context }) => context.close())
-    .catch(() => undefined);
-  if (state.sessions.size === 0 && state.browser) {
-    const pending = state.browser;
-    state.browser = undefined;
-    await pending.then((browser) => browser.close()).catch(() => undefined);
-  }
+  const browser = state.sessions.size === 0 ? state.browser : undefined;
+  if (browser) state.browser = undefined;
+  const previous = state.closing;
+  const closing = (async () => {
+    await entry.ready.then(({ context }) => context.close()).catch(() => undefined);
+    if (browser) await browser.then((value) => value.close()).catch(() => undefined);
+    await previous;
+  })();
+  entry.closing = closing;
+  state.closing = closing;
+  void closing.then(() => { if (state.closing === closing) state.closing = undefined; });
+  return closing;
 }

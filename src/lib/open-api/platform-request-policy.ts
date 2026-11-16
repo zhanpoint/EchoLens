@@ -52,6 +52,19 @@ export function createOpenApiPlatformRequestPolicy(
   const sleep = options.sleep ?? delay;
   const schedules = new Map<OpenApiPlatform, PlatformSchedule>();
   const blockedUntil = new Map<string, number>();
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleCleanup(): void {
+    if (cleanupTimer || blockedUntil.size === 0) return;
+    cleanupTimer = setTimeout(() => {
+      cleanupTimer = undefined;
+      const time = now();
+      for (const [key, until] of blockedUntil) {
+        if (until <= time) blockedUntil.delete(key);
+      }
+      scheduleCleanup();
+    }, COOLDOWN_MS);
+    cleanupTimer.unref?.();
+  }
 
   function cooldownKey(platform: OpenApiPlatform, userId: string): string {
     return `${platform}:${createHash("sha256").update(userId).digest("hex")}`;
@@ -90,6 +103,7 @@ export function createOpenApiPlatformRequestPolicy(
         cooldownKey(platform, normalizedUserId),
         now() + COOLDOWN_MS,
       );
+      scheduleCleanup();
       throw cooldown(platform)!;
     }
 

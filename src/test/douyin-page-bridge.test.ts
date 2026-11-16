@@ -57,6 +57,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const s of (
@@ -156,9 +157,9 @@ describe("Douyin page SDK sessions", () => {
   });
   it("limits contexts and evicts idle credentials before opening a new one", async () => {
     const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
-    for (let i = 0; i < 5; i++)
+    for (let i = 0; i < 3; i++)
       await requestDouyinPage({ ...input, cookie: "sessionid=" + i });
-    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(4);
+    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(2);
     expect(mocks.contexts[0].close).toHaveBeenCalledOnce();
   });
   it("bounds a stalled SDK evaluation, closes the failed context, and permits a fresh request", async () => {
@@ -223,14 +224,14 @@ describe("Douyin page SDK sessions", () => {
   });
   it("keeps the context limit when concurrent users replace idle credentials", async () => {
     const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
-    for (let i = 0; i < 4; i++)
+    for (let i = 0; i < 2; i++)
       await requestDouyinPage({ ...input, cookie: "sessionid=" + i });
     await Promise.all(
-      [4, 5].map((i) =>
+      [2, 3].map((i) =>
         requestDouyinPage({ ...input, cookie: "sessionid=" + i }),
       ),
     );
-    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(4);
+    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(2);
     expect(mocks.contexts[0].close).toHaveBeenCalledOnce();
     expect(mocks.contexts[1].close).toHaveBeenCalledOnce();
   });
@@ -262,4 +263,70 @@ describe("Douyin page SDK sessions", () => {
     await requestDouyinPage(input);
     expect(mocks.newContext).toHaveBeenCalledOnce();
   });
+});
+
+it("releases idle contexts and the browser after 15 seconds", async () => {
+  vi.useFakeTimers();
+  const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+  await requestDouyinPage(input);
+  const browser = await mocks.launch.mock.results[0].value;
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(mocks.contexts[0].close).toHaveBeenCalledOnce();
+  expect(browser.close).toHaveBeenCalledOnce();
+});
+it("waits for actual closure before creating replacement renderers", async () => {
+  const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+  await requestDouyinPage(input);
+  await requestDouyinPage({ ...input, cookie: "sessionid=second" });
+  let release!: () => void;
+  mocks.contexts[0].close.mockImplementation(() => new Promise<void>(resolve => { release = resolve; }));
+  const pending = requestDouyinPage({ ...input, cookie: "sessionid=third" });
+  await vi.waitFor(() => expect(release).toBeDefined());
+  expect(mocks.newContext).toHaveBeenCalledTimes(2);
+  release();
+  await pending;
+  expect(mocks.newContext).toHaveBeenCalledTimes(3);
+});
+it("bounds queued requests while an upstream call is stalled", async () => {
+  const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+  await requestDouyinPage(input);
+  let release!: (value: unknown) => void;
+  mocks.contexts[0].page.evaluate.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const first = requestDouyinPage(input);
+  await vi.waitFor(() => expect(release).toBeDefined());
+  const queued = Array.from({ length: 7 }, () => requestDouyinPage(input));
+  await expect(requestDouyinPage(input)).rejects.toThrow("队列已满");
+  release(undefined);
+  await Promise.all([first, ...queued]);
+});
+
+it("keeps cancelled queue slots bounded until the active request completes", async () => {
+  const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+  await requestDouyinPage(input);
+  let release!: (value: unknown) => void;
+  mocks.contexts[0].page.evaluate.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const first = requestDouyinPage(input);
+  await vi.waitFor(() => expect(release).toBeDefined());
+  for (let i = 0; i < 7; i++) {
+    const controller = new AbortController();
+    const request = requestDouyinPage({ ...input, signal: controller.signal });
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+  }
+  await expect(requestDouyinPage(input)).rejects.toThrow("队列已满");
+  release(undefined);
+  await first;
+});
+it("returns all contexts and browsers to zero over repeated idle cycles", async () => {
+  vi.useFakeTimers();
+  const { requestDouyinPage } = await import("@/lib/douyin/page-bridge");
+  for (let i = 0; i < 100; i++) {
+    await requestDouyinPage({ ...input, cookie: "sessionid=" + i });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect((globalThis as Globals).__douyinPageBridge?.sessions.size).toBe(0);
+  }
+  expect(mocks.newContext).toHaveBeenCalledTimes(100);
+  for (const context of mocks.contexts) expect(context.close).toHaveBeenCalledOnce();
+  const browser = await mocks.launch.mock.results[0].value;
+  expect(browser.close).toHaveBeenCalledTimes(100);
 });
