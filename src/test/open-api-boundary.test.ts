@@ -51,6 +51,11 @@ describe("Open API boundary", () => {
     }).success).toBe(false);
   });
 
+  it("rejects user identity overrides from token clients", () => {
+    expect(OpenTranscriptionSchema.safeParse({ input: "https://v.douyin.com/example", userId: "another-user" }).success).toBe(false);
+    expect(OpenMediaResolveSchema.safeParse({ inputs: ["https://v.douyin.com/example"], userId: "another-user" }).success).toBe(false);
+  });
+
   it("requires a bounded list of media links", () => {
     expect(OpenMediaResolveSchema.safeParse({
       inputs: ["https://v.douyin.com/example", "https://b23.tv/example"],

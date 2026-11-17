@@ -1,3 +1,4 @@
+import { readDouyinCredentialState } from "@/lib/douyin/account";
 import {
   BilibiliApiError,
   getBilibiliDashSelection,
@@ -62,7 +63,7 @@ async function resolveOpenMedia(input: {
   const media = await resolveMediaUrl(input.input);
   if (media.source === "douyin") {
     return await resolveDouyinMedia(
-      { finalUrl: media.finalUrl, inputUrl: media.inputUrl },
+      { finalUrl: media.finalUrl, inputUrl: media.inputUrl, userId: input.userId },
       requestPolicy,
     );
   }
@@ -70,11 +71,12 @@ async function resolveOpenMedia(input: {
 }
 
 async function resolveDouyinMedia(
-  input: { finalUrl: string; inputUrl: string },
+  input: { finalUrl: string; inputUrl: string; userId: string },
   requestPolicy: OpenApiPlatformRequestPolicy,
 ): Promise<OpenTranscriptionMedia> {
   const work = await resolveDouyinUrl(input.inputUrl, { finalUrl: input.finalUrl });
-  const lease = await acquireWorkMetadata(work, undefined, requestPolicy);
+  const credential = await readDouyinCredentialState(input.userId);
+  const lease = await acquireWorkMetadata(work, undefined, requestPolicy, credential.cookie);
   try {
     const metadata = lease.metadata;
     const videoUrl = requiredUrl(metadata.videoUrls[0], "抖音视频下载地址");
@@ -83,6 +85,7 @@ async function resolveDouyinMedia(
       mediaId: work.id,
       mediaSource: "douyin",
       sources: metadata.videoUrls,
+      douyinCookie: credential.cookie,
     });
     return {
       audioUrl: audio.url,

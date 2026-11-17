@@ -1,3 +1,4 @@
+vi.mock("@/lib/douyin/account", () => ({ readDouyinCredentialState: vi.fn(async () => ({ cookie: "sessionid=user-private", status: "valid" })) }));
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -29,6 +30,7 @@ vi.mock("@/lib/media/redirect", () => ({
   resolveMediaUrl: mocks.resolveMediaUrl,
 }));
 
+import { readDouyinCredentialState } from "@/lib/douyin/account";
 import { resolveOpenMediaResources } from "@/lib/open-api/media-resource";
 
 describe("open media resource projection", () => {
@@ -78,14 +80,21 @@ describe("open media resource projection", () => {
       { id: "123", kind: "video" },
       undefined,
       expect.any(Object),
+      "sessionid=user-private",
     );
     expect(mocks.ensureOpenAudioCache).toHaveBeenCalledWith({
       durationSeconds: 60,
       mediaId: "123",
       mediaSource: "douyin",
       sources: ["https://douyin.example/video.mp4"],
+      douyinCookie: "sessionid=user-private",
     });
+    expect(readDouyinCredentialState).toHaveBeenCalledWith("user-1");
     expect(release).toHaveBeenCalledOnce();
+    vi.mocked(readDouyinCredentialState).mockResolvedValueOnce({ cookie: "sessionid=second-user", status: "valid", checkedAt: null });
+    await resolveOpenMediaResources({ inputs: ["https://v.douyin.com/example"], userId: "user-2" });
+    expect(readDouyinCredentialState).toHaveBeenLastCalledWith("user-2");
+    expect(mocks.acquireWorkMetadata).toHaveBeenLastCalledWith(expect.anything(), undefined, expect.anything(), "sessionid=second-user");
   });
 
   it("projects Bilibili DASH video and audio URLs", async () => {

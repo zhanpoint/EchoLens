@@ -1,3 +1,4 @@
+import { DouyinMetadataError } from "@/lib/douyin/detail";
 import { AsrQuotaExceededError } from "@/lib/dashscope/asr";
 import {
   NETWORK_RETRY_ERROR_CODE,
@@ -12,6 +13,11 @@ import {
 import { OpenApiPlatformCooldownError } from "@/lib/open-api/platform-request-policy";
 
 export function openApiErrorResponse(error: unknown, fallbackMessage: string): Response {
+  if (error instanceof DouyinMetadataError) {
+    return Response.json({ code: error.code, error: error.message }, {
+      status: error.code === "incomplete_metadata" ? 502 : 422,
+    });
+  }
   if (error instanceof AsrQuotaExceededError) {
     return Response.json(
       { code: "ASR_QUOTA_EXCEEDED", error: error.message },

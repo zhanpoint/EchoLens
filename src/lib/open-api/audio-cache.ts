@@ -21,6 +21,7 @@ export type OpenAudioCacheEntry = {
 
 export async function ensureOpenAudioCache(input: {
   durationSeconds?: number;
+  douyinCookie?: string;
   mediaId: string;
   mediaSource: MediaSourcePlatform;
   sources: readonly string[];
@@ -39,6 +40,7 @@ export async function ensureOpenAudioCache(input: {
 
 async function ensureAudioObject(input: {
   durationSeconds?: number;
+  douyinCookie?: string;
   mediaSource: MediaSourcePlatform;
   objectKey: string;
   sources: readonly string[];
@@ -50,6 +52,7 @@ async function ensureAudioObject(input: {
   const response = await fetchRemoteMedia(input.sources, {
     mediaSource: input.mediaSource,
     signal: input.signal,
+    douyinCookie: input.douyinCookie,
   });
   if (!response.body) throw new Error("媒体下载响应为空。");
 
